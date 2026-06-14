@@ -1,0 +1,29 @@
+{
+  "agentId": "elf-001",
+  "name": "1234",
+  "port": 8081,
+  "avatar": "avatar.png",
+  "userAvatar": "user_avatar.webp",
+  "provider": "llm",
+  "systemPromptPath": "system_prompt.md",
+  "memoryTokenLimit": 8000,
+  "maxIterations": 5,
+  "_ui": {
+    "name": {
+      "label": "Agent 名称",
+      "hint": "显示在前端界面的可读名称"
+    },
+    "systemPrompt": {
+      "label": "系统提示词",
+      "hint": "定义 Agent 的角色和行为方式"
+    },
+    "memoryTokenLimit": {
+      "label": "记忆压缩 Token 上限",
+      "hint": "超过此阈值时触发记忆压缩（建议 4000-16000）"
+    },
+    "maxIterations": {
+      "label": "最大迭代轮数",
+      "hint": "Agent Loop 最大循环次数"
+    }
+  }
+}

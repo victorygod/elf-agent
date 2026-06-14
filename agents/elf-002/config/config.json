@@ -1,0 +1,29 @@
+{
+  "agentId": "elf-002",
+  "name": "代码评审2",
+  "port": 8082,
+  "avatar": "avatar.webp",
+  "userAvatar": "user_avatar.webp",
+  "provider": "llm",
+  "systemPromptPath": "system_prompt.md",
+  "memoryTokenLimit": 8000,
+  "maxIterations": 5,
+  "_ui": {
+    "name": {
+      "label": "Agent 名称",
+      "hint": "显示在前端界面的可读名称，如\"小助手\"\"代码评审\""
+    },
+    "systemPrompt": {
+      "label": "系统提示词",
+      "hint": "定义 Agent 的角色和行为方式"
+    },
+    "memoryTokenLimit": {
+      "label": "记忆压缩 Token 上限",
+      "hint": "超过此阈值时触发记忆压缩（建议 4000-16000）"
+    },
+    "maxIterations": {
+      "label": "最大迭代轮数",
+      "hint": "Agent Loop 最大循环次数"
+    }
+  }
+}
