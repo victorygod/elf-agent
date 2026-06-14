@@ -2,3 +2,4 @@ node_modules/
 logs/
 .DS_Store
 **/api_key.json
+support_model_list.md
