@@ -36,6 +36,24 @@ export function createGatewayApp(pm, chatHistory) {
     res.json(pm.listAgents());
   });
 
+  // POST /agents/rediscover — 重新扫描文件系统，发现新增/变更的 Agent
+  app.post('/agents/rediscover', async (req, res) => {
+    try {
+      const result = pm.rediscoverAgents();
+      // 重新探活所有 Agent 以更新运行状态
+      for (const [id] of pm.agents) {
+        await pm.probeAgent(id);
+      }
+      res.json({
+        agents: pm.listAgents(),
+        discovery: result
+      });
+    } catch (err) {
+      logger.error(`Agent 重新发现失败: ${err.message}`);
+      res.status(500).json({ error: `Failed to rediscover agents: ${err.message}` });
+    }
+  });
+
   // GET /agents/:id — 获取单个 Agent 详情
   app.get('/agents/:id', checkAgentExists, (req, res) => {
     res.json(pm.getAgent(req.params.id));
@@ -102,8 +120,9 @@ export function createGatewayApp(pm, chatHistory) {
     // 向 Agent 发起请求
     const agentUrl = `http://127.0.0.1:${port}/chat`;
 
-    // 用于拼接 assistant 完整回复
+    // 用于拼接 assistant 完整回复和工具调用信息
     let assistantContent = '';
+    let assistantToolCalls = [];
 
     fetch(agentUrl, {
       method: 'POST',
@@ -126,8 +145,8 @@ export function createGatewayApp(pm, chatHistory) {
         reader.read().then(({ done, value }) => {
           if (done) {
             // 流结束，写入 assistant 完整回复到 history
-            if (chatHistory && assistantContent) {
-              chatHistory.addMessage(id, 'assistant', assistantContent);
+            if (chatHistory && (assistantContent || assistantToolCalls.length > 0)) {
+              chatHistory.addMessage(id, 'assistant', assistantContent, assistantToolCalls);
             }
             res.end();
             return;
@@ -156,11 +175,41 @@ export function createGatewayApp(pm, chatHistory) {
                 } catch (e) {
                   // 忽略解析错误
                 }
+              } else if (currentEvent === 'tool_call') {
+                try {
+                  const data = JSON.parse(trimmed.slice(6));
+                  if (data.tool_calls) {
+                    assistantToolCalls.push(...data.tool_calls);
+                  }
+                } catch (e) {
+                  // 忽略解析错误
+                }
               } else if (currentEvent === 'error') {
                 // error 事件也写入已有内容（partial）
-                if (chatHistory && assistantContent) {
-                  chatHistory.addMessage(id, 'assistant', assistantContent);
+                if (chatHistory && (assistantContent || assistantToolCalls.length > 0)) {
+                  chatHistory.addMessage(id, 'assistant', assistantContent, assistantToolCalls);
                   assistantContent = '';  // 避免重复写入
+                  assistantToolCalls = [];
+                }
+              } else if (currentEvent === 'compact') {
+                // 记忆压缩成功事件：写入 history 以便前端展示
+                try {
+                  const compactData = JSON.parse(trimmed.slice(6));
+                  if (chatHistory) {
+                    chatHistory.addMessage(id, 'compact', compactData.summary || '上下文已自动压缩');
+                  }
+                } catch (e) {
+                  // 忽略解析错误
+                }
+              } else if (currentEvent === 'compact_error') {
+                // 记忆压缩失败事件：写入 history 以便前端展示
+                try {
+                  const compactData = JSON.parse(trimmed.slice(6));
+                  if (chatHistory) {
+                    chatHistory.addMessage(id, 'compact_error', compactData.error || '记忆压缩失败');
+                  }
+                } catch (e) {
+                  // 忽略解析错误
                 }
               }
               currentEvent = '';
@@ -173,9 +222,10 @@ export function createGatewayApp(pm, chatHistory) {
         }).catch(err => {
           logger.error(`SSE 透传错误: ${err.message}`);
           // 流错误时也写入已有内容
-          if (chatHistory && assistantContent) {
-            chatHistory.addMessage(id, 'assistant', assistantContent);
+          if (chatHistory && (assistantContent || assistantToolCalls.length > 0)) {
+            chatHistory.addMessage(id, 'assistant', assistantContent, assistantToolCalls);
             assistantContent = '';
+            assistantToolCalls = [];
           }
           try {
             res.write(`event: error\ndata: ${JSON.stringify({ message: err.message })}\n\n`);
@@ -199,9 +249,10 @@ export function createGatewayApp(pm, chatHistory) {
 
     // 客户端断开连接时，写入已有内容
     req.on('close', () => {
-      if (chatHistory && assistantContent) {
-        chatHistory.addMessage(id, 'assistant', assistantContent);
+      if (chatHistory && (assistantContent || assistantToolCalls.length > 0)) {
+        chatHistory.addMessage(id, 'assistant', assistantContent, assistantToolCalls);
         assistantContent = '';
+        assistantToolCalls = [];
       }
     });
   });
@@ -275,13 +326,19 @@ export function createGatewayApp(pm, chatHistory) {
     try {
       const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
-      // 读取 system prompt 文件内容
-      if (raw.systemPromptPath) {
-        const promptPath = path.join(configDir, raw.systemPromptPath);
+      // 读取 prompt 文件内容
+      const promptFileFields = [
+        { pathKey: 'systemPromptPath', contentKey: 'systemPrompt', defaultFile: 'system_prompt.md' },
+        { pathKey: 'prefixPromptPath', contentKey: 'prefix_prompt', defaultFile: 'prefix_prompt.md' },
+        { pathKey: 'suffixPromptPath', contentKey: 'suffix_prompt', defaultFile: 'suffix_prompt.md' },
+      ];
+      for (const { pathKey, contentKey, defaultFile } of promptFileFields) {
+        const fileName = raw[pathKey] || defaultFile;
+        const filePath = path.join(configDir, fileName);
         try {
-          raw.systemPrompt = fs.readFileSync(promptPath, 'utf-8');
+          raw[contentKey] = fs.readFileSync(filePath, 'utf-8');
         } catch (err) {
-          raw.systemPrompt = '';
+          raw[contentKey] = '';
         }
       }
 
@@ -333,10 +390,16 @@ export function createGatewayApp(pm, chatHistory) {
       const configPath = path.join(configDir, 'config.json');
       const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
-      // 展开 systemPrompt
-      if (raw.systemPromptPath) {
-        const promptPath = path.join(configDir, raw.systemPromptPath);
-        try { raw.systemPrompt = fs.readFileSync(promptPath, 'utf-8'); } catch (e) { raw.systemPrompt = ''; }
+      // 展开 prompt 文件内容
+      const promptFileFields = [
+        { pathKey: 'systemPromptPath', contentKey: 'systemPrompt', defaultFile: 'system_prompt.md' },
+        { pathKey: 'prefixPromptPath', contentKey: 'prefix_prompt', defaultFile: 'prefix_prompt.md' },
+        { pathKey: 'suffixPromptPath', contentKey: 'suffix_prompt', defaultFile: 'suffix_prompt.md' },
+      ];
+      for (const { pathKey, contentKey, defaultFile } of promptFileFields) {
+        const fileName = raw[pathKey] || defaultFile;
+        const filePath = path.join(configDir, fileName);
+        try { raw[contentKey] = fs.readFileSync(filePath, 'utf-8'); } catch (e) { raw[contentKey] = ''; }
       }
 
       // 从 api_key.json 读取模型连接配置（单独传递，用于模型选项卡）
@@ -374,12 +437,21 @@ export function createGatewayApp(pm, chatHistory) {
       const existing = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       const update = req.body;
 
-      // 如果更新中包含 systemPrompt，写入 system_prompt.md
-      if (update.systemPrompt !== undefined) {
-        const promptPath = path.join(configDir, 'system_prompt.md');
-        fs.writeFileSync(promptPath, update.systemPrompt, 'utf-8');
-        existing.systemPromptPath = 'system_prompt.md';
-        delete update.systemPrompt;
+      // 如果更新中包含 prompt 内容字段，写入对应的 .md 文件
+      const promptFileMappings = [
+        { contentKey: 'systemPrompt', pathKey: 'systemPromptPath', defaultFile: 'system_prompt.md' },
+        { contentKey: 'prefix_prompt', pathKey: 'prefixPromptPath', defaultFile: 'prefix_prompt.md' },
+        { contentKey: 'suffix_prompt', pathKey: 'suffixPromptPath', defaultFile: 'suffix_prompt.md' },
+      ];
+      for (const { contentKey, pathKey, defaultFile } of promptFileMappings) {
+        if (update[contentKey] !== undefined) {
+          const fileName = existing[pathKey] || defaultFile;
+          const filePath = path.join(configDir, fileName);
+          // 置空时也写入空内容（清空文件），不跳过
+          fs.writeFileSync(filePath, update[contentKey], 'utf-8');
+          existing[pathKey] = fileName;
+          delete update[contentKey];
+        }
       }
 
       // 如果更新中包含 model，将模型连接字段写入 api_key.json（provider 留在 config.json）

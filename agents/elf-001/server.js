@@ -21,51 +21,74 @@ export function createAgentServer(agent, config) {
   const app = express();
   app.use(express.json());
 
-  // 请求队列
-  const requestQueue = [];
+  // 请求队列 + 消息合并
   let isProcessing = false;
+  let pendingMessage = null;       // Agent 忙碌期间积攒的合并消息
+  let pendingResponses = [];       // 等待响应的 res 对象列表
 
   function enqueueRequest(req, res) {
-    requestQueue.push({ req, res });
-    if (!isProcessing) {
-      processNext();
+    if (isProcessing) {
+      // Agent 正忙，合并消息 + 收集 res
+      if (pendingMessage !== null) {
+        pendingMessage += '\n' + req.body.message;
+      } else {
+        pendingMessage = req.body.message;
+      }
+      pendingResponses.push(res);
+    } else {
+      pendingResponses = [res];
+      processRequest(req.body.message);
     }
   }
 
-  async function processNext() {
-    if (requestQueue.length === 0) return;
+  async function processRequest(message) {
     isProcessing = true;
+    const currentResponses = [...pendingResponses];
+    pendingResponses = [];
+    pendingMessage = null;
 
-    const { req, res } = requestQueue.shift();
     try {
-      const stream = agent.receive(req.body.message);
+      const stream = agent.receive(message);
 
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
-      });
+      // 所有等待的 res 都设置 SSE 头
+      for (const r of currentResponses) {
+        r.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive'
+        });
+      }
 
       for await (const event of stream) {
-        res.write(`event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`);
+        const data = `event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`;
+        for (const r of currentResponses) {
+          r.write(data);
+        }
       }
-      res.end();
+      for (const r of currentResponses) {
+        r.end();
+      }
     } catch (err) {
       logger.error(`请求处理失败: ${err.message}`);
-      if (!res.headersSent) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: err.message }));
-      } else {
-        try {
-          res.write(`event: error\ndata: ${JSON.stringify({ message: err.message })}\n\n`);
-          res.end();
-        } catch (e) {
-          // 流可能已关闭
+      for (const r of currentResponses) {
+        if (!r.headersSent) {
+          r.writeHead(500, { 'Content-Type': 'application/json' });
+          r.end(JSON.stringify({ error: err.message }));
+        } else {
+          try {
+            r.write(`event: error\ndata: ${JSON.stringify({ message: err.message })}\n\n`);
+            r.end();
+          } catch (e) {
+            // 流可能已关闭
+          }
         }
       }
     } finally {
       isProcessing = false;
-      processNext();
+      // 处理完检查是否有积攒的消息
+      if (pendingMessage !== null && pendingResponses.length > 0) {
+        processRequest(pendingMessage);
+      }
     }
   }
 

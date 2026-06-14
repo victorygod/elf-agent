@@ -18,6 +18,8 @@ export class MessageManager {
     this.messages = [];
     this.systemPrompt = config.systemPrompt || '';
     this.memoryTokenLimit = config.memoryTokenLimit || 8000;
+    this.prefixPrompt = config.prefixPrompt || '';
+    this.suffixPrompt = config.suffixPrompt || '';
 
     // 持久化：context.json 路径
     this.dataDir = config.dataDir || null;
@@ -43,6 +45,12 @@ export class MessageManager {
     }
     if (config.memoryTokenLimit !== undefined) {
       this.memoryTokenLimit = config.memoryTokenLimit;
+    }
+    if (config.prefixPrompt !== undefined) {
+      this.prefixPrompt = config.prefixPrompt;
+    }
+    if (config.suffixPrompt !== undefined) {
+      this.suffixPrompt = config.suffixPrompt;
     }
   }
 
@@ -76,7 +84,21 @@ export class MessageManager {
 
   getMessagesForLLM() {
     const systemMsg = { role: 'system', content: this.systemPrompt };
-    return [systemMsg, ...this.messages];
+    const msgs = this.messages.map(m => ({ ...m }));
+
+    // 对最后一条 user 消息拼接 prefix_prompt / suffix_prompt
+    const prefix = this.prefixPrompt || '';
+    const suffix = this.suffixPrompt || '';
+    if (prefix || suffix) {
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role === 'user') {
+          msgs[i].content = prefix + msgs[i].content + suffix;
+          break;
+        }
+      }
+    }
+
+    return [systemMsg, ...msgs];
   }
 
   estimateTokens() {
@@ -120,7 +142,7 @@ export class MessageManager {
       return summary;
     } catch (err) {
       logger.error(`记忆压缩失败: ${err.message}`);
-      return null;
+      throw err;
     }
   }
 

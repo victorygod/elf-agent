@@ -48,15 +48,21 @@ export class Config {
       const configPath = path.join(this.configDir, 'config.json');
       const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
-      // 处理 systemPromptPath：读取 system prompt 文件内容
-      if (raw.systemPromptPath) {
-        const promptPath = path.join(this.configDir, raw.systemPromptPath);
+      // 处理 prompt 文件路径：读取对应的文件内容
+      const promptFileFields = [
+        { pathKey: 'systemPromptPath', contentKey: 'systemPrompt', defaultFile: 'system_prompt.md' },
+        { pathKey: 'prefixPromptPath', contentKey: 'prefix_prompt', defaultFile: 'prefix_prompt.md' },
+        { pathKey: 'suffixPromptPath', contentKey: 'suffix_prompt', defaultFile: 'suffix_prompt.md' },
+      ];
+      for (const { pathKey, contentKey, defaultFile } of promptFileFields) {
+        const fileName = raw[pathKey] || defaultFile;
+        const filePath = path.join(this.configDir, fileName);
         try {
-          raw.systemPrompt = fs.readFileSync(promptPath, 'utf-8');
+          raw[contentKey] = fs.readFileSync(filePath, 'utf-8');
         } catch (err) {
           const logger = createLogger('config', logFileName);
-          logger.warn(`无法读取 system prompt 文件: ${promptPath}, ${err.message}`);
-          raw.systemPrompt = '';
+          logger.warn(`无法读取 prompt 文件: ${filePath}, ${err.message}`);
+          raw[contentKey] = '';
         }
       }
 

@@ -119,8 +119,15 @@ export class Agent {
 
     // d. 记忆压缩
     if (this.messageManager.estimateTokens() > this.messageManager.memoryTokenLimit) {
-      yield { event: 'status', data: { state: 'compacting_memory' } };
-      await this.messageManager.compactIfNeeded(this.model);
+      yield { event: 'compact_start', data: {} };
+      try {
+        const summary = await this.messageManager.compactIfNeeded(this.model);
+        if (summary) {
+          yield { event: 'compact', data: { summary: summary.substring(0, 100) } };
+        }
+      } catch (err) {
+        yield { event: 'compact_error', data: { error: err.message || '记忆压缩失败' } };
+      }
     }
 
     // e. done

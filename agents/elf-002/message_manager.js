@@ -120,7 +120,7 @@ export class MessageManager {
       return summary;
     } catch (err) {
       logger.error(`记忆压缩失败: ${err.message}`);
-      return null;
+      throw err;
     }
   }
 

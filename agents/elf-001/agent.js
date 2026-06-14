@@ -81,6 +81,24 @@ export class Agent {
       if (toolCallsResult && toolCallsResult.length > 0) {
         this.messageManager.addAssistantToolCalls(toolCallsResult);
 
+        // 构建工具调用摘要（参数不截断，截断由前端展示时处理）
+        const toolCallsSummary = toolCallsResult.map(tc => {
+          const toolName = tc.function.name;
+          let toolArgs = {};
+          try {
+            toolArgs = JSON.parse(tc.function.arguments || '{}');
+          } catch (e) {
+            toolArgs = {};
+          }
+          return { name: toolName, args: toolArgs };
+        });
+
+        // 发出 tool_call 事件（前端用于渲染工具调用标记）
+        yield {
+          event: 'tool_call',
+          data: { tool_calls: toolCallsSummary }
+        };
+
         for (const tc of toolCallsResult) {
           const toolName = tc.function.name;
           let toolArgs = {};
@@ -119,8 +137,15 @@ export class Agent {
 
     // d. 记忆压缩
     if (this.messageManager.estimateTokens() > this.messageManager.memoryTokenLimit) {
-      yield { event: 'status', data: { state: 'compacting_memory' } };
-      await this.messageManager.compactIfNeeded(this.model);
+      yield { event: 'compact_start', data: {} };
+      try {
+        const summary = await this.messageManager.compactIfNeeded(this.model);
+        if (summary) {
+          yield { event: 'compact', data: { summary: summary.substring(0, 100) } };
+        }
+      } catch (err) {
+        yield { event: 'compact_error', data: { error: err.message || '记忆压缩失败' } };
+      }
     }
 
     // e. done

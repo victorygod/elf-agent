@@ -63,6 +63,8 @@ async function main() {
   const messageManager = new MessageManager({
     systemPrompt: config.get('systemPrompt') || '',
     memoryTokenLimit: config.get('memoryTokenLimit') || 8000,
+    prefixPrompt: config.get('prefix_prompt') || '',
+    suffixPrompt: config.get('suffix_prompt') || '',
     dataDir
   });
 
@@ -84,7 +86,9 @@ async function main() {
         config.load();
         messageManager.updateConfig({
           systemPrompt: config.get('systemPrompt'),
-          memoryTokenLimit: config.get('memoryTokenLimit')
+          memoryTokenLimit: config.get('memoryTokenLimit'),
+          prefixPrompt: config.get('prefix_prompt'),
+          suffixPrompt: config.get('suffix_prompt')
         });
         const newModelConfig = config.getModelConfig();
         if (newModelConfig.provider === 'mock') {

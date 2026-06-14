@@ -17,7 +17,7 @@ import path from 'path';
 const TEMPLATE_PATH = path.join(process.cwd(), 'frontend', 'default-config-ui.html');
 
 /** 不在配置页面展示的字段 */
-const SKIP_KEYS = new Set(['agentId', 'port', 'systemPromptPath', 'avatar', 'userAvatar', '_ui', 'provider']);
+const SKIP_KEYS = new Set(['agentId', 'port', 'systemPromptPath', 'prefixPromptPath', 'suffixPromptPath', 'avatar', 'userAvatar', '_ui', 'provider', 'systemPrompt', 'prefix_prompt', 'suffix_prompt']);
 
 /** 模型字段的 _ui 默认定义 */
 const MODEL_UI_DEFAULTS = {

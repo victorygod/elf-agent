@@ -24,8 +24,8 @@ function extractExtraParams(config) {
   return extra;
 }
 
-/** 默认请求超时：连接 10 秒，整体 120 秒 */
-const DEFAULT_CONNECT_TIMEOUT = 10_000;
+/** 默认请求超时：连接 120 秒，整体 120 秒 */
+const DEFAULT_CONNECT_TIMEOUT = 120_000;
 const DEFAULT_REQUEST_TIMEOUT = 120_000;
 
 export class LLMModel {

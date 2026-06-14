@@ -34,7 +34,7 @@
   <div class="main-area" id="mainArea">
     <!-- 顶部栏 -->
     <div class="top-bar" id="topBar" style="display: none;">
-      <button class="back-btn" id="backBtn" onclick="goBackToList()">←</button>
+      <button class="back-btn" id="backBtn" onclick="goBackToList()"><</button>
       <div class="title" id="topTitle">elf-001</div>
       <div class="actions">
         <button class="btn-icon" id="btnConfig" onclick="openConfig()" title="配置">⚙</button>
@@ -63,11 +63,11 @@
   <div class="config-overlay" id="configOverlay" onclick="closeConfig()"></div>
   <div class="config-panel" id="configPanel">
     <div class="config-header">
+      <button class="config-back-btn" onclick="closeConfig()"><</button>
       <h2>Agent 配置</h2>
       <div class="config-header-actions">
         <button class="btn btn-primary btn-sm" id="cfgBtnStart" onclick="startAgent()">启动服务</button>
         <button class="btn btn-danger btn-sm" id="cfgBtnStop" onclick="stopAgent()" style="display:none;">停止服务</button>
-        <button class="config-close" onclick="closeConfig()">✕</button>
       </div>
     </div>
     <div class="config-body">

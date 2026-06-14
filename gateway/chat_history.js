@@ -46,9 +46,10 @@ export class ChatHistory {
    * @param {string} agentId
    * @param {string} role - 'user' 或 'assistant'
    * @param {string} content
-   * @returns {{ id: string, role: string, content: string, ts: string }}
+   * @param {Array} [toolCalls] - 工具调用信息 [{ name: string, args: { key: string } }]
+   * @returns {{ id: string, role: string, content: string, ts: string, toolCalls?: Array }}
    */
-  addMessage(agentId, role, content) {
+  addMessage(agentId, role, content, toolCalls) {
     const id = this._generateId();
     const record = {
       id,
@@ -56,6 +57,10 @@ export class ChatHistory {
       content,
       ts: new Date().toISOString()
     };
+    // 只在有工具调用时才存储 toolCalls 字段
+    if (toolCalls && toolCalls.length > 0) {
+      record.toolCalls = toolCalls;
+    }
 
     const filePath = this._getFilePath(agentId);
     try {

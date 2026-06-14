@@ -38,6 +38,7 @@ let chatHistories = {};  // agentId → [{id, role, content, ts}]
 let historyHasMore = {}; // agentId → boolean，是否还有更多历史
 let loadingHistory = false; // 上拉加载锁
 let streaming = false;
+let pendingMessages = [];  // Agent 忙碌期间缓冲的用户消息
 
 /** 判断是否为移动端窄屏 */
 function isMobileView() {
@@ -88,6 +89,7 @@ function renderAgentList() {
       <div class="agent-avatar">${renderAvatarContent(a.agentId, a.avatar)}</div>
       <div class="agent-info">
         <div class="agent-name">${a.name || a.agentId}</div>
+        <div class="agent-path">${a.path || ('agents/' + a.agentId)}</div>
         <div class="agent-status ${a.status}">
           <span class="agent-status-dot"></span>
           ${a.status === 'running' ? '运行中' : a.status === 'error' ? '错误' : '已停止'}
@@ -214,7 +216,7 @@ function updateControlButtons(status) {
 }
 
 function updateSendButton(enabled) {
-  document.getElementById('sendBtn').disabled = !enabled || streaming;
+  document.getElementById('sendBtn').disabled = !enabled;
 }
 
 // ===== Agent 控制 =====
@@ -322,6 +324,39 @@ async function clearMemory() {
 }
 
 // ===== 聊天 =====
+/** 渲染工具调用标记 HTML */
+function renderToolCalls(toolCalls) {
+  if (!toolCalls || !Array.isArray(toolCalls) || toolCalls.length === 0) return '';
+  return toolCalls.map(tc => {
+    const name = escapeHtml(tc.name || 'unknown');
+    const argsHtml = Object.entries(tc.args || {}).map(([key, val]) => {
+      const raw = String(val);
+      const displayVal = raw.length > 20 ? escapeHtml('…' + raw.slice(-20)) : escapeHtml(raw);
+      const fullVal = escapeHtml(raw);
+      return `<div class="tool-call-arg" title="${fullVal}">${escapeHtml(key)}: ${displayVal}</div>`;
+    }).join('');
+    return `<div class="tool-call-badge">🔧 ${name}${argsHtml ? '<div class="tool-call-args">' + argsHtml + '</div>' : ''}</div>`;
+  }).join('');
+}
+
+/** 在流式气泡中追加工具调用标记 */
+function appendStreamingToolCall(toolCalls) {
+  const bubble = document.querySelector('#streamingMsg .message-bubble');
+  if (!bubble) return;
+  const html = renderToolCalls(toolCalls);
+  if (html) {
+    bubble.insertAdjacentHTML('beforeend', html);
+  }
+  // 同步到历史记录
+  const history = chatHistories[activeAgentId];
+  if (history && history.length > 0 && history[history.length - 1].role === 'assistant') {
+    const lastMsg = history[history.length - 1];
+    if (!lastMsg.toolCalls) lastMsg.toolCalls = [];
+    lastMsg.toolCalls.push(...toolCalls);
+  }
+  scrollToBottom();
+}
+
 function renderChatHistory() {
   const chatArea = document.getElementById('chatArea');
   const history = chatHistories[activeAgentId] || [];
@@ -342,11 +377,34 @@ function renderChatHistory() {
       return `<div class="message system" data-msg-id="${msg.id || ''}"><div class="message-bubble">${escapeHtml(msg.content)}</div></div>`;
     }
     const avatar = msg.role === 'user' ? getUserAvatar() : getAgentAvatar();
+    // compact 消息：显示压缩标记（成功/失败）
+    if (msg.role === 'compact') {
+      return `<div class="message assistant" data-msg-id="${msg.id || ''}">
+        <div class="message-avatar">${avatar}</div>
+        <div class="message-body">
+          ${timeHtml}
+          <div class="message-bubble"><div class="compact-badge compact-success">✅ 上下文已自动压缩<div class="compact-detail">${escapeHtml(msg.content || '')}</div></div></div>
+        </div>
+      </div>`;
+    }
+    if (msg.role === 'compact_error') {
+      return `<div class="message assistant" data-msg-id="${msg.id || ''}">
+        <div class="message-avatar">${avatar}</div>
+        <div class="message-body">
+          ${timeHtml}
+          <div class="message-bubble"><div class="compact-badge compact-error">❌ 上下文压缩失败<div class="compact-detail">${escapeHtml(msg.content || '')}</div></div></div>
+        </div>
+      </div>`;
+    }
+    // 构建气泡内容：先放工具调用标记，再放文本
+    const toolCallsHtml = renderToolCalls(msg.toolCalls);
+    const textContent = escapeHtml(msg.content || '');
+    const bubbleContent = (toolCallsHtml + textContent).trim();
     return `<div class="message ${msg.role}" data-msg-id="${msg.id || ''}">
       <div class="message-avatar">${avatar}</div>
       <div class="message-body">
         ${timeHtml}
-        <div class="message-bubble">${escapeHtml(msg.content)}</div>
+        <div class="message-bubble">${bubbleContent}</div>
       </div>
     </div>`;
   }).join('');
@@ -387,6 +445,62 @@ function addMessage(role, content, ts) {
 
 function addSystemMessage(content) {
   addMessage('system', content);
+}
+
+/** 显示"正在压缩"蓝色气泡 */
+function showCompactStart() {
+  if (!chatHistories[activeAgentId]) chatHistories[activeAgentId] = [];
+  const msg = { role: 'compact', content: '', ts: new Date().toISOString() };
+  chatHistories[activeAgentId].push(msg);
+
+  const chatArea = document.getElementById('chatArea');
+  const empty = chatArea.querySelector('.empty-state');
+  if (empty) empty.remove();
+
+  const avatar = getAgentAvatar();
+  chatArea.insertAdjacentHTML('beforeend',
+    `<div class="message assistant" id="compactBadge">
+      <div class="message-avatar">${avatar}</div>
+      <div class="message-body">
+        <div class="message-bubble"><div class="compact-badge compact-loading">⏳ 正在压缩上下文...</div></div>
+      </div>
+    </div>`);
+  scrollToBottom();
+}
+
+/** 压缩成功：蓝色变绿色，显示摘要 */
+function updateCompactSuccess(summary) {
+  // 更新历史记录
+  const history = chatHistories[activeAgentId];
+  if (history && history.length > 0 && history[history.length - 1].role === 'compact') {
+    history[history.length - 1].content = summary;
+  }
+  // 更新 DOM
+  const badge = document.querySelector('#compactBadge .compact-badge');
+  if (badge) {
+    badge.className = 'compact-badge compact-success';
+    badge.innerHTML = `✅ 上下文已自动压缩<div class="compact-detail">${escapeHtml(summary)}</div>`;
+  }
+  const wrapper = document.getElementById('compactBadge');
+  if (wrapper) wrapper.removeAttribute('id');
+}
+
+/** 压缩失败：蓝色变红色，显示错误 */
+function updateCompactError(error) {
+  // 更新历史记录
+  const history = chatHistories[activeAgentId];
+  if (history && history.length > 0 && history[history.length - 1].role === 'compact') {
+    history[history.length - 1].role = 'compact_error';
+    history[history.length - 1].content = error;
+  }
+  // 更新 DOM
+  const badge = document.querySelector('#compactBadge .compact-badge');
+  if (badge) {
+    badge.className = 'compact-badge compact-error';
+    badge.innerHTML = `❌ 上下文压缩失败<div class="compact-detail">${escapeHtml(error)}</div>`;
+  }
+  const wrapper = document.getElementById('compactBadge');
+  if (wrapper) wrapper.removeAttribute('id');
 }
 
 function showTypingIndicator() {
@@ -435,7 +549,28 @@ function startAssistantMessage() {
 function appendStreamingContent(content) {
   const bubble = document.querySelector('#streamingMsg .message-bubble');
   if (bubble) {
-    bubble.textContent += content;
+    // 如果气泡中有工具调用标记，将文本追加到最后一个文本节点之后
+    const toolCallBadges = bubble.querySelectorAll('.tool-call-badge');
+    if (toolCallBadges.length > 0) {
+      // 在最后一个工具标记之后追加文本
+      const lastBadge = toolCallBadges[toolCallBadges.length - 1];
+      // 找到或创建文本容器
+      let textNode = lastBadge.nextSibling;
+      if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+        textNode.textContent += content;
+      } else {
+        // 查找已有的 streaming-text span
+        let textSpan = bubble.querySelector('.streaming-text');
+        if (!textSpan) {
+          textSpan = document.createElement('span');
+          textSpan.className = 'streaming-text';
+          bubble.appendChild(textSpan);
+        }
+        textSpan.textContent += content;
+      }
+    } else {
+      bubble.textContent += content;
+    }
   }
   const history = chatHistories[activeAgentId];
   if (history && history.length > 0 && history[history.length - 1].role === 'assistant') {
@@ -450,30 +585,24 @@ function finishStreaming() {
   streaming = false;
   updateSendButton(activeAgentId !== null &&
     agents.find(a => a.agentId === activeAgentId)?.status === 'running');
-}
 
-async function sendMessage() {
-  if (streaming) return;
-  const input = document.getElementById('messageInput');
-  const message = input.value.trim();
-  if (!message) return;
-  if (!activeAgentId) return;
-
-  input.value = '';
-  autoResize(input);
-
-  const agent = agents.find(a => a.agentId === activeAgentId);
-  if (!agent || agent.status !== 'running') {
-    addSystemMessage('Agent 未运行，请先启动');
-    return;
+  // 兜底：如果流结束时 compactBadge 仍处于 loading 状态，标记为失败
+  const compactBadge = document.querySelector('#compactBadge .compact-loading');
+  if (compactBadge) {
+    updateCompactError('上下文压缩未完成');
   }
 
-  // 显示用户消息
-  addMessage('user', message);
+  // 检查是否有积攒的消息，合并后发送
+  if (pendingMessages.length > 0) {
+    const merged = pendingMessages.join('\n');
+    pendingMessages = [];
+    doSend(merged);
+  }
+}
 
-  // 显示输入中指示
+async function doSend(message) {
+  // 设置 streaming 状态
   streaming = true;
-  updateSendButton(false);
   showTypingIndicator();
 
   frontendLog('INFO', `发送消息到 ${activeAgentId}: ${message.substring(0, 50)}...`);
@@ -541,14 +670,58 @@ async function sendMessage() {
   }
 }
 
+async function sendMessage() {
+  const input = document.getElementById('messageInput');
+  const message = input.value.trim();
+  if (!message) return;
+  if (!activeAgentId) return;
+
+  input.value = '';
+  autoResize(input);
+
+  const agent = agents.find(a => a.agentId === activeAgentId);
+  if (!agent || agent.status !== 'running') {
+    addSystemMessage('Agent 未运行，请先启动');
+    return;
+  }
+
+  // 显示用户消息
+  addMessage('user', message);
+
+  // Agent 忙碌时缓冲消息，等空闲后合并发送
+  if (streaming) {
+    pendingMessages.push(message);
+    return;
+  }
+
+  await doSend(message);
+}
+
 function handleSSEEvent(event, data) {
   if (event === 'token') {
     if (!document.getElementById('streamingMsg')) {
       startAssistantMessage();
     }
     appendStreamingContent(data.content);
+  } else if (event === 'tool_call') {
+    // 工具调用事件：在气泡内渲染工具调用标记
+    if (!document.getElementById('streamingMsg')) {
+      startAssistantMessage();
+    }
+    if (data.tool_calls && Array.isArray(data.tool_calls)) {
+      appendStreamingToolCall(data.tool_calls);
+    }
   } else if (event === 'status') {
     // 状态事件，保持 typing indicator
+  } else if (event === 'compact_start') {
+    // 记忆压缩开始：立刻显示蓝色气泡
+    showCompactStart();
+  } else if (event === 'compact') {
+    // 记忆压缩成功：蓝色变绿色
+    updateCompactSuccess(data.summary || '上下文已自动压缩');
+  } else if (event === 'compact_error') {
+    // 记忆压缩失败：蓝色变红色
+    updateCompactError(data.error || '记忆压缩失败');
   } else if (event === 'done') {
     finishStreaming();
   } else if (event === 'error') {
@@ -637,13 +810,15 @@ function collectConfigFromFrame() {
         value = el.value;
       }
 
-      if (value === undefined || value === '') continue;
-
-      // systemPrompt 特殊处理：写入文件
-      if (key === 'systemPrompt') {
-        update.systemPrompt = value;
+      // prompt 内容字段特殊处理：写入文件，空值也要发送以清空文件
+      if (key === 'systemPrompt' || key === 'prefix_prompt' || key === 'suffix_prompt') {
+        if (value !== undefined) {
+          update[key] = value;
+        }
         continue;
       }
+
+      if (value === undefined || value === '') continue;
 
       // 模型配置字段（对应 api_key.json）
       if (MODEL_KEYS.has(key)) {
@@ -755,7 +930,19 @@ async function refreshAgentList() {
     void btn.offsetWidth;
     btn.classList.add('spinning');
   }
-  await loadAgents();
+  try {
+    const res = await fetch(`${API_BASE}/agents/rediscover`, { method: 'POST' });
+    if (res.ok) {
+      const data = await res.json();
+      agents = data.agents;
+    } else {
+      // 降级：使用简单列表刷新
+      await loadAgents();
+    }
+  } catch (e) {
+    // 降级：使用简单列表刷新
+    await loadAgents();
+  }
   renderAgentList();
   const agent = agents.find(a => a.agentId === activeAgentId);
   if (agent) updateControlButtons(agent.status);
