@@ -32,6 +32,13 @@ const API_KEY_TEMPLATE = {
   model: '',
 };
 
+/** elf-001 的 prompt 文件字段列表 */
+const PROMPT_FILE_FIELDS = [
+  { pathKey: 'systemPromptPath', contentKey: 'systemPrompt', defaultFile: 'system_prompt.md' },
+  { pathKey: 'prefixPromptPath', contentKey: 'prefix_prompt', defaultFile: 'prefix_prompt.md' },
+  { pathKey: 'suffixPromptPath', contentKey: 'suffix_prompt', defaultFile: 'suffix_prompt.md' },
+];
+
 export class Config {
   constructor(configDir) {
     this.configDir = configDir;
@@ -49,12 +56,7 @@ export class Config {
       const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
       // 处理 prompt 文件路径：读取对应的文件内容
-      const promptFileFields = [
-        { pathKey: 'systemPromptPath', contentKey: 'systemPrompt', defaultFile: 'system_prompt.md' },
-        { pathKey: 'prefixPromptPath', contentKey: 'prefix_prompt', defaultFile: 'prefix_prompt.md' },
-        { pathKey: 'suffixPromptPath', contentKey: 'suffix_prompt', defaultFile: 'suffix_prompt.md' },
-      ];
-      for (const { pathKey, contentKey, defaultFile } of promptFileFields) {
+      for (const { pathKey, contentKey, defaultFile } of PROMPT_FILE_FIELDS) {
         const fileName = raw[pathKey] || defaultFile;
         const filePath = path.join(this.configDir, fileName);
         try {

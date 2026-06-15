@@ -23,18 +23,23 @@ async function main() {
   const chatHistory = new ChatHistory(pm.agentsDir);
 
   // 3. 扫描 agents/ 目录
-  pm.discoverAgents();
+  await pm.discoverAgents();
 
   // 4. 探活已有进程
   for (const [id] of pm.agents) {
     await pm.probeAgent(id);
   }
 
-  // 5. 默认启动第一个 Agent（如果有且为 stopped 状态）
-  const firstAgent = pm.agents.keys().next().value;
-  if (firstAgent && pm.getAgentStatus(firstAgent) === 'stopped') {
-    logger.info(`默认启动第一个 Agent: ${firstAgent}`);
-    pm.startAgent(firstAgent);
+  // 5. 如果没有 Agent 在运行，默认启动第一个
+  const runningCount = pm.listAgents().filter(a => a.status === 'running').length;
+  if (runningCount === 0) {
+    const firstAgent = pm.agents.keys().next().value;
+    if (firstAgent) {
+      logger.info(`无运行中的 Agent，默认启动第一个: ${firstAgent}`);
+      await pm.startAgent(firstAgent);
+    }
+  } else {
+    logger.info(`已有 ${runningCount} 个 Agent 在运行中，跳过自动启动`);
   }
 
   // 6. 启动 HTTP 服务

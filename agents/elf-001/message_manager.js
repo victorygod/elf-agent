@@ -1,6 +1,8 @@
 /**
  * 对话历史管理 + 记忆压缩
  * 上下文持久化到 context.json，与内存状态保持一致
+ *
+ * elf-001 特有：支持 prefixPrompt / suffixPrompt 注入到最后一轮 user 消息
  */
 
 import fs from 'fs';
@@ -115,7 +117,7 @@ export class MessageManager {
     return Math.ceil(total / 4);
   }
 
-  async compactIfNeeded(llmModel) {
+  async compactIfNeeded(llmModel, options = {}) {
     if (this.estimateTokens() <= this.memoryTokenLimit) {
       return null;
     }
@@ -125,16 +127,16 @@ export class MessageManager {
 
     const compressMessages = [
       ...this.getMessagesForLLM(),
-      { role: 'user', content: '请简要总结以上对话的关键信息和待办事项，保留重要细节。' }
+      { role: 'user', content: '请简要总结截止目前的对话的关键信息和待办事项，保留重要细节。' }
     ];
 
     try {
       logger.info(`记忆压缩 Request messages: ${JSON.stringify(compressMessages, null, 2)}`);
-      const summary = await llmModel.chatComplete(compressMessages);
+      const summary = await llmModel.chatComplete(compressMessages, options);
       logger.info(`记忆压缩 Response: ${summary}`);
 
       this.messages = [
-        { role: 'user', content: '请简要总结以上对话的关键信息和待办事项，保留重要细节。' },
+        { role: 'user', content: '请简要总结截止目前的对话的关键信息和待办事项，保留重要细节。' },
         { role: 'assistant', content: summary }
       ];
 

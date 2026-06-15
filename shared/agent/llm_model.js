@@ -30,7 +30,7 @@ const DEFAULT_REQUEST_TIMEOUT = 120_000;
 
 export class LLMModel {
   constructor(config) {
-    this.baseUrl = (config.base_url || config.baseUrl || '').replace(/\/+$/, '');
+    this.baseUrl = (config.base_url || config.baseUrl || '').trim().replace(/\/+$/, '');
     this.authToken = config.auth_token || config.apiKey || '';
     this.model = config.model;
     this.extraParams = extractExtraParams(config);
@@ -82,10 +82,16 @@ export class LLMModel {
     const url = `${this.baseUrl}/chat/completions`;
     const body = this._body(messages, true, tools, options);
 
-    const controller = new AbortController();
-    const connectTimer = setTimeout(() => controller.abort(), this.connectTimeout);
-    let requestTimer = setTimeout(() => controller.abort(), this.requestTimeout);
+    // 内部超时 controller
+    const internalController = new AbortController();
+    const connectTimer = setTimeout(() => internalController.abort(), this.connectTimeout);
+    let requestTimer = setTimeout(() => internalController.abort(), this.requestTimeout);
     let connected = false;
+
+    // 合并外部 abort signal（如有）
+    const signals = [internalController.signal];
+    if (options.signal) signals.push(options.signal);
+    const signal = AbortSignal.any(signals);
 
     let response;
     try {
@@ -93,7 +99,7 @@ export class LLMModel {
         method: 'POST',
         headers: this._headers(),
         body: JSON.stringify(body),
-        signal: controller.signal
+        signal
       });
       connected = true;
       clearTimeout(connectTimer);
@@ -101,6 +107,8 @@ export class LLMModel {
       clearTimeout(connectTimer);
       clearTimeout(requestTimer);
       if (err.name === 'AbortError') {
+        // 外部主动中断（用户的 abort 信号）直接抛出 AbortError
+        if (options.signal?.aborted) throw err;
         throw new Error(connected
           ? `LLM API 请求超时（${this.requestTimeout / 1000}秒）`
           : `LLM API 连接超时（${this.connectTimeout / 1000}秒）`);
@@ -123,7 +131,7 @@ export class LLMModel {
     // 重置超时的辅助函数
     const resetRequestTimer = () => {
       clearTimeout(requestTimer);
-      requestTimer = setTimeout(() => controller.abort(), this.requestTimeout);
+      requestTimer = setTimeout(() => internalController.abort(), this.requestTimeout);
     };
 
     try {
@@ -194,10 +202,16 @@ export class LLMModel {
     const url = `${this.baseUrl}/chat/completions`;
     const body = this._body(messages, false, null, options);
 
-    const controller = new AbortController();
-    const connectTimer = setTimeout(() => controller.abort(), this.connectTimeout);
-    let requestTimer = setTimeout(() => controller.abort(), this.requestTimeout);
+    // 内部超时 controller
+    const internalController = new AbortController();
+    const connectTimer = setTimeout(() => internalController.abort(), this.connectTimeout);
+    let requestTimer = setTimeout(() => internalController.abort(), this.requestTimeout);
     let connected = false;
+
+    // 合并外部 abort signal（如有）
+    const signals = [internalController.signal];
+    if (options.signal) signals.push(options.signal);
+    const signal = AbortSignal.any(signals);
 
     let response;
     try {
@@ -205,7 +219,7 @@ export class LLMModel {
         method: 'POST',
         headers: this._headers(),
         body: JSON.stringify(body),
-        signal: controller.signal
+        signal
       });
       connected = true;
       clearTimeout(connectTimer);
@@ -213,6 +227,7 @@ export class LLMModel {
       clearTimeout(connectTimer);
       clearTimeout(requestTimer);
       if (err.name === 'AbortError') {
+        if (options.signal?.aborted) throw err;
         throw new Error(connected
           ? `LLM API 请求超时（${this.requestTimeout / 1000}秒）`
           : `LLM API 连接超时（${this.connectTimeout / 1000}秒）`);

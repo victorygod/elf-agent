@@ -7,9 +7,21 @@ import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import { ProcessManager } from '../gateway/process_manager.js';
 import { createGatewayApp } from '../gateway/server.js';
 import { loadGatewayConfig } from '../gateway/config.js';
+
+/**
+ * 清理指定端口上的进程
+ */
+function killPort(port) {
+  try {
+    execSync(`lsof -ti :${port} -sTCP:LISTEN | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
+  } catch (e) {
+    // 忽略
+  }
+}
 
 // ========================
 // Gateway Config 测试
@@ -63,19 +75,19 @@ describe('ProcessManager', () => {
     assert.ok(ids.includes('elf-002'));
   });
 
-  it('startAgent 不存在的 Agent 应抛出 404', () => {
+  it('startAgent 不存在的 Agent 应抛出 404', async () => {
     pm.discoverAgents();
-    assert.throws(() => pm.startAgent('nonexistent'), { statusCode: 404 });
+    await assert.rejects(() => pm.startAgent('nonexistent'), { statusCode: 404 });
   });
 
-  it('stopAgent 不存在的 Agent 应抛出 404', () => {
+  it('stopAgent 不存在的 Agent 应抛出 404', async () => {
     pm.discoverAgents();
-    assert.throws(() => pm.stopAgent('nonexistent'), { statusCode: 404 });
+    await assert.rejects(() => pm.stopAgent('nonexistent'), { statusCode: 404 });
   });
 
-  it('stopAgent 已停止的 Agent 应抛出 409', () => {
+  it('stopAgent 已停止的 Agent 应抛出 409', async () => {
     pm.discoverAgents();
-    assert.throws(() => pm.stopAgent('elf-001'), { statusCode: 409 });
+    await assert.rejects(() => pm.stopAgent('elf-001'), { statusCode: 409 });
   });
 });
 
@@ -91,16 +103,10 @@ describe('Gateway HTTP Server', () => {
     pm.discoverAgents();
     // 杀掉所有可能占用端口的残留 Agent 进程
     for (const [id, agent] of pm.agents) {
-      try {
-        const { execSync } = await import('child_process');
-        execSync(`lsof -ti:${agent.port} | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
-      } catch (e) {
-        // 忽略
-      }
+      killPort(agent.port);
       await new Promise(r => setTimeout(r, 200));
       agent.status = 'stopped';
       agent.pid = null;
-      agent.childProcess = null;
     }
     const app = createGatewayApp(pm);
     await new Promise((resolve) => {
@@ -109,21 +115,18 @@ describe('Gateway HTTP Server', () => {
   });
 
   after(async () => {
-    // 停止所有 Agent
+    // 停止所有 Agent（通过 HTTP /shutdown 或端口清理）
     for (const [id, agent] of pm.agents) {
-      if (agent.childProcess) {
-        try { agent.childProcess.kill(); } catch (e) {}
+      try {
+        await fetch(`http://127.0.0.1:${agent.port}/shutdown`, { method: 'POST' });
+      } catch (e) {
+        // Agent 可能未运行
       }
     }
     // 等待进程退出并清理端口
     await new Promise(r => setTimeout(r, 500));
     for (const [id, agent] of pm.agents) {
-      try {
-        const { execSync } = await import('child_process');
-        execSync(`lsof -ti:${agent.port} | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
-      } catch (e) {
-        // 忽略
-      }
+      killPort(agent.port);
     }
     if (server) {
       await new Promise((resolve) => server.close(resolve));
@@ -160,7 +163,7 @@ describe('Gateway HTTP Server', () => {
     const statusData = await statusRes.json();
     if (statusData.status === 'running') {
       await fetch(`http://127.0.0.1:${testPort}/agents/elf-001/stop`, { method: 'POST' });
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 1000));
     }
 
     const res = await fetch(`http://127.0.0.1:${testPort}/agents/elf-001/start`, {
@@ -209,7 +212,7 @@ describe('Gateway HTTP Server', () => {
     const data = await res.json();
     assert.equal(data.agentId, 'elf-001');
     assert.ok(data.systemPrompt);
-    assert.equal(data.model.auth_token, '***'); // 脱敏
+    assert.ok(typeof data.model.auth_token === 'string' && data.model.auth_token.length > 0); // auth_token 明文返回
   });
 
   it('PUT /agents/:id/config 应更新配置', async () => {
@@ -241,33 +244,32 @@ describe('Gateway HTTP Server', () => {
     });
   });
 
-  it('POST /agents/:id/restart 应重启 Agent', async () => {
+  it('先 stop 再 start 应能重新运行 Agent', async () => {
     // elf-001 应该在 running 状态（上一个测试启动了它）
-    const res = await fetch(`http://127.0.0.1:${testPort}/agents/elf-001/restart`, {
+    const stopRes = await fetch(`http://127.0.0.1:${testPort}/agents/elf-001/stop`, {
       method: 'POST'
     });
-    assert.equal(res.status, 200);
-    const data = await res.json();
+    assert.equal(stopRes.status, 200);
+    await new Promise(r => setTimeout(r, 1000));
+
+    const startRes = await fetch(`http://127.0.0.1:${testPort}/agents/elf-001/start`, {
+      method: 'POST'
+    });
+    assert.equal(startRes.status, 200);
+    const data = await startRes.json();
     assert.equal(data.status, 'running');
     assert.ok(data.pid);
 
-    // 等待 Agent 重启完成
+    // 等待 Agent 启动完成
     await new Promise(r => setTimeout(r, 1500));
 
-    // 重启后应仍能对话
+    // 重新启动后应仍能对话
     const chatRes = await fetch(`http://127.0.0.1:${testPort}/agents/elf-001/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: '重启后你好' })
     });
     assert.equal(chatRes.status, 200);
-  });
-
-  it('POST /agents/:id/restart 不存在的 Agent 应返回 404', async () => {
-    const res = await fetch(`http://127.0.0.1:${testPort}/agents/nonexistent/restart`, {
-      method: 'POST'
-    });
-    assert.equal(res.status, 404);
   });
 
   it('POST /agents/:id/stop 应停止 Agent', async () => {

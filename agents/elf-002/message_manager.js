@@ -1,6 +1,8 @@
 /**
  * 对话历史管理 + 记忆压缩
  * 上下文持久化到 context.json，与内存状态保持一致
+ *
+ * elf-002 与 elf-001 的差异：不支持 prefixPrompt / suffixPrompt
  */
 
 import fs from 'fs';
@@ -93,7 +95,7 @@ export class MessageManager {
     return Math.ceil(total / 4);
   }
 
-  async compactIfNeeded(llmModel) {
+  async compactIfNeeded(llmModel, options = {}) {
     if (this.estimateTokens() <= this.memoryTokenLimit) {
       return null;
     }
@@ -108,7 +110,7 @@ export class MessageManager {
 
     try {
       logger.info(`记忆压缩 Request messages: ${JSON.stringify(compressMessages, null, 2)}`);
-      const summary = await llmModel.chatComplete(compressMessages);
+      const summary = await llmModel.chatComplete(compressMessages, options);
       logger.info(`记忆压缩 Response: ${summary}`);
 
       this.messages = [

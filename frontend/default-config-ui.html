@@ -50,10 +50,15 @@ body { font-family: -apple-system, sans-serif; color: #333; background: transpar
   background: #fafafa;
 }
 .cfg-field textarea { resize: vertical; min-height: 80px; line-height: 1.5; }
+.cfg-field textarea.tall { min-height: 160px; }
 .cfg-field input:focus, .cfg-field textarea:focus { border-color: #07c160; background: #fff; }
 .cfg-hint { font-size: 11px; color: #bbb; margin-top: 4px; }
 .cfg-checkbox label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #333; }
 .cfg-checkbox input { width: 16px; height: 16px; }
+
+/* 提示词区域分隔 */
+.cfg-divider { border: none; border-top: 1px solid #f0f0f0; margin: 20px 0; }
+.cfg-section-title { font-size: 12px; font-weight: 500; color: #aaa; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
 
 /* 缺失提示 */
 .cfg-error {
@@ -77,8 +82,39 @@ body { font-family: -apple-system, sans-serif; color: #333; background: transpar
   <button class="cfg-tab active" data-tab="agent" onclick="switchTab('agent')">Agent 配置</button>
   <button class="cfg-tab" data-tab="model" onclick="switchTab('model')">模型配置</button>
 </div>
-<div class="cfg-tabpanel active" id="tab-agent">{{avatarHtml}}{{agentFields}}</div>
-<div class="cfg-tabpanel" id="tab-model">{{modelFields}}</div>
+
+<!-- Agent 配置 -->
+<div class="cfg-tabpanel active" id="tab-agent">
+  {{avatarHtml}}
+  <hr class="cfg-divider">
+  <div class="cfg-field">
+    <label>系统提示词</label>
+    <textarea class="tall" data-key="systemPrompt" id="systemPrompt"></textarea>
+    <div class="cfg-hint">定义 Agent 的角色和行为方式</div>
+  </div>
+  <hr class="cfg-divider">
+  {{agentFields}}
+</div>
+
+<!-- 模型配置 -->
+<div class="cfg-tabpanel" id="tab-model">
+  <div class="cfg-field">
+    <label>API Base URL</label>
+    <input type="text" data-key="base_url" id="base_url">
+    <div class="cfg-hint">LLM API 端点地址</div>
+  </div>
+  <div class="cfg-field">
+    <label>Auth Token</label>
+    <input type="text" data-key="auth_token" id="auth_token">
+    <div class="cfg-hint">LLM API 认证密钥</div>
+  </div>
+  <div class="cfg-field">
+    <label>模型名称</label>
+    <input type="text" data-key="model" id="model">
+    <div class="cfg-hint">如 gpt-4o、GLM-5.1、deepseek-chat</div>
+  </div>
+</div>
+
 <script>
 function switchTab(name) {
   document.querySelectorAll('.cfg-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
@@ -122,6 +158,31 @@ function uploadAvatar(input, field) {
   };
   reader.readAsDataURL(file);
 }
+
+// 加载配置并填充表单
+function loadConfig() {
+  fetch(API_BASE + '/agents/' + AGENT_ID + '/config')
+    .then(function(res) { return res.json(); })
+    .then(function(config) {
+      // 系统提示词
+      var sp = document.getElementById('systemPrompt');
+      if (sp) sp.value = config.systemPrompt || '';
+
+      // 模型配置
+      var model = config.model || {};
+      var baseUrl = document.getElementById('base_url');
+      if (baseUrl) baseUrl.value = model.base_url || '';
+      var authToken = document.getElementById('auth_token');
+      if (authToken) authToken.value = model.auth_token || '';
+      var modelName = document.getElementById('model');
+      if (modelName) modelName.value = model.model || '';
+    })
+    .catch(function(err) {
+      console.error('加载配置失败:', err);
+    });
+}
+
+loadConfig();
 </script>
 </body>
 </html>

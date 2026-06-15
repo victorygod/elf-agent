@@ -198,7 +198,7 @@ GET /agents/:id/config
   "model": {
     "provider": "llm",
     "baseUrl": "https://api.openai.com/v1",
-    "apiKey": "sk-***",
+    "auth_token": "sk-your-api-key",
     "model": "gpt-4o"
   },
   "systemPrompt": "You are a helpful assistant...",

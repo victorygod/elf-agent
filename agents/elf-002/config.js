@@ -7,6 +7,8 @@
  *
  * 若 api_key.json 不存在，自动创建空模板，不阻止启动；
  * 请求时若字段为空则拦截并提示。
+ *
+ * elf-002 与 elf-001 的差异：仅加载 system prompt，不加载 prefix/suffix prompt
  */
 
 import fs from 'fs';

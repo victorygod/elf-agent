@@ -2,12 +2,12 @@
  * 根据 config.json + api_key.json 自动生成配置页面 HTML（双选项卡）
  *
  * 规则：
- *   - Agent 配置选项卡：来自 config.json 的非内部字段
- *   - 模型配置选项卡：来自 api_key.json 的 base_url / auth_token / model
+ *   - Agent 配置选项卡：头像 + 系统提示词 + config.json 的非内部字段
+ *   - 模型配置选项卡：base_url / auth_token / model（来自 api_key.json）
  *   - provider 不在 UI 中展示（仅用于测试或手动修改 config.json）
- *   - api_key.json 缺失时，模型选项卡显示提示信息
+ *   - api_key.json 缺失时，模型选项卡显示空表单字段
  *   - 字段的 label / hint 来自 config.json 中的 _ui 字段定义
- *   - input type 按值的类型推断，password 需在 _ui 中显式指定
+ *   - input type 按值的类型推断（auth_token 默认 text 不做脱敏），password 需在 _ui 中显式指定
  *   - HTML 模板在 frontend/default-config-ui.html
  */
 
@@ -16,16 +16,20 @@ import path from 'path';
 
 const TEMPLATE_PATH = path.join(process.cwd(), 'frontend', 'default-config-ui.html');
 
-/** 不在配置页面展示的字段 */
-const SKIP_KEYS = new Set(['agentId', 'port', 'systemPromptPath', 'prefixPromptPath', 'suffixPromptPath', 'avatar', 'userAvatar', '_ui', 'provider', 'systemPrompt', 'prefix_prompt', 'suffix_prompt']);
+/** 不在 Agent 配置面板展示的字段（模型字段在独立选项卡，提示词字段在模板中单独处理） */
+const SKIP_KEYS = new Set([
+  'agentId', 'port', 'systemPromptPath', 'prefixPromptPath', 'suffixPromptPath',
+  'avatar', 'userAvatar', '_ui', 'provider',
+  'systemPrompt', 'prefix_prompt', 'suffix_prompt',
+  'model', 'modelError',
+]);
 
 /** 模型字段的 _ui 默认定义 */
 const MODEL_UI_DEFAULTS = {
   'base_url': { label: 'API Base URL', hint: 'LLM API 端点地址' },
-  'auth_token': { label: 'Auth Token', hint: 'LLM API 认证密钥' },
+  'auth_token': { label: 'Auth Token', hint: 'LLM API 认证密钥', type: 'text' },
   'model': { label: '模型名称', hint: '如 gpt-4o、GLM-5.1、deepseek-chat' },
 };
-
 
 /**
  * HTML 转义
@@ -39,7 +43,7 @@ function escapeHtml(str) {
 }
 
 /**
- * 遍历 config 对象，提取可配置字段列表（排除 provider 等内部字段）
+ * 遍历 config 对象，提取可配置字段列表（排除内部字段和模型字段）
  * 返回 [{key, label, hint, type, value}]
  */
 function extractAgentFields(config) {
@@ -143,11 +147,6 @@ function renderFields(fields) {
 }
 
 /**
- * 生成 api_key.json 缺失时的提示 HTML
- * （已不再使用：缺失时直接显示空表单字段，错误信息通过聊天区透传）
- */
-
-/**
  * 生成头像上传区域 HTML
  * @param {string} agentId
  * @param {string} avatar - 当前头像文件名
@@ -186,45 +185,30 @@ function renderAvatarSection(agentId, avatar, userAvatar) {
 }
 
 /**
- * 生成默认配置页面 HTML（双选项卡）
+ * 生成默认配置页面 HTML（双选项卡：Agent 配置 + 模型配置）
  * @param {string} agentId
  * @param {object} config - config.json 的内容（含 systemPrompt 等）
  * @param {object|null} apiKeyData - api_key.json 的内容，null 表示缺失
  * @returns {string} 完整 HTML
  */
 export function generateDefaultConfigUI(agentId, config, apiKeyData) {
-  // Agent 配置字段
+  // Agent 配置字段（排除 systemPrompt、模型等已在专门区域处理的字段）
   const agentFields = extractAgentFields(config);
   const agentFieldsHtml = renderFields(agentFields);
 
   // 头像上传区域
   const avatarHtml = renderAvatarSection(agentId, config.avatar, config.userAvatar);
 
-  // 模型配置字段
-  let modelFieldsHtml;
-  if (apiKeyData && Object.keys(apiKeyData).length > 0) {
-    const modelFields = extractModelFields(apiKeyData);
-    modelFieldsHtml = renderFields(modelFields);
-  } else {
-    // api_key.json 不存在时，使用空模板生成表单字段（用户填写后保存即可）
-    modelFieldsHtml = renderFields([
-      { key: 'base_url', label: 'API Base URL', hint: 'LLM API 端点地址', type: 'text', value: '' },
-      { key: 'auth_token', label: 'Auth Token', hint: 'LLM API 认证密钥', type: 'password', value: '' },
-      { key: 'model', label: '模型名称', hint: '如 gpt-4o、GLM-5.1、deepseek-chat', type: 'text', value: '' },
-    ]);
-  }
-
   // 读取 HTML 模板
   let template;
   try {
     template = fs.readFileSync(TEMPLATE_PATH, 'utf-8');
   } catch (err) {
-    template = '<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body>{{agentFields}}{{modelFields}}</body></html>';
+    template = '<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body>{{agentFields}}</body></html>';
   }
 
   return template
     .replace('{{agentId}}', escapeHtml(agentId))
     .replace('{{avatarHtml}}', avatarHtml)
-    .replace('{{agentFields}}', agentFieldsHtml)
-    .replace('{{modelFields}}', modelFieldsHtml);
+    .replace('{{agentFields}}', agentFieldsHtml);
 }

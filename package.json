@@ -7,7 +7,7 @@
     "start": "node gateway/index.js",
     "stop": "bash scripts/cleanup.sh",
     "restart": "bash scripts/cleanup.sh && sleep 1 && node gateway/index.js",
-    "test": "bash scripts/cleanup.sh && node --test --test-concurrency=1 test/agent.test.js test/gateway.test.js test/integration.test.js"
+    "test": "bash scripts/cleanup.sh && node --test --test-concurrency=1 test/shared.test.js test/agent.test.js test/gateway.test.js test/gateway.config-store.test.js test/integration.test.js"
   },
   "dependencies": {
     "express": "^4.18.2"

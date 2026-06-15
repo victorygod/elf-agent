@@ -1,5 +1,9 @@
 /**
  * Agent 核心 — Intuitive + Reasoning
+ *
+ * elf-002 独立版本，包含修复：
+ * - tool_call 事件发射（原版本缺失）
+ * - 正确使用 this.messageManager.memoryTokenLimit（原版本使用 this.memoryTokenLimit 导致压缩不触发）
  */
 
 import { createLogger } from '../../shared/logger.js';
@@ -16,6 +20,16 @@ export class Agent {
     this.model = model;
     this.toolRegistry = toolRegistry;
     this.messageManager = messageManager;
+    this._abortController = null;   // 当前 LLM 请求的 AbortController
+    this._aborted = false;          // 本轮 reasoning 是否被中断
+  }
+
+  /** 外部调用：中断当前请求 */
+  abort() {
+    this._aborted = true;
+    if (this._abortController) {
+      this._abortController.abort();
+    }
   }
 
   /**
@@ -30,6 +44,7 @@ export class Agent {
    */
   async *reasoning(message) {
     const logger = createLogger('agent', logFileName);
+    this._aborted = false;
 
     // 1. 将消息追加到历史
     this.messageManager.addUserMessage(message);
@@ -54,8 +69,10 @@ export class Agent {
       let fullContent = '';
       let toolCallsResult = null;
 
+      this._abortController = new AbortController();
       try {
-        for await (const chunk of this.model.chat(messages, tools)) {
+        for await (const chunk of this.model.chat(messages, tools, { signal: this._abortController.signal })) {
+          if (this._aborted) break;
           if (chunk.type === 'token') {
             fullContent += chunk.content;
             yield { event: 'token', data: { content: chunk.content } };
@@ -64,8 +81,26 @@ export class Agent {
           }
         }
       } catch (err) {
+        this._abortController = null;
+        if (err.name === 'AbortError' || this._aborted) {
+          if (fullContent) this.messageManager.addAssistantMessage(fullContent);
+          logger.info('用户中断了请求');
+          yield { event: 'aborted', data: {} };
+          yield { event: 'done', data: { usage: { prompt_tokens: 0, completion_tokens: 0 } } };
+          return;
+        }
         logger.error(`LLM 调用失败: ${err.message}`);
         yield { event: 'error', data: { message: `LLM API error: ${err.message}` } };
+        yield { event: 'done', data: { usage: { prompt_tokens: 0, completion_tokens: 0 } } };
+        return;
+      }
+      this._abortController = null;
+
+      // 中断检查（LLM 流正常结束后也可能已被 abort）
+      if (this._aborted) {
+        if (fullContent) this.messageManager.addAssistantMessage(fullContent);
+        logger.info('用户中断了请求');
+        yield { event: 'aborted', data: {} };
         yield { event: 'done', data: { usage: { prompt_tokens: 0, completion_tokens: 0 } } };
         return;
       }
@@ -80,6 +115,24 @@ export class Agent {
       // c. 解析响应
       if (toolCallsResult && toolCallsResult.length > 0) {
         this.messageManager.addAssistantToolCalls(toolCallsResult);
+
+        // 构建工具调用摘要（参数不截断，截断由前端展示时处理）
+        const toolCallsSummary = toolCallsResult.map(tc => {
+          const toolName = tc.function.name;
+          let toolArgs = {};
+          try {
+            toolArgs = JSON.parse(tc.function.arguments || '{}');
+          } catch (e) {
+            toolArgs = {};
+          }
+          return { name: toolName, args: toolArgs };
+        });
+
+        // 发出 tool_call 事件（前端用于渲染工具调用标记）
+        yield {
+          event: 'tool_call',
+          data: { tool_calls: toolCallsSummary }
+        };
 
         for (const tc of toolCallsResult) {
           const toolName = tc.function.name;
@@ -104,6 +157,14 @@ export class Agent {
 
           const result = await this.toolRegistry.execute(toolName, toolArgs);
           this.messageManager.addToolResult(tc.id, result);
+
+          // 工具执行后检查中断
+          if (this._aborted) {
+            logger.info('用户中断了请求（工具执行后）');
+            yield { event: 'aborted', data: {} };
+            yield { event: 'done', data: { usage: { prompt_tokens: 0, completion_tokens: 0 } } };
+            return;
+          }
         }
 
         continue;
@@ -117,15 +178,32 @@ export class Agent {
       yield { event: 'error', data: { message: 'Max iterations reached' } };
     }
 
-    // d. 记忆压缩
+    // 压缩前检查中断
+    if (this._aborted) {
+      logger.info('用户中断了请求（压缩前）');
+      yield { event: 'aborted', data: {} };
+      yield { event: 'done', data: { usage: { prompt_tokens: 0, completion_tokens: 0 } } };
+      return;
+    }
+
+    // d. 记忆压缩 — 使用 this.messageManager.memoryTokenLimit（而非 this.memoryTokenLimit）
     if (this.messageManager.estimateTokens() > this.messageManager.memoryTokenLimit) {
       yield { event: 'compact_start', data: {} };
       try {
-        const summary = await this.messageManager.compactIfNeeded(this.model);
+        this._abortController = new AbortController();
+        const summary = await this.messageManager.compactIfNeeded(this.model, { signal: this._abortController.signal });
+        this._abortController = null;
         if (summary) {
           yield { event: 'compact', data: { summary: summary.substring(0, 100) } };
         }
       } catch (err) {
+        this._abortController = null;
+        if (err.name === 'AbortError' || this._aborted) {
+          logger.info('用户中断了请求（压缩期间）');
+          yield { event: 'aborted', data: {} };
+          yield { event: 'done', data: { usage: { prompt_tokens: 0, completion_tokens: 0 } } };
+          return;
+        }
         yield { event: 'compact_error', data: { error: err.message || '记忆压缩失败' } };
       }
     }

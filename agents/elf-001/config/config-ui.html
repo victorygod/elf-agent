@@ -121,7 +121,7 @@ body { font-family: -apple-system, sans-serif; color: #333; background: transpar
   </div>
   <div class="cfg-field">
     <label>Auth Token</label>
-    <input type="password" data-key="auth_token" id="auth_token">
+    <input type="text" data-key="auth_token" id="auth_token">
     <div class="cfg-hint">LLM API 认证密钥</div>
   </div>
   <div class="cfg-field">
@@ -286,7 +286,7 @@ function loadConfig() {
       var baseUrl = document.getElementById('base_url');
       if (baseUrl) baseUrl.value = model.base_url || '';
       var authToken = document.getElementById('auth_token');
-      if (authToken) authToken.placeholder = model.auth_token ? '*** (未修改)' : '';
+      if (authToken) authToken.value = model.auth_token || '';
       var modelName = document.getElementById('model');
       if (modelName) modelName.value = model.model || '';
     })

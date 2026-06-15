@@ -74,8 +74,16 @@ async function main() {
   // 8. 启动 HTTP 服务
   const port = config.get('port');
   const app = createAgentServer(agent, config);
-  app.listen(port, () => {
+  const server = app.listen(port, () => {
     logger.info(`Agent ${agentId} listening on port ${port}`);
+  });
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      logger.error(`端口 ${port} 已被占用，Agent ${agentId} 无法启动`);
+    } else {
+      logger.error(`HTTP 服务错误: ${err.message}`);
+    }
+    process.exit(1);
   });
 
   // 9. 监听配置文件变化（始终启用热加载）

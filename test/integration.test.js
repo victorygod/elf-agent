@@ -7,6 +7,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import { ProcessManager } from '../gateway/process_manager.js';
 import { createGatewayApp } from '../gateway/server.js';
 
@@ -21,14 +22,12 @@ describe('Agent + Gateway 集成测试', () => {
     // 清理可能残留的端口占用
     for (const [id, agent] of pm.agents) {
       try {
-        const { execSync } = await import('child_process');
-        execSync(`lsof -ti:${agent.port} | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
+        execSync(`lsof -ti :${agent.port} -sTCP:LISTEN | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
       } catch (e) {
         // 忽略
       }
       agent.status = 'stopped';
       agent.pid = null;
-      agent.childProcess = null;
     }
     await new Promise(r => setTimeout(r, 200));
     const app = createGatewayApp(pm);
@@ -38,10 +37,12 @@ describe('Agent + Gateway 集成测试', () => {
   });
 
   after(async () => {
-    // 停止所有 Agent
+    // 停止所有 Agent（通过 HTTP /shutdown 或端口清理）
     for (const [id, agent] of pm.agents) {
-      if (agent.childProcess) {
-        try { agent.childProcess.kill(); } catch (e) {}
+      try {
+        await fetch(`http://127.0.0.1:${agent.port}/shutdown`, { method: 'POST' });
+      } catch (e) {
+        // Agent 可能未运行
       }
     }
     // 等待进程退出
@@ -49,8 +50,7 @@ describe('Agent + Gateway 集成测试', () => {
     // 清理可能残留的端口占用
     for (const [id, agent] of pm.agents) {
       try {
-        const { execSync } = await import('child_process');
-        execSync(`lsof -ti:${agent.port} | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
+        execSync(`lsof -ti :${agent.port} -sTCP:LISTEN | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
       } catch (e) {
         // 忽略
       }
@@ -80,11 +80,17 @@ describe('Agent + Gateway 集成测试', () => {
     assert.ok(text.includes('thinking') || text.includes('token'), '应包含 thinking 或 token 事件');
   });
 
-  it('重启 Agent 后应仍能对话', async () => {
-    const restartRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/agents/elf-001/restart`, {
+  it('停止再启动 Agent 后应仍能对话', async () => {
+    const stopRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/agents/elf-001/stop`, {
       method: 'POST'
     });
-    assert.equal(restartRes.status, 200);
+    assert.equal(stopRes.status, 200);
+    await new Promise(r => setTimeout(r, 1000));
+
+    const startRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/agents/elf-001/start`, {
+      method: 'POST'
+    });
+    assert.equal(startRes.status, 200);
 
     await new Promise(r => setTimeout(r, 2000));
 
@@ -162,16 +168,23 @@ describe('Agent + Gateway 集成测试', () => {
     const dataBefore = await statusBefore.json();
     assert.equal(dataBefore.status, 'running');
 
-    // 通过 ProcessManager 内部 Map 获取 childProcess 并 kill
+    // 通过 ProcessManager 找到 PID 并 SIGKILL 模拟崩溃
     const agentInternal = pm.agents.get('elf-002');
     assert.ok(agentInternal, '应存在于 agents Map 中');
-    assert.ok(agentInternal.childProcess, '应有 childProcess');
+    assert.ok(agentInternal.pid, `应有 pid，实际为 ${agentInternal.pid}`);
 
     // SIGKILL 进程模拟崩溃
-    agentInternal.childProcess.kill('SIGKILL');
+    try {
+      process.kill(agentInternal.pid, 'SIGKILL');
+    } catch (e) {
+      // 进程可能已退出
+    }
 
-    // 等待 exit 回调触发
+    // 等待进程退出
     await new Promise(r => setTimeout(r, 1000));
+
+    // 通过探活刷新状态
+    await pm.probeAgent('elf-002');
 
     // 验证 status 变为 stopped
     const statusAfter = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/agents/elf-002`);

@@ -10,7 +10,6 @@
       const frame = document.getElementById('configFormFrame');
       try {
         const doc = frame.contentDocument || frame.contentWindow.document;
-        // 根据 iframe 内容高度自适应，多留 4px 避免截断
         frame.style.height = doc.documentElement.scrollHeight + 4 + 'px';
       } catch (e) {}
     }
@@ -33,45 +32,32 @@
   <!-- 右侧主区域 -->
   <div class="main-area" id="mainArea">
     <!-- 顶部栏 -->
-    <div class="top-bar" id="topBar" style="display: none;">
+    <div class="top-bar hidden" id="topBar">
       <button class="back-btn" id="backBtn" onclick="goBackToList()"><</button>
-      <div class="title" id="topTitle">elf-001</div>
+      <div class="title" id="topTitle">Elf</div>
       <div class="actions">
-        <button class="btn-icon" id="btnConfig" onclick="openConfig()" title="配置">⚙</button>
+        <button class="btn-icon" id="btnConfig" onclick="openConfig()" title="配置"></button>
       </div>
     </div>
 
-    <!-- 聊天区域 -->
-    <div class="chat-area" id="chatArea">
-      <div class="empty-state">
-        <div class="icon">💬</div>
-        <div class="text">选择一个 Agent 开始对话</div>
-      </div>
-    </div>
+    <!-- 聊天区域容器（AgentChat 实例的 .agent-chat 挂载点） -->
+    <div class="chat-area" id="chatArea"></div>
 
-    <!-- 输入区域 -->
-    <div class="input-area" id="inputArea" style="display: none;">
-      <div class="input-wrapper">
-        <textarea id="messageInput" placeholder="输入消息..." rows="1"
-                  onkeydown="handleKeyDown(event)"></textarea>
-        <button class="send-btn" id="sendBtn" onclick="sendMessage()">➤</button>
-      </div>
-    </div>
+    <!-- 输入区域由每个 AgentChat 实例自带，此处不再放全局输入框 -->
   </div>
 
   <!-- 配置面板 -->
-  <div class="config-overlay" id="configOverlay" onclick="closeConfig()"></div>
+  <div class="config-overlay" id="configOverlay"></div>
   <div class="config-panel" id="configPanel">
     <div class="config-header">
       <button class="config-back-btn" onclick="closeConfig()"><</button>
       <h2>Agent 配置</h2>
       <div class="config-header-actions">
         <button class="btn btn-primary btn-sm" id="cfgBtnStart" onclick="startAgent()">启动服务</button>
-        <button class="btn btn-danger btn-sm" id="cfgBtnStop" onclick="stopAgent()" style="display:none;">停止服务</button>
+        <button class="btn btn-danger btn-sm hidden" id="cfgBtnStop" onclick="stopAgent()">停止服务</button>
       </div>
     </div>
     <div class="config-body">
-      <!-- 配置表单：由 Agent config-ui.html 动态加载（含头像上传） -->
       <iframe id="configFormFrame" onload="resizeConfigFrame()"></iframe>
     </div>
     <div class="config-footer">
@@ -83,6 +69,84 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <!-- ===== 模板 ===== -->
+
+  <!-- Agent 列表项 -->
+  <template id="tmplAgentItem">
+    <div class="agent-item" data-agent-id="">
+      <div class="agent-avatar"></div>
+      <div class="agent-info">
+        <div class="agent-name"></div>
+        <div class="agent-path"></div>
+        <div class="agent-status"><span class="agent-status-dot"></span><span class="status-text"></span></div>
+      </div>
+    </div>
+  </template>
+
+  <!-- 用户消息气泡 -->
+  <template id="tmplMsgUser">
+    <div class="message user" data-msg-id="">
+      <div class="message-avatar"><span class="avatar-default">U</span></div>
+      <div class="message-body">
+        <div class="message-time"></div>
+        <div class="message-bubble"></div>
+      </div>
+    </div>
+  </template>
+
+  <!-- AI 消息气泡 -->
+  <template id="tmplMsgAssistant">
+    <div class="message assistant" data-msg-id="">
+      <div class="message-avatar"><span class="avatar-default">A</span></div>
+      <div class="message-body">
+        <div class="message-time"></div>
+        <div class="message-bubble"></div>
+      </div>
+    </div>
+  </template>
+
+  <!-- 系统消息 -->
+  <template id="tmplMsgSystem">
+    <div class="message system" data-msg-id="">
+      <div class="message-bubble"></div>
+    </div>
+  </template>
+
+  <!-- 压缩标记 -->
+  <template id="tmplCompactLoading">
+    <div class="compact-badge compact-loading" id="compactBadge">压缩中...</div>
+  </template>
+
+  <!-- 打字指示器 -->
+  <template id="tmplTypingIndicator">
+    <div class="message assistant" id="typingIndicator">
+      <div class="message-avatar"><span class="avatar-default">A</span></div>
+      <div class="message-body">
+        <div class="message-bubble">
+          <div class="typing-indicator"><span></span><span></span><span></span></div>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- 流式消息外壳 -->
+  <template id="tmplStreamingMsg">
+    <div class="message assistant" id="streamingMsg">
+      <div class="message-avatar"><span class="avatar-default">A</span></div>
+      <div class="message-body">
+        <div class="message-time"></div>
+        <div class="message-bubble"></div>
+      </div>
+    </div>
+  </template>
+
+  <!-- 空状态 -->
+  <template id="tmplEmptyState">
+    <div class="empty-state">
+      <div class="text"></div>
+    </div>
+  </template>
+
+  <script type="module" src="app.js"></script>
 </body>
 </html>
