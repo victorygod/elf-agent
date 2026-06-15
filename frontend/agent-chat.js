@@ -320,14 +320,12 @@ export class AgentChat {
     this._scrollToBottom();
   }
 
-  _updateCompactSuccess(summary) {
+  _updateCompactSuccess(tokenEstimate) {
     const badge = this.messagesEl.querySelector('#compactBadge') || this.messagesEl.querySelector('.compact-badge.compact-loading');
     if (badge) {
-      const displayText = summary
-        ? summary.replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        : '上下文已自动压缩';
+      const tokenInfo = tokenEstimate ? ` (≈${tokenEstimate} tokens)` : '';
       badge.className = 'compact-badge compact-success';
-      badge.innerHTML = `✅ 记忆已压缩 <span style="color:#999;font-weight:normal">${displayText}</span>`;
+      badge.textContent = `✅ 记忆已压缩${tokenInfo}`;
       badge.removeAttribute('id');
     }
   }
@@ -414,11 +412,11 @@ export class AgentChat {
     } else if (event === 'compact_start') {
       this._showCompactStart();
     } else if (event === 'compact') {
-      this._updateCompactSuccess(data.summary || '上下文已自动压缩');
-      // 同步更新 history 中最后一条 assistant 消息的 compactSummary 字段（和 JSONL 存储一致）
+      this._updateCompactSuccess(data.tokenEstimate);
+      // 同步更新 history 中最后一条 assistant 消息的 compactSummary 字段
       if (this.history.length > 0) {
         const last = this.history[this.history.length - 1];
-        if (last.role === 'assistant') last.compactSummary = data.summary || '上下文已自动压缩';
+        if (last.role === 'assistant') last.compactSummary = data.tokenEstimate || true;
       }
     } else if (event === 'compact_error') {
       this._updateCompactError(data.error || '记忆压缩失败');
@@ -533,11 +531,10 @@ export class AgentChat {
     // 渲染压缩标记（类似 toolCalls，嵌入在消息末尾）
     let compactHtml = '';
     if (msg.compactError) {
-      const errorText = escapeHtml(msg.compactError);
-      compactHtml = `<div class="compact-badge compact-error">❌ 记忆压缩失败 <span style="color:#999;font-weight:normal">${errorText}</span></div>`;
+      compactHtml = `<div class="compact-badge compact-error">❌ 记忆压缩失败</div>`;
     } else if (msg.compactSummary) {
-      const summaryText = escapeHtml(msg.compactSummary);
-      compactHtml = `<div class="compact-badge compact-success">✅ 记忆已压缩 <span style="color:#999;font-weight:normal">${summaryText}</span></div>`;
+      const tokenInfo = typeof msg.compactSummary === 'number' ? ` (≈${msg.compactSummary} tokens)` : '';
+      compactHtml = `<div class="compact-badge compact-success">✅ 记忆已压缩${tokenInfo}</div>`;
     }
     const textContent = escapeHtml(msg.content || '');
     bubble.innerHTML = (toolCallsHtml + textContent + compactHtml).trim();

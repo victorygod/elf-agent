@@ -150,7 +150,7 @@ export function proxyChat({ agentId, port, req, res, chatHistory, activeStreams 
                 flushAssistantToHistory();
                 const compactData = JSON.parse(trimmed.slice(6));
                 if (chatHistory) {
-                  chatHistory.updateLastMessage(id, { compactSummary: compactData.summary || '上下文已自动压缩' });
+                  chatHistory.updateLastMessage(id, { compactSummary: compactData.tokenEstimate || true });
                 }
               } catch (e) { /* ignore */ }
             } else if (currentEvent === 'compact_error') {

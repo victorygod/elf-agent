@@ -194,7 +194,8 @@ export class Agent {
         const summary = await this.messageManager.compactIfNeeded(this.model, { signal: this._abortController.signal });
         this._abortController = null;
         if (summary) {
-          yield { event: 'compact', data: { summary: summary.substring(0, 100) } };
+          const tokenEstimate = this.messageManager.estimateTokens();
+          yield { event: 'compact', data: { tokenEstimate } };
         }
       } catch (err) {
         this._abortController = null;
