@@ -373,19 +373,30 @@ body {
 
 /* ===== 压缩标记 ===== */
 .compact-badge {
-  font-size: 11px;
+  display: inline-block;
+  background: #fff7e6;
+  border: 1px solid #ffd591;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-top: 6px;
+  font-size: 12px;
   line-height: 1.5;
-  color: #999;
-  display: inline;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+  word-break: break-all;
+  color: #d46b08;
 }
 .compact-badge.compact-loading {
-  color: #999;
+  color: #d46b08;
 }
 .compact-badge.compact-success {
   color: #389e0d;
+  border-color: #b7eb8f;
+  background: #f6ffed;
 }
 .compact-badge.compact-error {
   color: #cf1322;
+  border-color: #ffa39e;
+  background: #fff2f0;
 }
 
 /* ===== 工具调用标记 ===== */

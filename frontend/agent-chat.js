@@ -301,14 +301,16 @@ export class AgentChat {
   }
 
   _showCompactStart() {
-    // 只更新 DOM 提示，不写入 history（压缩是 agent 内部记忆行为，与聊天内容无关）
+    // 在最后一条 assistant 消息气泡末尾插入压缩提示，类似 tool result 的嵌入方式
     const streamingBubble = this.messagesEl.querySelector('#streamingMsg .message-bubble');
-    if (streamingBubble) {
-      if (!streamingBubble.querySelector('#compactBadge')) {
-        streamingBubble.insertAdjacentHTML('beforeend',
-          '<div class="compact-badge compact-loading" id="compactBadge">压缩中...</div>');
+    const bubble = streamingBubble || this._getLastAssistantBubble();
+    if (bubble) {
+      if (!bubble.querySelector('#compactBadge')) {
+        bubble.insertAdjacentHTML('beforeend',
+          '<div class="compact-badge compact-loading" id="compactBadge">⏳ 记忆压缩中...</div>');
       }
     } else {
+      // 没有 assistant 消息，追加到容器
       const existing = this.messagesEl.querySelector('.compact-badge');
       if (!existing) {
         const frag = cloneTemplate('tmplCompactLoading');
@@ -319,24 +321,30 @@ export class AgentChat {
   }
 
   _updateCompactSuccess(summary) {
-    // 只更新 DOM 提示，不写入 history
     const badge = this.messagesEl.querySelector('#compactBadge') || this.messagesEl.querySelector('.compact-badge.compact-loading');
     if (badge) {
-      const tokenInfo = summary ? ` (≈${summary} tokens)` : '';
+      const displayText = summary
+        ? summary.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        : '上下文已自动压缩';
       badge.className = 'compact-badge compact-success';
-      badge.innerHTML = `记忆已压缩${tokenInfo}`;
+      badge.innerHTML = `✅ 记忆已压缩 <span style="color:#999;font-weight:normal">${displayText}</span>`;
       badge.removeAttribute('id');
     }
   }
 
   _updateCompactError(error) {
-    // 只更新 DOM 提示，不写入 history
     const badge = this.messagesEl.querySelector('#compactBadge') || this.messagesEl.querySelector('.compact-badge.compact-loading');
     if (badge) {
       badge.className = 'compact-badge compact-error';
-      badge.textContent = '记忆压缩失败';
+      badge.textContent = '❌ 记忆压缩失败';
       badge.removeAttribute('id');
     }
+  }
+
+  /** 获取最后一条 assistant 消息的气泡元素 */
+  _getLastAssistantBubble() {
+    const msgs = this.messagesEl.querySelectorAll('.message.assistant .message-bubble');
+    return msgs.length > 0 ? msgs[msgs.length - 1] : null;
   }
 
   _finishStreaming() {
@@ -345,8 +353,9 @@ export class AgentChat {
     this.streaming = false;
     this._updateInputButtons();
 
-    const compactBadge = this.messagesEl.querySelector('#compactBadge');
-    if (compactBadge) this._updateCompactError();
+    // 如果流结束后还有未处理的压缩 badge（既没 success 也没 error），标记为失败
+    const streamingBadge = this.messagesEl.querySelector('#compactBadge');
+    if (streamingBadge) this._updateCompactError();
   }
 
   // ==================== SSE ====================
@@ -406,8 +415,17 @@ export class AgentChat {
       this._showCompactStart();
     } else if (event === 'compact') {
       this._updateCompactSuccess(data.summary || '上下文已自动压缩');
+      // 同步更新 history 中最后一条 assistant 消息的 compactSummary 字段（和 JSONL 存储一致）
+      if (this.history.length > 0) {
+        const last = this.history[this.history.length - 1];
+        if (last.role === 'assistant') last.compactSummary = data.summary || '上下文已自动压缩';
+      }
     } else if (event === 'compact_error') {
       this._updateCompactError(data.error || '记忆压缩失败');
+      if (this.history.length > 0) {
+        const last = this.history[this.history.length - 1];
+        if (last.role === 'assistant') last.compactError = data.error || '记忆压缩失败';
+      }
     } else if (event === 'done') {
       this._finishStreaming();
     } else if (event === 'aborted') {
@@ -512,8 +530,17 @@ export class AgentChat {
 
     const bubble = frag.querySelector('.message-bubble');
     const toolCallsHtml = renderToolCalls(msg.toolCalls);
+    // 渲染压缩标记（类似 toolCalls，嵌入在消息末尾）
+    let compactHtml = '';
+    if (msg.compactError) {
+      const errorText = escapeHtml(msg.compactError);
+      compactHtml = `<div class="compact-badge compact-error">❌ 记忆压缩失败 <span style="color:#999;font-weight:normal">${errorText}</span></div>`;
+    } else if (msg.compactSummary) {
+      const summaryText = escapeHtml(msg.compactSummary);
+      compactHtml = `<div class="compact-badge compact-success">✅ 记忆已压缩 <span style="color:#999;font-weight:normal">${summaryText}</span></div>`;
+    }
     const textContent = escapeHtml(msg.content || '');
-    bubble.innerHTML = (toolCallsHtml + textContent).trim();
+    bubble.innerHTML = (toolCallsHtml + textContent + compactHtml).trim();
 
     return frag;
   }

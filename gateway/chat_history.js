@@ -73,6 +73,34 @@ export class ChatHistory {
   }
 
   /**
+   * 更新最后一条 assistant 消息的附加字段（用于 compactSummary 等附着到消息上，类似 toolCalls 模式）
+   * @param {string} agentId
+   * @param {object} updates - 要合并到记录中的字段，如 { compactSummary: '...' }
+   * @returns {boolean} 是否更新成功
+   */
+  updateLastMessage(agentId, updates) {
+    const filePath = this._getFilePath(agentId);
+    if (!fs.existsSync(filePath)) return false;
+
+    try {
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      const lines = raw.split('\n').filter(l => l.trim());
+      if (lines.length === 0) return false;
+
+      const lastLine = lines[lines.length - 1];
+      const record = JSON.parse(lastLine);
+      Object.assign(record, updates);
+
+      lines[lines.length - 1] = JSON.stringify(record);
+      fs.writeFileSync(filePath, lines.join('\n') + '\n', 'utf-8');
+      return true;
+    } catch (err) {
+      logger.error(`更新最后一条消息失败 (${agentId}): ${err.message}`);
+      return false;
+    }
+  }
+
+  /**
    * 分页获取聊天记录
    * @param {string} agentId
    * @param {number} [limit=30] - 返回条数

@@ -9,7 +9,7 @@
   "prefixPromptPath": "prefix_prompt.md",
   "suffixPromptPath": "suffix_prompt.md",
   "memoryTokenLimit": 500,
-  "maxIterations": 5,
+  "maxIterations": 0,
   "_ui": {
     "name": {
       "label": "Agent 名称",
@@ -33,7 +33,7 @@
     },
     "maxIterations": {
       "label": "最大迭代轮数",
-      "hint": "Agent Loop 最大循环次数"
+      "hint": "Agent Loop 最大循环次数（设为 0 表示无限迭代）"
     }
   }
 }

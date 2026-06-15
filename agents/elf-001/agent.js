@@ -47,11 +47,11 @@ export class Agent {
     // 1. 将消息追加到历史
     this.messageManager.addUserMessage(message);
 
-    const maxIterations = this.config.get('maxIterations') || 5;
+    const maxIterations = this.config.get('maxIterations') ?? 5;
     let iteration = 0;
 
-    // 2. Agent Loop
-    while (iteration < maxIterations) {
+    // 2. Agent Loop（maxIterations ≤ 0 时无限迭代）
+    while (maxIterations <= 0 || iteration < maxIterations) {
       iteration++;
 
       // a. 构建 LLM 请求
@@ -173,7 +173,7 @@ export class Agent {
       }
     }
 
-    if (iteration >= maxIterations) {
+    if (maxIterations > 0 && iteration >= maxIterations) {
       yield { event: 'error', data: { message: 'Max iterations reached' } };
     }
 
@@ -193,7 +193,8 @@ export class Agent {
         const summary = await this.messageManager.compactIfNeeded(this.model, { signal: this._abortController.signal });
         this._abortController = null;
         if (summary) {
-          yield { event: 'compact', data: { summary: summary.substring(0, 100) } };
+          const tokenEstimate = this.messageManager.estimateTokens();
+          yield { event: 'compact', data: { tokenEstimate } };
         }
       } catch (err) {
         this._abortController = null;

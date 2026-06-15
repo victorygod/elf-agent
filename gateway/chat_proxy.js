@@ -150,7 +150,7 @@ export function proxyChat({ agentId, port, req, res, chatHistory, activeStreams 
                 flushAssistantToHistory();
                 const compactData = JSON.parse(trimmed.slice(6));
                 if (chatHistory) {
-                  chatHistory.addMessage(id, 'compact', compactData.summary || '上下文已自动压缩');
+                  chatHistory.updateLastMessage(id, { compactSummary: compactData.summary || '上下文已自动压缩' });
                 }
               } catch (e) { /* ignore */ }
             } else if (currentEvent === 'compact_error') {
@@ -158,7 +158,7 @@ export function proxyChat({ agentId, port, req, res, chatHistory, activeStreams 
                 flushAssistantToHistory();
                 const compactData = JSON.parse(trimmed.slice(6));
                 if (chatHistory) {
-                  chatHistory.addMessage(id, 'compact_error', compactData.error || '记忆压缩失败');
+                  chatHistory.updateLastMessage(id, { compactError: compactData.error || '记忆压缩失败' });
                 }
               } catch (e) { /* ignore */ }
             }
