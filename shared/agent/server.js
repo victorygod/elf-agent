@@ -1,10 +1,9 @@
 /**
- * Agent HTTP 服务（共享版）
- * 接收 Gateway 请求，暴露 /chat, /config, /status, /abort, /clear 端点
- * 维护请求队列，保证串行处理
+ * Agent HTTP 服务
  *
- * 所有 Agent 共用此模块 — 业务逻辑差异在 agent.js 中实现，
- * server.js 只是 HTTP 适配层，调用 agent.receive() 获取事件流
+ * 暴露 /chat, /config, /status, /abort, /clear, /shutdown 端点
+ * 维护请求队列，保证串行处理
+ * 纯 HTTP 适配层，调用 agent.receive() 获取事件流
  */
 
 import express from 'express';

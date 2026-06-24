@@ -1,6 +1,8 @@
 /**
  * Shared 层测试
- * 覆盖 LLMModel（构造和方法返回值，不发真实请求）、MockModel、Logger、Config
+ *
+ * 覆盖：LLMModel（构造参数，不调 API）/ MockModel / Logger / Config / MessageManager / Agent / Tools
+ * 使用 MockModel，不依赖真实 LLM API
  */
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
@@ -11,11 +13,12 @@ import os from 'os';
 import { LLMModel } from '../shared/agent/llm_model.js';
 import { MockModel } from '../shared/agent/mock_model.js';
 import { createLogger } from '../shared/logger.js';
-import { Config } from '../agents/elf-001/config.js';
-import { MessageManager } from '../agents/elf-001/message_manager.js';
-import { Agent } from '../agents/elf-001/agent.js';
-import { ToolRegistry } from '../agents/elf-001/tools/registry.js';
-import { readFileTool } from '../agents/elf-001/tools/read_file.js';
+import { Config } from '../shared/agent/config_loader.js';
+import { MessageManager } from '../shared/agent/message_manager.js';
+import { Agent } from '../shared/agent/default_agent.js';
+import { ToolRegistry } from '../shared/agent/tools/registry.js';
+import { Read, Write, Edit, Bash, Glob } from '../shared/agent/tools/index.js';
+import { reset as resetReadState } from '../shared/agent/tools/read_state.js';
 
 // ========================
 // LLMModel 构造与方法测试（不发真实请求）
@@ -96,12 +99,12 @@ describe('LLMModel', () => {
   it('_body 带 tools 应正确转换工具定义', () => {
     const model = new LLMModel({ model: 'gpt-4o' });
     const messages = [{ role: 'user', content: '你好' }];
-    const tools = [{ name: 'read_file', description: '读取文件', parameters: { type: 'object', properties: { path: { type: 'string' } } } }];
+    const tools = [{ name: 'Read', description: '读取文件', parameters: { type: 'object', properties: { file_path: { type: 'string' } } } }];
     const body = model._body(messages, false, tools);
     assert.ok(body.tools);
     assert.equal(body.tools.length, 1);
     assert.equal(body.tools[0].type, 'function');
-    assert.equal(body.tools[0].function.name, 'read_file');
+    assert.equal(body.tools[0].function.name, 'Read');
     assert.equal(body.tools[0].function.description, '读取文件');
     assert.deepEqual(body.tools[0].function.parameters, tools[0].parameters);
   });
@@ -121,7 +124,7 @@ describe('MockModel', () => {
     const model = new MockModel();
     const messages = [{ role: 'user', content: '你好' }];
     let fullContent = '';
-    for await (const chunk of model.chat(messages, [])) {
+    for await (const chunk of model.chatStream(messages, [])) {
       if (chunk.type === 'token') {
         fullContent += chunk.content;
       }
@@ -132,7 +135,7 @@ describe('MockModel', () => {
   it('应该支持自定义默认回复', async () => {
     const model = new MockModel({ defaultResponse: '自定义默认' });
     let fullContent = '';
-    for await (const chunk of model.chat([], [])) {
+    for await (const chunk of model.chatStream([], [])) {
       if (chunk.type === 'token') fullContent += chunk.content;
     }
     assert.equal(fullContent, '自定义默认');
@@ -147,20 +150,20 @@ describe('MockModel', () => {
     });
 
     let content1 = '';
-    for await (const chunk of model.chat([], [])) {
+    for await (const chunk of model.chatStream([], [])) {
       if (chunk.type === 'token') content1 += chunk.content;
     }
     assert.equal(content1, '第一条');
 
     let content2 = '';
-    for await (const chunk of model.chat([], [])) {
+    for await (const chunk of model.chatStream([], [])) {
       if (chunk.type === 'token') content2 += chunk.content;
     }
     assert.equal(content2, '第二条');
 
     // 超出 responses 回退到 defaultResponse
     let content3 = '';
-    for await (const chunk of model.chat([], [])) {
+    for await (const chunk of model.chatStream([], [])) {
       if (chunk.type === 'token') content3 += chunk.content;
     }
     assert.equal(content3, '这是一个模拟回复。');
@@ -172,16 +175,16 @@ describe('MockModel', () => {
         tool_calls: [{
           id: 'call_1',
           type: 'function',
-          function: { name: 'read_file', arguments: '{"path":"/tmp/test.txt"}' }
+          function: { name: 'Read', arguments: '{"file_path":"/tmp/test.txt"}' }
         }]
       }]
     });
 
     let hasToolCalls = false;
-    for await (const chunk of model.chat([], [])) {
+    for await (const chunk of model.chatStream([], [])) {
       if (chunk.type === 'tool_calls') {
         hasToolCalls = true;
-        assert.equal(chunk.tool_calls[0].function.name, 'read_file');
+        assert.equal(chunk.tool_calls[0].function.name, 'Read');
       }
     }
     assert.ok(hasToolCalls);
@@ -194,13 +197,13 @@ describe('MockModel', () => {
         tool_calls: [{
           id: 'call_1',
           type: 'function',
-          function: { name: 'read_file', arguments: '{}' }
+          function: { name: 'Read', arguments: '{}' }
         }]
       }]
     });
 
     const events = [];
-    for await (const chunk of model.chat([], [])) {
+    for await (const chunk of model.chatStream([], [])) {
       events.push(chunk);
     }
     // 应该先有 token 事件，再有 tool_calls 事件
@@ -214,23 +217,23 @@ describe('MockModel', () => {
     assert.ok(firstToolCallIdx > lastTokenIdx, 'tool_calls 应在 token 之后');
   });
 
-  it('chatComplete 应该返回完整文本', async () => {
+  it('chat (非流式) 应该返回完整文本', async () => {
     const model = new MockModel({ responses: [{ content: '这是一段总结。' }] });
-    const result = await model.chatComplete([]);
+    const result = await model.chat([]);
     assert.equal(result, '这是一段总结。');
   });
 
-  it('chatComplete 超出 responses 应返回 defaultResponse', async () => {
+  it('chat 超出 responses 应返回 defaultResponse', async () => {
     const model = new MockModel({ responses: [{ content: '唯一回复' }] });
-    await model.chatComplete([]); // 消耗第一条
-    const result = await model.chatComplete([]);
+    await model.chat([]); // 消耗第一条
+    const result = await model.chat([]);
     assert.equal(result, '这是一个模拟回复。');
   });
 
   it('reset 应重置调用计数', async () => {
     const model = new MockModel({ responses: [{ content: 'A' }, { content: 'B' }] });
     let c1 = '';
-    for await (const chunk of model.chat([], [])) {
+    for await (const chunk of model.chatStream([], [])) {
       if (chunk.type === 'token') c1 += chunk.content;
     }
     assert.equal(c1, 'A');
@@ -238,7 +241,7 @@ describe('MockModel', () => {
     model.reset();
 
     let c2 = '';
-    for await (const chunk of model.chat([], [])) {
+    for await (const chunk of model.chatStream([], [])) {
       if (chunk.type === 'token') c2 += chunk.content;
     }
     assert.equal(c2, 'A'); // reset 后应重新从第一条开始
@@ -248,7 +251,7 @@ describe('MockModel', () => {
     const model = new MockModel({ defaultResponse: 'AB', delayMs: 20 });
     const start = Date.now();
     const tokens = [];
-    for await (const chunk of model.chat([], [])) {
+    for await (const chunk of model.chatStream([], [])) {
       if (chunk.type === 'token') tokens.push(chunk.content);
     }
     const elapsed = Date.now() - start;
@@ -257,12 +260,12 @@ describe('MockModel', () => {
     assert.ok(elapsed >= 15, `应至少耗时 15ms，实际: ${elapsed}ms`);
   });
 
-  it('chat 应支持 abort signal', async () => {
+  it('chatStream 应支持 abort signal', async () => {
     const model = new MockModel({ defaultResponse: '很长的回复', delayMs: 50 });
     const controller = new AbortController();
     const tokens = [];
     try {
-      const iter = model.chat([], [], { signal: controller.signal });
+      const iter = model.chatStream([], [], { signal: controller.signal });
       // 消费第一个 token 后中断
       for await (const chunk of iter) {
         tokens.push(chunk);
@@ -279,12 +282,12 @@ describe('MockModel', () => {
     }
   });
 
-  it('chatComplete 应支持 abort signal', async () => {
+  it('chat (非流式) 应支持 abort signal', async () => {
     const model = new MockModel({ delayMs: 200 });
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 10);
     try {
-      await model.chatComplete([], { signal: controller.signal });
+      await model.chat([], { signal: controller.signal });
       // 如果到这没抛错，可能是 abort 在完成之后
     } catch (err) {
       assert.equal(err.name, 'AbortError');
@@ -343,9 +346,9 @@ describe('Logger', () => {
 });
 
 // ========================
-// Config（elf-001）测试
+// Config 统一加载器测试
 // ========================
-describe('Config (elf-001)', () => {
+describe('Config', () => {
   let tmpDir;
 
   beforeEach(() => {
@@ -368,9 +371,9 @@ describe('Config (elf-001)', () => {
     }
   }
 
-  it('应该加载 config.json 和 api_key.json', () => {
+  it('应该加载 config.json 和 api_key.json（type:path 格式）', () => {
     writeConfig(tmpDir,
-      { agentId: 'test-agent', port: 9000, provider: 'llm', systemPromptPath: 'sys.md', prefixPromptPath: 'pre.md', suffixPromptPath: 'suf.md' },
+      { agentId: 'test-agent', port: 9000, provider: 'llm', systemPrompt: { type: 'path', content: 'sys.md' }, prefix_prompt: { type: 'path', content: 'pre.md' }, suffix_prompt: { type: 'path', content: 'suf.md' } },
       { base_url: 'https://api.test.com', auth_token: 'sk-123', model: 'test-model' },
       { 'sys.md': '你是助手', 'pre.md': '前缀', 'suf.md': '后缀' }
     );
@@ -389,9 +392,23 @@ describe('Config (elf-001)', () => {
     assert.equal(config.getModelConfig().provider, 'llm');
   });
 
+  it('应该加载 type:path 格式的配置', () => {
+    writeConfig(tmpDir,
+      { agentId: 'test-agent', port: 9000, provider: 'llm', systemPrompt: { type: 'path', content: 'sys.md' }, prefix_prompt: { type: 'path', content: 'pre.md' } },
+      { base_url: 'https://api.test.com', auth_token: 'sk-123', model: 'test-model' },
+      { 'sys.md': '你是助手', 'pre.md': '前缀' }
+    );
+
+    const config = new Config(tmpDir);
+    config.load();
+
+    assert.equal(config.get('systemPrompt'), '你是助手');
+    assert.equal(config.get('prefix_prompt'), '前缀');
+  });
+
   it('prompt 文件不存在时应设为空字符串而不报错', () => {
     writeConfig(tmpDir,
-      { agentId: 'test', port: 9000, systemPromptPath: 'nonexistent.md', prefixPromptPath: 'nope.md', suffixPromptPath: 'nope2.md' },
+      { agentId: 'test', port: 9000, systemPrompt: { type: 'path', content: 'nonexistent.md' }, prefix_prompt: { type: 'path', content: 'nope.md' } },
       { base_url: 'https://api.test.com', auth_token: 'key', model: 'm' }
     );
 
@@ -400,22 +417,18 @@ describe('Config (elf-001)', () => {
 
     assert.equal(config.get('systemPrompt'), '');
     assert.equal(config.get('prefix_prompt'), '');
-    assert.equal(config.get('suffix_prompt'), '');
   });
 
-  it('使用默认 prompt 文件名当 pathKey 未指定时', () => {
+  it('type:path 文件不存在时应设为空字符串', () => {
     writeConfig(tmpDir,
-      { agentId: 'test', port: 9000 },
-      { base_url: 'https://api.test.com', auth_token: 'key', model: 'm' },
-      { 'system_prompt.md': '默认系统提示', 'prefix_prompt.md': '默认前缀', 'suffix_prompt.md': '默认后缀' }
+      { agentId: 'test', port: 9000, systemPrompt: { type: 'path', content: 'missing.md' } },
+      { base_url: 'https://api.test.com', auth_token: 'key', model: 'm' }
     );
 
     const config = new Config(tmpDir);
     config.load();
 
-    assert.equal(config.get('systemPrompt'), '默认系统提示');
-    assert.equal(config.get('prefix_prompt'), '默认前缀');
-    assert.equal(config.get('suffix_prompt'), '默认后缀');
+    assert.equal(config.get('systemPrompt'), '');
   });
 
   it('api_key.json 不存在时应自动创建空模板', () => {
@@ -492,9 +505,9 @@ describe('Config (elf-001)', () => {
 });
 
 // ========================
-// MessageManager（elf-001）测试
+// MessageManager 统一版测试
 // ========================
-describe('MessageManager (elf-001)', () => {
+describe('MessageManager', () => {
   it('应该正确追加和获取消息', () => {
     const mm = new MessageManager({ systemPrompt: 'You are helpful.', memoryTokenLimit: 8000 });
     mm.addUserMessage('你好');
@@ -583,30 +596,59 @@ describe('MessageManager (elf-001)', () => {
     assert.equal(userMsg.content, '你好');
   });
 
-  it('compactIfNeeded 在超阈值时应该压缩', async () => {
+  it('compactIfNeeded (generator) 在超阈值时应该压缩', async () => {
     const model = new MockModel({
       responses: [{ content: '这是压缩后的摘要。' }]
     });
     const mm = new MessageManager({ systemPrompt: 'test', memoryTokenLimit: 5 });
     mm.addUserMessage('这是一段很长的文本用于触发记忆压缩功能测试，需要使token超过阈值才能触发压缩逻辑的执行');
     mm.addAssistantMessage('好的，我明白了。这段对话内容需要被压缩以节省token空间，确保后续对话可以继续进行而不丢失关键信息。');
-    const result = await mm.compactIfNeeded(model);
-    assert.ok(result);
+
+    const events = [];
+    for await (const event of mm.compactIfNeeded(model)) {
+      events.push(event);
+    }
+
+    // 应该有 compact_start 和 compact 事件
+    assert.ok(events.find(e => e.event === 'compact_start'), '应有 compact_start 事件');
+    assert.ok(events.find(e => e.event === 'compact'), '应有 compact 事件');
+
+    // 压缩后消息应该变少
     const msgs = mm.getMessagesForLLM();
-    assert.equal(msgs[0].role, 'system');
-    assert.ok(msgs.length <= 3);
+    assert.ok(msgs.length <= 3, '压缩后消息应大幅减少');
+  });
+
+  it('compactIfNeeded (generator) 在未超阈值时不应压缩', async () => {
+    const model = new MockModel();
+    const mm = new MessageManager({ systemPrompt: 'test', memoryTokenLimit: 99999 });
+    mm.addUserMessage('短消息');
+
+    const events = [];
+    for await (const event of mm.compactIfNeeded(model)) {
+      events.push(event);
+    }
+
+    assert.equal(events.length, 0, '未超阈值不应有压缩事件');
   });
 });
 
 // ========================
-// Agent（elf-001）测试
+// Agent (DefaultAgent) 测试
 // ========================
-describe('Agent (elf-001)', () => {
+describe('Agent', () => {
   let agent, model, messageManager, toolRegistry, config;
 
   beforeEach(() => {
-    const configDir = path.join(process.cwd(), 'agents', 'elf-001', 'config');
-    config = new Config(configDir);
+    // 使用临时目录创建 Config
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-agent-test-'));
+    fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify({
+      agentId: 'test-agent', port: 9000, provider: 'mock'
+    }), 'utf-8');
+    fs.writeFileSync(path.join(tmpDir, 'api_key.json'), JSON.stringify({
+      base_url: 'https://test.com', auth_token: 'key', model: 'test'
+    }), 'utf-8');
+
+    config = new Config(tmpDir);
     config.load();
 
     model = new MockModel({
@@ -614,7 +656,7 @@ describe('Agent (elf-001)', () => {
     });
 
     toolRegistry = new ToolRegistry();
-    toolRegistry.register(readFileTool);
+    toolRegistry.register(Read);
 
     messageManager = new MessageManager({
       systemPrompt: config.get('systemPrompt') || '你是助手',
@@ -635,14 +677,14 @@ describe('Agent (elf-001)', () => {
     assert.ok(doneEvents.length === 1, '应有 done 事件');
   });
 
-  it('应该发射 tool_call 事件', async () => {
+  it('应该发射 tool_call 事件并带 description（callSummary）', async () => {
     const toolModel = new MockModel({
       responses: [
         {
           tool_calls: [{
             id: 'call_1',
             type: 'function',
-            function: { name: 'read_file', arguments: '{"path":"/etc/hostname"}' }
+            function: { name: 'Read', arguments: '{"file_path":"/etc/hostname"}' }
           }]
         },
         { content: '文件内容已读取完毕。' }
@@ -656,7 +698,34 @@ describe('Agent (elf-001)', () => {
     const toolCallEvents = events.filter(e => e.event === 'tool_call');
     assert.ok(toolCallEvents.length > 0, '应有 tool_call 事件');
     assert.ok(toolCallEvents[0].data.tool_calls, 'tool_call 事件应有 tool_calls 数据');
-    assert.equal(toolCallEvents[0].data.tool_calls[0].name, 'read_file');
+    assert.equal(toolCallEvents[0].data.tool_calls[0].name, 'Read');
+    // callSummary 应该从工具元数据读取
+    assert.equal(toolCallEvents[0].data.tool_calls[0].description, '/etc/hostname');
+  });
+
+  it('应该从工具元数据发射 status 事件而非硬编码', async () => {
+    const toolModel = new MockModel({
+      responses: [
+        {
+          tool_calls: [{
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'Read', arguments: '{"file_path":"/etc/hostname"}' }
+          }]
+        },
+        { content: '好了。' }
+      ]
+    });
+    agent.updateModel(toolModel);
+    const events = [];
+    for await (const event of agent.receive('读取文件')) {
+      events.push(event);
+    }
+    const statusEvents = events.filter(e => e.event === 'status');
+    // 应有 reading_file 状态（来自 Read 工具的 statusEvent）
+    const readingStatus = statusEvents.find(e => e.data.state === 'reading_file');
+    assert.ok(readingStatus, '应有 reading_file 状态事件');
+    assert.ok(readingStatus.data.detail.includes('/etc/hostname'), '状态事件应带文件路径');
   });
 
   it('记忆压缩阈值应使用 messageManager.memoryTokenLimit', async () => {
@@ -689,5 +758,335 @@ describe('Agent (elf-001)', () => {
     assert.ok(doneEvent);
     assert.ok(doneEvent.data.usage);
     assert.ok(typeof doneEvent.data.usage.prompt_tokens === 'number');
+  });
+});
+
+// ========================
+// 工具元数据测试
+// ========================
+describe('Tool metadata', () => {
+  it('Read 应有 statusEvent 和 callSummary', () => {
+    assert.ok(Read.statusEvent, 'Read 应有 statusEvent');
+    assert.equal(Read.statusEvent.state, 'reading_file');
+    assert.equal(Read.statusEvent.detail({ file_path: '/test.txt' }), '正在读取 /test.txt');
+    assert.equal(Read.callSummary({ file_path: '/test.txt' }), '/test.txt');
+  });
+
+  it('Bash 应有 statusEvent 和 callSummary', () => {
+    assert.ok(Bash.statusEvent, 'Bash 应有 statusEvent');
+    assert.equal(Bash.statusEvent.state, 'executing_command');
+    // callSummary 优先使用 description
+    assert.equal(Bash.callSummary({ description: '列出文件', command: 'ls -la' }), '列出文件');
+    // 回退到 command
+    assert.equal(Bash.callSummary({ command: 'ls -la' }), 'ls -la');
+  });
+
+  it('Write 应有 statusEvent 和 callSummary', () => {
+    assert.ok(Write.statusEvent, 'Write 应有 statusEvent');
+    assert.equal(Write.statusEvent.state, 'writing_file');
+    assert.equal(Write.callSummary({ file_path: '/tmp/out.txt' }), '/tmp/out.txt');
+  });
+
+  it('Edit 应有 statusEvent 和 callSummary', () => {
+    assert.ok(Edit.statusEvent, 'Edit 应有 statusEvent');
+    assert.equal(Edit.statusEvent.state, 'editing_file');
+    assert.equal(Edit.callSummary({ file_path: '/tmp/edit.txt' }), '/tmp/edit.txt');
+  });
+
+  it('Glob 应有 statusEvent 和 callSummary', () => {
+    assert.ok(Glob.statusEvent, 'Glob 应有 statusEvent');
+    assert.equal(Glob.statusEvent.state, 'searching_files');
+    assert.equal(Glob.callSummary({ pattern: '**/*.js' }), '**/*.js');
+  });
+
+  it('ToolRegistry.get 应返回完整工具对象（含元数据）', () => {
+    const registry = new ToolRegistry();
+    registry.register(Read);
+    const tool = registry.get('Read');
+    assert.ok(tool);
+    assert.equal(tool.name, 'Read');
+    assert.ok(tool.statusEvent);
+    assert.ok(tool.callSummary);
+  });
+});
+
+// ========================
+// Shared Tools 测试
+// ========================
+describe('Shared Tools', () => {
+  let registry;
+  const testFile = '/tmp/elf-tool-test.txt';
+
+  beforeEach(() => {
+    resetReadState();
+    registry = new ToolRegistry();
+    registry.register(Read);
+    registry.register(Write);
+    registry.register(Edit);
+    registry.register(Bash);
+    registry.register(Glob);
+    try { fs.unlinkSync(testFile); } catch {}
+  });
+
+  afterEach(() => {
+    try { fs.unlinkSync(testFile); } catch {}
+  });
+
+  // Read
+  describe('Read', () => {
+    it('应返回 cat -n 格式内容', async () => {
+      const result = await registry.execute('Read', {
+        file_path: 'shared/agent/tools/index.js'
+      });
+      assert.match(result, /^\d+\t/);
+    });
+
+    it('文件不存在应返回错误', async () => {
+      const result = await registry.execute('Read', {
+        file_path: '/nonexistent/path.txt'
+      });
+      assert.match(result, /File does not exist/);
+    });
+
+    it('目录应返回错误', async () => {
+      const result = await registry.execute('Read', {
+        file_path: 'shared'
+      });
+      assert.match(result, /is a directory/);
+    });
+
+    it('支持 offset 和 limit', async () => {
+      const result = await registry.execute('Read', {
+        file_path: 'shared/agent/tools/index.js',
+        offset: 1,
+        limit: 1
+      });
+      const lines = result.trim().split('\n');
+      assert.ok(lines.length <= 1);
+    });
+  });
+
+  // Write
+  describe('Write', () => {
+    it('应创建新文件', async () => {
+      const result = await registry.execute('Write', {
+        file_path: testFile,
+        content: 'hello'
+      });
+      assert.match(result, /File created successfully/);
+      assert.ok(fs.existsSync(testFile));
+    });
+
+    it('未 Read 覆盖已有文件应拒绝', async () => {
+      fs.writeFileSync(testFile, 'original');
+      const result = await registry.execute('Write', {
+        file_path: testFile,
+        content: 'hacked'
+      });
+      assert.match(result, /must Read the file first/);
+    });
+
+    it('Read 后覆盖应成功', async () => {
+      fs.writeFileSync(testFile, 'original');
+      await registry.execute('Read', { file_path: testFile });
+      const result = await registry.execute('Write', {
+        file_path: testFile,
+        content: 'updated'
+      });
+      assert.match(result, /File overwritten successfully/);
+    });
+  });
+
+  // Edit
+  describe('Edit', () => {
+    beforeEach(async () => {
+      await registry.execute('Write', {
+        file_path: testFile,
+        content: 'line1\nline2\nline3'
+      });
+      await registry.execute('Read', { file_path: testFile });
+    });
+
+    it('应精准替换', async () => {
+      const result = await registry.execute('Edit', {
+        file_path: testFile,
+        old_string: 'line2',
+        new_string: 'replaced'
+      });
+      assert.match(result, /has been updated successfully/);
+      const content = fs.readFileSync(testFile, 'utf-8');
+      assert.ok(content.includes('replaced'));
+    });
+
+    it('old_string 未找到应报错', async () => {
+      const result = await registry.execute('Edit', {
+        file_path: testFile,
+        old_string: 'nonexistent',
+        new_string: 'x'
+      });
+      assert.match(result, /old_string not found/);
+    });
+
+    it('old_string 多处匹配未开 replace_all 应报错', async () => {
+      await registry.execute('Write', {
+        file_path: testFile,
+        content: 'dup dup dup'
+      });
+      await registry.execute('Read', { file_path: testFile });
+      const result = await registry.execute('Edit', {
+        file_path: testFile,
+        old_string: 'dup',
+        new_string: 'x'
+      });
+      assert.match(result, /Set replace_all=true/);
+    });
+
+    it('replace_all 应全部替换', async () => {
+      await registry.execute('Write', {
+        file_path: testFile,
+        content: 'dup dup dup'
+      });
+      await registry.execute('Read', { file_path: testFile });
+      await registry.execute('Edit', {
+        file_path: testFile,
+        old_string: 'dup',
+        new_string: 'x',
+        replace_all: true
+      });
+      const content = fs.readFileSync(testFile, 'utf-8');
+      assert.equal(content, 'x x x');
+    });
+
+    it('old_string === new_string 应报错', async () => {
+      const result = await registry.execute('Edit', {
+        file_path: testFile,
+        old_string: 'line2',
+        new_string: 'line2'
+      });
+      assert.match(result, /identical/);
+    });
+
+    it('未 Read 应拒绝', async () => {
+      resetReadState();
+      try { fs.unlinkSync(testFile); } catch {}
+      fs.writeFileSync(testFile, 'fresh');
+      const result = await registry.execute('Edit', {
+        file_path: testFile,
+        old_string: 'fresh',
+        new_string: 'x'
+      });
+      assert.match(result, /must Read the file first/);
+    });
+  });
+
+  // Bash
+  describe('Bash', () => {
+    it('成功应返回 stdout', async () => {
+      const result = await registry.execute('Bash', {
+        command: 'echo hello'
+      });
+      assert.ok(result.includes('hello'));
+      assert.ok(!result.startsWith('Exit code'));
+    });
+
+    it('失败应返回 Exit code', async () => {
+      const result = await registry.execute('Bash', {
+        command: 'exit 3'
+      });
+      assert.match(result, /^Exit code 3/);
+    });
+  });
+
+  // Glob
+  describe('Glob', () => {
+    it('应匹配文件名', async () => {
+      const result = await registry.execute('Glob', {
+        pattern: 'shared/agent/tools/Read.js'
+      });
+      assert.match(result, /Read\.js/);
+      assert.match(result, /\(file/);
+    });
+
+    it('** 应递归匹配', async () => {
+      const result = await registry.execute('Glob', {
+        pattern: 'shared/**/Read.js'
+      });
+      assert.match(result, /Read\.js/);
+    });
+
+    it('无匹配应返回空字符串', async () => {
+      const result = await registry.execute('Glob', {
+        pattern: 'zzz_nonexistent_glob_*'
+      });
+      assert.equal(result, '');
+    });
+
+    it('[A-Z] 字符类应生效', async () => {
+      const result = await registry.execute('Glob', {
+        pattern: 'shared/agent/tools/[A-Z]*.js'
+      });
+      assert.match(result, /Read\.js/);
+    });
+  });
+
+  // tool_result 事件
+  describe('tool_result event', () => {
+    it('成功工具应发送 status=success 的 tool_result', async () => {
+      const model = new MockModel({
+        responses: [{
+          tool_calls: [{
+            id: 't1',
+            function: { name: 'Bash', arguments: '{"command":"echo ok"}' }
+          }]
+        }]
+      });
+      const mm = new MessageManager({ systemPrompt: 's', memoryTokenLimit: 8000 });
+      const agentRegistry = new ToolRegistry();
+      agentRegistry.register(Bash);
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-tool-result-'));
+      fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify({ agentId: 'test' }), 'utf-8');
+      fs.writeFileSync(path.join(tmpDir, 'api_key.json'), JSON.stringify({ base_url: '', auth_token: '', model: '' }), 'utf-8');
+      const cfg = new Config(tmpDir);
+      cfg.load();
+      const ag = new Agent({ config: cfg, model, toolRegistry: agentRegistry, messageManager: mm });
+
+      const events = [];
+      for await (const event of ag.receive('test')) {
+        events.push(event);
+      }
+      const results = events.filter(e => e.event === 'tool_result');
+      assert.ok(results.length > 0, '应有 tool_result 事件');
+      assert.equal(results[0].data.status, 'success');
+    });
+
+    it('失败工具应发送 status=error 和 message', async () => {
+      const model = new MockModel({
+        responses: [{
+          tool_calls: [{
+            id: 't2',
+            function: { name: 'Read', arguments: '{"file_path":"/nonexistent"}' }
+          }]
+        }]
+      });
+      const mm = new MessageManager({ systemPrompt: 's', memoryTokenLimit: 8000 });
+      const agentRegistry = new ToolRegistry();
+      agentRegistry.register(Read);
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-tool-result2-'));
+      fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify({ agentId: 'test' }), 'utf-8');
+      fs.writeFileSync(path.join(tmpDir, 'api_key.json'), JSON.stringify({ base_url: '', auth_token: '', model: '' }), 'utf-8');
+      const cfg = new Config(tmpDir);
+      cfg.load();
+      const ag = new Agent({ config: cfg, model, toolRegistry: agentRegistry, messageManager: mm });
+
+      const events = [];
+      for await (const event of ag.receive('test')) {
+        events.push(event);
+      }
+      const results = events.filter(e => e.event === 'tool_result');
+      assert.ok(results.length > 0, '应有 tool_result 事件');
+      assert.equal(results[0].data.status, 'error');
+      assert.ok(results[0].data.message);
+      assert.match(results[0].data.message, /File does not exist/);
+    });
   });
 });

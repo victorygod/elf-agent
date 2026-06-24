@@ -1,0 +1,32 @@
+{
+  "tabs": [
+    {
+      "key": "prompt",
+      "label": "提示词配置",
+      "fields": [
+        { "key": "systemPrompt", "type": "textarea", "label": "系统提示词", "hint": "定义 Agent 的角色和行为方式" },
+        { "key": "prefix_prompt", "type": "textarea", "label": "前缀提示词", "hint": "附加在用户最新输入之前，仅发送给 LLM 时拼接，不写入记忆" },
+        { "key": "suffix_prompt", "type": "textarea", "label": "后缀提示词", "hint": "附加在用户最新输入之后，仅发送给 LLM 时拼接，不写入记忆" }
+      ]
+    },
+    {
+      "key": "agent",
+      "label": "Agent 配置",
+      "fields": [
+        { "key": "avatar", "type": "avatar" },
+        { "key": "name", "type": "text", "label": "Agent 名称", "hint": "显示在前端界面的可读名称" },
+        { "key": "memoryTokenLimit", "type": "number", "label": "记忆压缩 Token 上限", "hint": "超过此阈值时触发记忆压缩（建议 4000-16000）" },
+        { "key": "maxIterations", "type": "number", "label": "最大迭代轮数", "hint": "Agent Loop 最大循环次数（设为 0 表示无限迭代）" }
+      ]
+    },
+    {
+      "key": "model",
+      "label": "模型配置",
+      "fields": [
+        { "key": "base_url", "type": "text", "label": "API Base URL", "hint": "LLM API 端点地址" },
+        { "key": "auth_token", "type": "text", "label": "Auth Token", "hint": "LLM API 认证密钥" },
+        { "key": "model", "type": "text", "label": "模型名称", "hint": "如 gpt-4o、GLM-5.1、deepseek-chat" }
+      ]
+    }
+  ]
+}

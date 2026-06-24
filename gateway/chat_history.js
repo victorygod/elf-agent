@@ -46,10 +46,11 @@ export class ChatHistory {
    * @param {string} agentId
    * @param {string} role - 'user' 或 'assistant'
    * @param {string} content
-   * @param {Array} [toolCalls] - 工具调用信息 [{ name: string, args: { key: string } }]
+   * @param {Array} [toolCalls] - 工具调用信息 [{ name, args, status?, message? }]
+   * @param {object} [extraFields] - 附加字段（如 compactSummary, compactError）
    * @returns {{ id: string, role: string, content: string, ts: string, toolCalls?: Array }}
    */
-  addMessage(agentId, role, content, toolCalls) {
+  addMessage(agentId, role, content, toolCalls, extraFields) {
     const id = this._generateId();
     const record = {
       id,
@@ -60,6 +61,10 @@ export class ChatHistory {
     // 只在有工具调用时才存储 toolCalls 字段
     if (toolCalls && toolCalls.length > 0) {
       record.toolCalls = toolCalls;
+    }
+    // 合并附加字段（compactSummary / compactError 等）
+    if (extraFields && Object.keys(extraFields).length > 0) {
+      Object.assign(record, extraFields);
     }
 
     const filePath = this._getFilePath(agentId);
@@ -73,31 +78,32 @@ export class ChatHistory {
   }
 
   /**
-   * 更新最后一条 assistant 消息的附加字段（用于 compactSummary 等附着到消息上，类似 toolCalls 模式）
-   * @param {string} agentId
-   * @param {object} updates - 要合并到记录中的字段，如 { compactSummary: '...' }
-   * @returns {boolean} 是否更新成功
+   * 合并相邻的 compactLoading + compactSummary/compactError 记录
+   * compact_start 事件写入 { compactLoading: true }，compact/compact_error 事件
+   * 又写入一条独立记录。读取时将它们合并为一条，避免前端同时显示两条消息。
    */
-  updateLastMessage(agentId, updates) {
-    const filePath = this._getFilePath(agentId);
-    if (!fs.existsSync(filePath)) return false;
-
-    try {
-      const raw = fs.readFileSync(filePath, 'utf-8');
-      const lines = raw.split('\n').filter(l => l.trim());
-      if (lines.length === 0) return false;
-
-      const lastLine = lines[lines.length - 1];
-      const record = JSON.parse(lastLine);
-      Object.assign(record, updates);
-
-      lines[lines.length - 1] = JSON.stringify(record);
-      fs.writeFileSync(filePath, lines.join('\n') + '\n', 'utf-8');
-      return true;
-    } catch (err) {
-      logger.error(`更新最后一条消息失败 (${agentId}): ${err.message}`);
-      return false;
+  _mergeCompactRecords(records) {
+    if (!records || records.length === 0) return records;
+    const result = [];
+    let i = 0;
+    while (i < records.length) {
+      const rec = records[i];
+      // 如果当前记录是 compactLoading，检查下一条是否是 compactSummary/compactError
+      if (rec.compactLoading && i + 1 < records.length) {
+        const next = records[i + 1];
+        if (next.compactSummary !== undefined || next.compactError !== undefined) {
+          // 合并：保留 compactSummary/compactError，去掉 compactLoading
+          const merged = { ...next };
+          // 保留 id/ts 用下一条（完成时间更准确）
+          result.push(merged);
+          i += 2;
+          continue;
+        }
+      }
+      result.push(rec);
+      i++;
     }
+    return result;
   }
 
   /**
@@ -105,9 +111,10 @@ export class ChatHistory {
    * @param {string} agentId
    * @param {number} [limit=30] - 返回条数
    * @param {string} [beforeId] - 游标：返回此 id 之前的消息
+   * @param {string} [afterId] - 游标：返回此 id 之后的消息（增量查询）
    * @returns {{ messages: Array, hasMore: boolean }}
    */
-  getRecent(agentId, limit = 30, beforeId) {
+  getRecent(agentId, limit = 30, beforeId, afterId) {
     const filePath = this._getFilePath(agentId);
 
     // 文件不存在则返回空
@@ -130,18 +137,29 @@ export class ChatHistory {
       return { messages: [], hasMore: false };
     }
 
-    // 如果指定了 beforeId，找到该 id 的位置，取其之前的记录
-    let records = allRecords;
-    if (beforeId) {
-      const idx = allRecords.findIndex(r => r.id === beforeId);
-      if (idx > 0) {
-        records = allRecords.slice(0, idx);
-      } else if (idx === 0) {
-        // beforeId 是第一条，之前没有更多
-        return { messages: [], hasMore: false };
+    // 后处理：合并相邻的 compactLoading + compactSummary/compactError
+    // compact_start 写入 { compactLoading: true }，compact/compact_error 又写入一条独立记录，
+    // 需要合并为一条，否则前端会显示两条消息（⏳ 和 ✅ 同时出现）
+    let records = this._mergeCompactRecords(allRecords);
+
+    // afterId：返回 afterId 之后的所有消息（增量查询）
+    if (afterId) {
+      const idx = records.findIndex(r => r.id === afterId);
+      if (idx >= 0 && idx < records.length - 1) {
+        records = records.slice(idx + 1);
       } else {
-        // beforeId 找不到，忽略游标，返回最新的
-        records = allRecords;
+        return { messages: [], hasMore: false };
+      }
+      return { messages: records, hasMore: false };
+    }
+
+    // beforeId：向前翻页
+    if (beforeId) {
+      const idx = records.findIndex(r => r.id === beforeId);
+      if (idx > 0) {
+        records = records.slice(0, idx);
+      } else if (idx === 0) {
+        return { messages: [], hasMore: false };
       }
     }
 

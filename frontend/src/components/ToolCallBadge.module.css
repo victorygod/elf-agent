@@ -1,0 +1,93 @@
+.badge {
+  background: #e8f4fd;
+  border: 1px solid #b3d8f7;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #1a73e8;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+  word-break: break-all;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+/* 执行中状态 */
+.executing {
+  border-color: #f9a825;
+  background: #fff8e1;
+}
+
+/* 成功状态 */
+.success {
+  border-color: #4caf50;
+  background: #e8f5e9;
+}
+
+/* 失败状态 */
+.error {
+  border-color: #ef5350;
+  background: #ffebee;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.name {
+  font-weight: 500;
+}
+
+
+/* 成功绿点 */
+.successDot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4caf50;
+  flex-shrink: 0;
+}
+
+/* 执行中标签 */
+.executingLabel {
+  color: #f57f17;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+/* 失败标签 */
+.errorLabel {
+  color: #c62828;
+  font-size: 11px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.args {
+  margin-top: 2px;
+  padding-left: 16px;
+}
+
+.arg {
+  color: #5f6368;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* 错误消息 */
+.errorMsg {
+  margin-top: 4px;
+  padding: 4px 6px;
+  background: rgba(198, 40, 40, 0.08);
+  border-radius: 4px;
+  color: #c62828;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+}

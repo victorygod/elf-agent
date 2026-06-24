@@ -1,0 +1,106 @@
+.message {
+  display: flex;
+  gap: 10px;
+  max-width: calc(100% - 46px);
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.user { align-self: flex-end; flex-direction: row-reverse; }
+.assistant { align-self: flex-start; }
+
+.inGroup {
+  /* 组内 assistant 消息不占 max-width，由 group 控制 */
+  max-width: 100%;
+}
+.system { align-self: center; max-width: 90%; }
+
+.body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.user .body { align-items: flex-end; }
+.assistant .body { align-items: flex-start; }
+
+.time {
+  font-size: 11px;
+  color: #999;
+  padding: 0 4px;
+  line-height: 16px;
+  height: 16px;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  margin-bottom: 2px;
+}
+
+.body:hover .time,
+.showTime .time {
+  opacity: 1;
+}
+
+.avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 600;
+  flex-shrink: 0;
+  overflow: hidden;
+  color: #fff;
+}
+
+.bubble {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 1.6;
+  word-break: break-word;
+  cursor: default;
+}
+
+.user .bubble {
+  background: #07c160;
+  color: #fff;
+  border-top-right-radius: 2px;
+  white-space: pre-wrap;     /* 用户纯文本保留换行 */
+}
+
+.assistant .bubble {
+  background: #fff;
+  color: #333;
+  border-top-left-radius: 2px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+  /* 不设 white-space: pre-wrap，由 MarkdownContent 自己控制排版 */
+}
+
+.system .bubble {
+  background: transparent;
+  color: #b0b0b0;
+  font-size: 12px;
+  padding: 4px 8px;
+  text-align: center;
+}
+
+.cursor {
+  display: inline;
+  animation: blink 1s steps(2) infinite;
+}
+
+@keyframes blink {
+  0% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@media (max-width: 768px) {
+  .message { max-width: calc(100% - 46px); }
+}

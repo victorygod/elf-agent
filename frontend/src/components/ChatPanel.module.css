@@ -1,0 +1,322 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  position: relative;
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.assistantGroup {
+  display: flex;
+  gap: 10px;
+  align-self: flex-start;
+  max-width: calc(100% - 46px);
+}
+
+.avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 600;
+  flex-shrink: 0;
+  overflow: hidden;
+  color: #fff;
+}
+
+.assistantCol {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
+  flex: 1;
+  gap: 4px;
+}
+
+.groupBody {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
+  flex: 1;
+  align-items: stretch;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border-top-left-radius: 2px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+  animation: fadeIn 0.2s ease;
+  gap: 8px;
+}
+
+.time {
+  font-size: 11px;
+  color: #999;
+  padding: 0 4px;
+  line-height: 16px;
+  height: 16px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  flex-shrink: 0;
+  margin-bottom: 2px;
+}
+
+.assistantGroup .time {
+  align-self: flex-start;
+}
+
+.userBody .time {
+  align-self: flex-end;
+}
+
+/* hover 气泡时显示上方时间戳 */
+.assistantCol:hover .time,
+.assistantCol.showTime .time {
+  opacity: 1;
+}
+
+.userBody:hover .time,
+.userBody.showTime .time {
+  opacity: 1;
+}
+
+/* ChatPanel 中的 assistant 子 section（气泡整体背景在 groupBody 上） */
+.bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+  line-height: 1.6;
+  word-break: break-word;
+  cursor: default;
+  color: #333;
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+
+/* 子 section 之间的分隔线 */
+.sectionDivider {
+  height: 1px;
+  background: #e8e8e8;
+  margin: 2px 0;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.cursor {
+  display: inline;
+  animation: blink 1s steps(2) infinite;
+  font-size: 14px;
+  line-height: 1;
+  vertical-align: baseline;
+}
+
+@keyframes blink {
+  0% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.messages::-webkit-scrollbar { width: 6px; }
+.messages::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+
+.loadMore {
+  text-align: center;
+  padding: 8px 0;
+}
+
+.loadMoreBtn {
+  background: none;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: #999;
+  cursor: pointer;
+}
+.loadMoreBtn:hover { color: #333; border-color: #999; }
+.loadMoreBtn:disabled { opacity: 0.5; cursor: default; }
+
+.inputArea {
+  padding: 16px 20px;
+  background: #fff;
+  border-top: 1px solid #e0e0e0;
+  flex-shrink: 0;
+}
+
+.inputWrapper {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.textarea {
+  flex: 1;
+  resize: none;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.5;
+  outline: none;
+  min-height: 42px;
+  max-height: 120px;
+  transition: border-color 0.15s;
+}
+.textarea:focus { border-color: #07c160; }
+
+.sendBtn {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  background: #07c160 center/22px no-repeat;
+  border: none;
+  cursor: pointer;
+  transition: background-color 0.15s;
+  flex-shrink: 0;
+  padding: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 24 24' fill='white'%3E%3Cpath d='M2.01 21L23 12 2.01 3 2 10l15 2-15 2z'/%3E%3C/svg%3E");
+}
+.sendBtn:hover { background-color: #06ad56; }
+.sendBtn.disabled { background-color: #ccc; cursor: not-allowed; }
+
+.stopBtn {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  background: #ff4d4f;
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.stopBtn:hover { background: #ff7875; }
+
+/* Turn 模型：用户消息样式 */
+.userMessage {
+  display: flex;
+  gap: 10px;
+  align-self: flex-end;
+  max-width: calc(100% - 46px);
+}
+
+.userAvatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 600;
+  flex-shrink: 0;
+  overflow: hidden;
+  color: #fff;
+  order: 2; /* 头像在右侧 */
+}
+
+.userBody {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
+  flex: 1;
+  align-items: flex-end;
+}
+
+.userBubble {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 1.6;
+  word-break: break-word;
+  cursor: default;
+  background: #07c160;
+  color: #fff;
+  border-top-right-radius: 2px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+  animation: fadeIn 0.2s ease;
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+
+/* 气泡内 typing dots */
+.dots {
+  display: flex;
+  gap: 4px;
+  padding: 2px 0;
+}
+
+.dots span {
+  width: 6px;
+  height: 6px;
+  background: #999;
+  border-radius: 50%;
+  animation: bounce 1.4s infinite;
+}
+
+.dots span:nth-child(2) { animation-delay: 0.2s; }
+.dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes bounce {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-6px); }
+}
+
+/* 排队指示器 */
+.queuedIndicator {
+  margin-left: 6px;
+  opacity: 0.7;
+  font-size: 12px;
+}
+
+/* Toast 通知 */
+.toast {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 16px;
+  border-radius: 16px;
+  font-size: 12px;
+  color: #666;
+  background: rgba(255,255,255,0.92);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  z-index: 10;
+  opacity: 1;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.toastFade {
+  opacity: 0;
+}
+
+@media (max-width: 768px) {
+  .messages { padding: 12px; }
+  .inputArea {
+    padding: 12px;
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+}

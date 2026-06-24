@@ -78,7 +78,7 @@ export class LLMModel {
    * 流式调用 LLM，返回 AsyncIterable<chunk>
    * chunk 格式: { type: 'token', content: '...' } | { type: 'tool_calls', tool_calls: [...] }
    */
-  async *chat(messages, tools, options = {}) {
+  async *chatStream(messages, tools, options = {}) {
     const url = `${this.baseUrl}/chat/completions`;
     const body = this._body(messages, true, tools, options);
 
@@ -198,7 +198,7 @@ export class LLMModel {
   /**
    * 非流式调用（用于记忆压缩等内部调用）
    */
-  async chatComplete(messages, options = {}) {
+  async chat(messages, options = {}) {
     const url = `${this.baseUrl}/chat/completions`;
     const body = this._body(messages, false, null, options);
 

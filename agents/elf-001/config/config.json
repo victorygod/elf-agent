@@ -1,15 +1,27 @@
 {
   "agentId": "elf-001",
-  "name": "fengyue",
+  "name": "Fengyue",
   "port": 8081,
   "avatar": "avatar.png",
   "userAvatar": "user_avatar.webp",
   "provider": "llm",
-  "systemPromptPath": "system_prompt.md",
-  "prefixPromptPath": "prefix_prompt.md",
-  "suffixPromptPath": "suffix_prompt.md",
+  "systemPrompt": {
+    "type": "path",
+    "content": "system_prompt.md"
+  },
+  "prefix_prompt": {
+    "type": "path",
+    "content": "prefix_prompt.md"
+  },
+  "suffix_prompt": {
+    "type": "path",
+    "content": "suffix_prompt.md"
+  },
   "memoryTokenLimit": 500,
   "maxIterations": 0,
+  "tools": [
+    "Read"
+  ],
   "_ui": {
     "name": {
       "label": "Agent 名称",

@@ -7,10 +7,10 @@ import fs from 'fs';
 import path from 'path';
 import express from 'express';
 import { createLogger } from '../shared/logger.js';
-import { generateDefaultConfigUI } from './config-ui.js';
-import { readAgentConfig, writeAgentConfig, readApiKey } from './config_store.js';
+import { getConfigUI } from './config-ui.js';
+import { readAgentConfig, writeAgentConfig } from './config_store.js';
 import { handleAvatarUpload } from './avatar.js';
-import { proxyChat } from './chat_proxy.js';
+import { subscribeToStream, proxyChat } from './chat_proxy.js';
 
 const logger = createLogger('gateway-server', 'gateway.log');
 
@@ -55,8 +55,12 @@ export function createGatewayApp(pm, chatHistory) {
       for (const [id] of pm.agents) {
         await pm.probeAgent(id);
       }
+      const list = pm.listAgents();
+      for (const agent of list) {
+        agent.streaming = (activeStreams.get(agent.agentId) || 0) > 0;
+      }
       res.json({
-        agents: pm.listAgents(),
+        agents: list,
         discovery: result
       });
     } catch (err) {
@@ -67,8 +71,9 @@ export function createGatewayApp(pm, chatHistory) {
 
   // GET /agents/:id — 获取单个 Agent 详情
   app.get('/agents/:id', checkAgentExists, (req, res) => {
-    const info = pm.getAgent(req.params.id);
-    info.streaming = (activeStreams.get(req.params.id) || 0) > 0;
+    const id = req.params.id;
+    const info = pm.getAgent(id);
+    info.streaming = (activeStreams.get(id) || 0) > 0;
     res.json(info);
   });
 
@@ -111,7 +116,8 @@ export function createGatewayApp(pm, chatHistory) {
     }
   });
 
-  // POST /agents/:id/chat — 与 Agent 对话（SSE 解析转发 + 写 history）
+  // POST /agents/:id/chat — 与 Agent 对话
+  // Agent 正在回复中时拒绝新消息（同一 agent 不允许并发对话）
   app.post('/agents/:id/chat', checkAgentExists, (req, res) => {
     const id = req.params.id;
     const status = pm.getAgentStatus(id);
@@ -125,14 +131,40 @@ export function createGatewayApp(pm, chatHistory) {
       return res.status(400).json({ error: 'Request body must include "message" field' });
     }
 
+    // ★ Agent 正在回复中，拒绝新消息
+    if ((activeStreams.get(id) || 0) > 0) {
+      return res.status(422).json({ error: 'Agent 正在回复中，请稍后再试' });
+    }
+
+    // 写 user 消息到 jsonl
+    const msgRecord = chatHistory ? chatHistory.addMessage(id, 'user', req.body.message) : null;
+
+    // 设置 SSE 响应头
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders();
+    if (res.socket) res.socket.setNoDelay(true);
+
+    // 直接代理到 Agent（不经过队列）
     proxyChat({
       agentId: id,
       port,
-      req,
+      message: req.body.message,
       res,
       chatHistory,
-      activeStreams
+      activeStreams,
+      userMessageRecord: msgRecord,
     });
+  });
+
+  // GET /agents/:id/subscribe — 重新连接 SSE 流（页面刷新后恢复流式输出）
+  app.get('/agents/:id/subscribe', checkAgentExists, (req, res) => {
+    const id = req.params.id;
+    subscribeToStream(id, res, chatHistory);
   });
 
   // GET /agents/:id/history — 获取聊天记录
@@ -140,13 +172,14 @@ export function createGatewayApp(pm, chatHistory) {
     const id = req.params.id;
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
     const beforeId = req.query.before || null;
+    const afterId = req.query.afterId || null;
 
     if (!chatHistory) {
       return res.json({ messages: [], hasMore: false });
     }
 
     try {
-      const result = chatHistory.getRecent(id, limit, beforeId);
+      const result = chatHistory.getRecent(id, limit, beforeId, afterId);
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: `Failed to read history: ${err.message}` });
@@ -178,7 +211,6 @@ export function createGatewayApp(pm, chatHistory) {
         await fetch(`http://127.0.0.1:${port}/clear`, { method: 'POST' });
       } catch (err) {
         logger.warn(`通知 Agent ${id} 清空内存失败（可能尚未就绪）: ${err.message}`);
-        // Agent 正在处理请求时可能暂时无法响应，仍然清除文件
       }
     } else {
       // Agent 未运行时，直接清空文件即可
@@ -208,37 +240,15 @@ export function createGatewayApp(pm, chatHistory) {
     }
   });
 
-  // GET /agents/:id/config-ui — 获取配置页面 HTML
-  // 优先读 config/config-ui.html，没有则根据 config.json 自动生成
+  // GET /agents/:id/config-ui — 获取配置 UI 布局和配置数据
   app.get('/agents/:id/config-ui', checkAgentExists, (req, res) => {
     const id = req.params.id;
     const configDir = path.join(pm.agentsDir, id, 'config');
-    const customUiPath = path.join(configDir, 'config-ui.html');
-
-    // 优先使用自定义模板
-    if (fs.existsSync(customUiPath)) {
-      try {
-        const html = fs.readFileSync(customUiPath, 'utf-8');
-        res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        return res.send(html);
-      } catch (err) {
-        // 读取失败，fallback 到自动生成
-      }
-    }
-
-    // 自动生成
     try {
-      const raw = readAgentConfig(configDir);
-
-      // 从 api_key.json 读取模型连接配置（单独传递，用于模型选项卡）
-      // readAgentConfig 已将 apiKeyData 合并到 raw.model，这里需要原始 apiKeyData
-      const apiKeyData = readApiKey(configDir, true);
-
-      const html = generateDefaultConfigUI(id, raw, apiKeyData);
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.send(html);
+      const result = getConfigUI(configDir, (dir) => readAgentConfig(dir));
+      res.json(result);
     } catch (err) {
-      res.status(500).json({ error: `Failed to generate config UI: ${err.message}` });
+      res.status(500).json({ error: `Failed to get config UI: ${err.message}` });
     }
   });
 
@@ -256,7 +266,6 @@ export function createGatewayApp(pm, chatHistory) {
         agentData.config = existing;
       }
 
-      // Agent 的 fs.watch 会自动检测变化并重载
       res.json({ status: 'ok' });
     } catch (err) {
       res.status(500).json({ error: `Failed to update config: ${err.message}` });
@@ -273,10 +282,8 @@ export function createGatewayApp(pm, chatHistory) {
   });
 
   // 静态文件服务 — agent 配置目录（用于头像图片访问）
-  // /agents/{id}/config/{filename}
   app.use('/agents/:id/config', (req, res, next) => {
     const agentId = req.params.id;
-    // req.path 已经剥离了挂载前缀和 query string，形如 "/avatar.jpg"
     const filename = req.path.replace(/^\//, '');
     if (!filename) {
       return res.status(404).json({ error: 'File not found' });
@@ -288,7 +295,7 @@ export function createGatewayApp(pm, chatHistory) {
     res.status(404).json({ error: 'File not found' });
   });
 
-  // 前端日志 API — 接收前端日志并写入 logs/frontend.log
+  // 前端日志 API
   app.post('/api/log', (req, res) => {
     const logDir = path.join(process.cwd(), 'logs');
     try {
@@ -308,14 +315,18 @@ export function createGatewayApp(pm, chatHistory) {
     res.json({ status: 'ok' });
   });
 
-  // 静态文件服务 — 前端页面
-  const frontendPath = path.join(process.cwd(), 'frontend');
+  // 静态文件服务 — 前端页面（Vite 构建产物）
+  const frontendPath = path.join(process.cwd(), 'frontend', 'dist');
   app.use(express.static(frontendPath));
 
   // 错误处理中间件
   app.use((err, req, res, next) => {
     logger.error(`未处理的错误: ${err.message}`);
-    res.status(500).json({ error: 'Internal server error' });
+    if (res.headersSent) {
+      res.end();
+    } else {
+      res.status(500).json({ error: 'Internal server error' });
+    }
   });
 
   return app;

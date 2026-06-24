@@ -43,7 +43,7 @@ export class MockModel {
    *   { type: 'token', content: '...' } | { type: 'tool_calls', tool_calls: [...] }
    * 支持 options.signal — 收到 abort 信号时抛出 AbortError
    */
-  async *chat(messages, tools, options = {}) {
+  async *chatStream(messages, tools, options = {}) {
     const signal = options.signal;
     const resp = this._nextResponse();
 
@@ -69,10 +69,10 @@ export class MockModel {
 
   /**
    * 非流式调用（用于记忆压缩等内部调用）
-   * 返回纯文本字符串，与 LLMModel.chatComplete() 一致
+   * 返回纯文本字符串，与 LLMModel.chat() 一致
    * 支持 options.signal — 收到 abort 信号时抛出 AbortError
    */
-  async chatComplete(messages, options = {}) {
+  async chat(messages, options = {}) {
     const signal = options.signal;
     if (this.delayMs > 0) {
       await new Promise((resolve, reject) => {

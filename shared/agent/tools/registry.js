@@ -1,6 +1,7 @@
 /**
  * 工具注册表
- * 管理所有可用工具，供 Agent Loop 调用
+ *
+ * 管理已注册的工具，供 Agent Loop 查询和执行
  */
 
 export class ToolRegistry {
