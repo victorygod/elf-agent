@@ -1,0 +1,86 @@
+.diff {
+  margin-top: 4px;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid #e0e0e0;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 头部：文件路径 */
+.header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: #f5f5f5;
+  border-bottom: 1px solid #e0e0e0;
+  color: #5f6368;
+}
+
+.fileIcon {
+  font-size: 11px;
+}
+
+.filePath {
+  color: #1a73e8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* diff 主体，长内容滚动 */
+.body {
+  max-height: 320px;
+  overflow-y: auto;
+  background: #fafafa;
+}
+
+/* 单行 */
+.line {
+  display: flex;
+  align-items: flex-start;
+  white-space: pre-wrap;
+  word-break: break-all;
+  padding: 0 6px 0 0;
+}
+
+/* 行首 +/- 前缀列 */
+.gutter {
+  display: inline-block;
+  width: 16px;
+  flex-shrink: 0;
+  text-align: center;
+  color: #9aa0a6;
+  user-select: none;
+}
+
+/* 行底色 */
+.del {
+  background: #ffebee;
+}
+
+.add {
+  background: #e8f5e9;
+}
+
+.context {
+  background: #fafafa;
+  color: #5f6368;
+}
+
+/* 行内字符级高亮：真正改动的字符 */
+.delInline {
+  background: #ffcdd2;
+  color: #b71c1c;
+  font-weight: 600;
+  border-radius: 2px;
+}
+
+.addInline {
+  background: #c8e6c9;
+  color: #1b5e20;
+  font-weight: 600;
+  border-radius: 2px;
+}

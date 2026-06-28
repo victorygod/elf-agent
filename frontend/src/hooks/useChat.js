@@ -198,9 +198,14 @@ export default function useChat(agentId) {
         if (!at) return;
 
         const prevBubble = at.assistantBubbles[at.assistantBubbles.length - 1];
-        const sealedPrev = prevBubble && !prevBubble.sealed
+        // 若上一条是未收尾的压缩 loading 气泡（被下一个 compact_start 打断、没收到 compact/compact_error），
+        // 先标 error 收尾，避免永久卡 loading。
+        let sealedPrev = prevBubble && !prevBubble.sealed
           ? { ...prevBubble, sealed: true }
           : prevBubble;
+        if (sealedPrev && sealedPrev.compactLoading && sealedPrev.compactSummary == null && !sealedPrev.compactError) {
+          sealedPrev = { ...sealedPrev, compactLoading: undefined, compactError: '记忆压缩未完成', sealed: true };
+        }
 
         const newBubble = {
           id: `local_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,

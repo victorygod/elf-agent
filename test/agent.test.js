@@ -268,9 +268,10 @@ describe('MessageManager', () => {
     const model = new MockModel({
       responses: [{ content: '这是压缩后的摘要。' }]
     });
-    const mm = new MessageManager({ systemPrompt: 'test', memoryTokenLimit: 5 });
-    mm.addUserMessage('这是一段很长的文本用于触发记忆压缩功能测试，需要使token超过阈值才能触发压缩逻辑的执行');
-    mm.addAssistantMessage('好的，我明白了。这段对话内容需要被压缩以节省token空间，确保后续对话可以继续进行而不丢失关键信息。');
+    // limit 设为「原文超、但短摘要产物(preamble+summary)不超」的值，避免下轮再触发
+    const mm = new MessageManager({ systemPrompt: 'test', memoryTokenLimit: 45 });
+    mm.addUserMessage('这是一段很长的文本用于触发记忆压缩功能测试，需要使token超过阈值才能触发压缩逻辑的执行，反复填充使其超过设阈值以便确实触发压缩逻辑执行而不误判不触发情况发生，继续填充更多文本以确保整体token数量稳定超过四十五的阈值。');
+    mm.addAssistantMessage('好的，我明白了。这段对话内容需要被压缩以节省token空间，确保后续对话可以继续进行而不丢失关键信息，继续填充文本使整体tokens超过上述设定阈值从而稳定触发压缩逻辑的执行。');
 
     const events = [];
     for await (const event of mm.compactIfNeeded(model)) {
@@ -282,6 +283,143 @@ describe('MessageManager', () => {
     const msgs = mm.getMessagesForLLM();
     assert.equal(msgs[0].role, 'system');
     assert.ok(msgs.length <= 3, '压缩后消息应大幅减少');
+    // naive 产物：单条带标记的摘要 user（SUMMARY_PREAMBLE + LLM 回复），isCompactSummary
+    const compactMsg = msgs.find(m => m.isCompactSummary);
+    assert.ok(compactMsg, '压缩产物应有 isCompactSummary 标志');
+    assert.equal(compactMsg.role, 'user');
+    assert.ok(compactMsg.content.includes('这是压缩后的摘要。'), '摘要内容应为 LLM 回复加 SUMMARY_PREAMBLE 前缀');
+  });
+
+  // 以下为 compact 第 4 层上提基类后的目标测试（基类改造完即绿）。
+  // 用一个记录型 mock，捕获压缩请求的 messages 与 options
+  function recordingMock(content) {
+    const calls = [];
+    const mock = {
+      async chat(messages, options = {}) { calls.push({ messages, options }); return content; }
+    };
+    mock.calls = calls;
+    return mock;
+  }
+
+  it('compactIfNeeded LLM 回复为空应 yield compact_error、不替换 messages（naive 无断路器）', async () => {
+    // naive 基类不解析标签，直接用 LLM 回复；空回复视为失败
+    const model = recordingMock('   ');
+    const mm = new MessageManager({ systemPrompt: 'test', memoryTokenLimit: 5 });
+    mm.addUserMessage('这是一段很长的文本用于触发记忆压缩功能测试，需要使token超过阈值才能触发压缩逻辑的执行');
+
+    const events = [];
+    for await (const event of mm.compactIfNeeded(model)) { events.push(event); }
+
+    assert.ok(events.find(e => e.event === 'compact_start'), '应有 compact_start 事件');
+    assert.ok(!events.find(e => e.event === 'compact'), '空回复不应 yield compact 事件');
+    assert.ok(events.find(e => e.event === 'compact_error'), '空回复应 yield compact_error 提示前端');
+    assert.ok(mm._compactFailCount === undefined, 'naive 基类无断路器字段');
+    // messages 未被替换（仍含原 user 消息）
+    const msgs = mm.getMessagesForLLM();
+    assert.ok(msgs.some(m => m.content && m.content.includes('触发记忆压缩功能测试')), '空回复时不应替换 messages');
+  });
+
+  it('compactIfNeeded 无断路器，反复失败仍每次尝试（naive）', async () => {
+    // naive 基类没有断路器禁用机制，每次调用都正常尝试
+    const model = recordingMock('   ');
+    const mm = new MessageManager({ systemPrompt: 'test', memoryTokenLimit: 5 });
+    mm.addUserMessage('这是一段很长的文本用于触发记忆压缩功能测试，需要使token超过阈值才能触发压缩逻辑的执行');
+
+    for (let i = 0; i < 3; i++) {
+      for await (const _ of mm.compactIfNeeded(model)) { /* drain */ }
+    }
+    assert.ok(mm._compactDisabled === undefined, 'naive 基类无 _compactDisabled，不会因失败禁用');
+
+    // 再次调用仍会尝试（有 compact_start 事件），不会静默跳过
+    const events = [];
+    for await (const event of mm.compactIfNeeded(model)) { events.push(event); }
+    assert.ok(events.find(e => e.event === 'compact_start'), '无断路器：每次调用仍尝试压缩');
+  });
+
+  it('compactIfNeeded 遇 AbortError 应抛出，不被内部吞', async () => {
+    const ac = new AbortController();
+    const model = {
+      async chat(_messages, options = {}) {
+        // 用 signal 触发 AbortError，模拟压缩期间用户中断
+        if (options.signal) {
+          options.signal.dispatchEvent(new Event('abort'));
+          throw new DOMException('aborted', 'AbortError');
+        }
+        return 'x';
+      }
+    };
+    const mm = new MessageManager({ systemPrompt: 'test', memoryTokenLimit: 5 });
+    mm.addUserMessage('这是一段很长的文本用于触发记忆压缩功能测试，需要使token超过阈值才能触发压缩逻辑的执行');
+
+    let threw = null;
+    try {
+      for await (const _ of mm.compactIfNeeded(model, { signal: ac.signal })) { /* drain */ }
+    } catch (err) {
+      threw = err;
+    }
+    assert.ok(threw, 'Compact AbortError 应抛出给调用方');
+    assert.equal(threw?.name, 'AbortError');
+  });
+
+  it('compactIfNeeded 压一次即返回、不本轮递归（对齐 CC：仍超阈值留待下一轮 loop 顶部再压）', async () => {
+    // 摘要产物本身仍超 memoryTokenLimit，但不应本轮递归再压
+    const model = recordingMock('压缩后依然非常非常长的摘要内容，远超 token 上限，用于验证不递归。');
+    const mm = new MessageManager({ systemPrompt: 't', memoryTokenLimit: 1 });
+    mm.addUserMessage('触发压缩的长文本');
+
+    const events = [];
+    for await (const event of mm.compactIfNeeded(model)) { events.push(event); }
+
+    const compactCount = events.filter(e => e.event === 'compact').length;
+    assert.equal(compactCount, 1, '对齐 CC：每轮只压一次，不本轮递归');
+    // messages 仍超阈值，但本轮不再压（留待下一轮 agent loop 顶部）
+    assert.ok(mm.estimateTokens() > mm.memoryTokenLimit, '压缩后仍超阈值，但本轮不再压');
+  });
+
+  it('compactIfNeeded 压缩请求应使用配置的 compactPrompt/compactSystemPrompt', async () => {
+    const model = recordingMock('摘要内容');
+    const mm = new MessageManager({
+      systemPrompt: 'sys',
+      memoryTokenLimit: 5,
+      compactSystemPrompt: '你是压缩器',
+      compactPrompt: '请总结以上对话'
+    });
+    mm.addUserMessage('这是一段很长的文本用于触发记忆压缩功能测试，需要使token超过阈值才能触发压缩逻辑的执行');
+
+    for await (const _ of mm.compactIfNeeded(model)) { /* drain */ }
+
+    assert.ok(model.calls.length >= 1, '应发起压缩请求');
+    const req = model.calls[0].messages;
+    assert.ok(req.find(m => m.role === 'system' && m.content === '你是压缩器'), '请求应含配置的 compactSystemPrompt');
+    assert.ok(req.find(m => m.role === 'user' && m.content === '请总结以上对话'), '请求应含配置的 compactPrompt');
+  });
+
+  it('compactSystemPrompt 留空时应退化沿用主 systemPrompt（而非发空 system）', async () => {
+    const model = recordingMock('摘要内容');
+    const mm = new MessageManager({
+      systemPrompt: '你是主助手',
+      memoryTokenLimit: 5
+      // compactSystemPrompt 未配 → 留空
+    });
+    mm.addUserMessage('这是一段很长的文本用于触发记忆压缩功能测试，需要使token超过阈值才能触发压缩逻辑的执行');
+
+    for await (const _ of mm.compactIfNeeded(model)) { /* drain */ }
+
+    assert.ok(model.calls.length >= 1, '应发起压缩请求');
+    const sysMsg = model.calls[0].messages.find(m => m.role === 'system');
+    assert.ok(sysMsg, '压缩请求应含 system 消息');
+    assert.equal(sysMsg.content, '你是主助手', 'compactSystemPrompt 留空时应沿用主 systemPrompt');
+  });
+
+  it('compactIfNeeded 调 LLM 应带 enable_thinking:false', async () => {
+    const model = recordingMock('摘要内容');
+    const mm = new MessageManager({ systemPrompt: 't', memoryTokenLimit: 5 });
+    mm.addUserMessage('这是一段很长的文本用于触发记忆压缩功能测试，需要使token超过阈值才能触发压缩逻辑的执行');
+
+    for await (const _ of mm.compactIfNeeded(model)) { /* drain */ }
+
+    assert.ok(model.calls.length >= 1, '应发起压缩请求');
+    assert.equal(model.calls[0].options.enable_thinking, false, '压缩调 LLM 应带 enable_thinking:false');
   });
 });
 
@@ -353,6 +491,113 @@ describe('Agent (DefaultAgent)', () => {
       e.data.state === 'reading_file'
     );
     assert.ok(hasToolStatus, '应有 reading_file 状态事件');
+  });
+
+  it('isConcurrencySafe=true 的只读工具应并发执行（CC processQueue 语义）', async () => {
+    // 两个自定义只读工具（isConcurrencySafe=true），延迟执行；并发时 inFlight 峰值=2，串行则恒=1
+    let inFlight = 0, maxInFlight = 0;
+    const makeConcurrentTool = (name) => ({
+      name,
+      description: name,
+      isConcurrencySafe: true,
+      callSummary: () => name,
+      parameters: { type: 'object', properties: {} },
+      execute: async () => {
+        inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise(r => setTimeout(r, 40));
+        inFlight--;
+        return `${name} done`;
+      }
+    });
+    const tr = new ToolRegistry();
+    tr.register(makeConcurrentTool('ConcA'));
+    tr.register(makeConcurrentTool('ConcB'));
+    const concurrentAgent = new Agent({ config, model: new MockModel({
+      responses: [
+        { tool_calls: [
+          { id: 'c1', type: 'function', function: { name: 'ConcA', arguments: '{}' } },
+          { id: 'c2', type: 'function', function: { name: 'ConcB', arguments: '{}' } },
+        ] },
+        { content: 'done' }
+      ]
+    }), toolRegistry: tr, messageManager: new MessageManager({ systemPrompt: 't', memoryTokenLimit: 8000 }) });
+
+    const events = [];
+    for await (const e of concurrentAgent.receive('并发跑两个工具')) events.push(e);
+    assert.ok(maxInFlight >= 2, `两个只读工具应并发执行,maxInFlight=${maxInFlight} 应为 2`);
+    // 两个 tool_result 都应按原序返回
+    const results = events.filter(e => e.event === 'tool_result');
+    assert.equal(results.length, 2, '应有两个 tool_result 事件');
+  });
+
+  it('isConcurrencySafe=false 的写工具应串行执行（不并发）', async () => {
+    let inFlight = 0, maxInFlight = 0;
+    const makeSerialTool = (name) => ({
+      name,
+      description: name,
+      isConcurrencySafe: false,
+      callSummary: () => name,
+      parameters: { type: 'object', properties: {} },
+      execute: async () => {
+        inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise(r => setTimeout(r, 40));
+        inFlight--;
+        return `${name} done`;
+      }
+    });
+    const tr = new ToolRegistry();
+    tr.register(makeSerialTool('SerA'));
+    tr.register(makeSerialTool('SerB'));
+    const serialAgent = new Agent({ config, model: new MockModel({
+      responses: [
+        { tool_calls: [
+          { id: 's1', type: 'function', function: { name: 'SerA', arguments: '{}' } },
+          { id: 's2', type: 'function', function: { name: 'SerB', arguments: '{}' } },
+        ] },
+        { content: 'done' }
+      ]
+    }), toolRegistry: tr, messageManager: new MessageManager({ systemPrompt: 't', memoryTokenLimit: 8000 }) });
+
+    const events = [];
+    for await (const e of serialAgent.receive('串行跑两个写工具')) events.push(e);
+    assert.equal(maxInFlight, 1, `写工具应串行,maxInFlight=${maxInFlight} 应为 1`);
+    const results = events.filter(e => e.event === 'tool_result');
+    assert.equal(results.length, 2, '应有两个 tool_result 事件');
+  });
+
+  it('混合批次：只读并发 + 写工具串行，结果按原序', async () => {
+    // 顺序 [ConcA(读), SerX(写), ConcB(读)]：ConcA/ConcB 不与 SerX 并发
+    let inFlight = 0, maxInFlight = 0;
+    const makeTool = (name, safe) => ({
+      name, description: name, isConcurrencySafe: safe, callSummary: () => name,
+      parameters: { type: 'object', properties: {} },
+      execute: async () => {
+        inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise(r => setTimeout(r, 30));
+        inFlight--;
+        return `${name} done`;
+      }
+    });
+    const tr = new ToolRegistry();
+    tr.register(makeTool('ConcA', true));
+    tr.register(makeTool('SerX', false));
+    tr.register(makeTool('ConcB', true));
+    const mixAgent = new Agent({ config, model: new MockModel({
+      responses: [
+        { tool_calls: [
+          { id: 'm1', type: 'function', function: { name: 'ConcA', arguments: '{}' } },
+          { id: 'm2', type: 'function', function: { name: 'SerX', arguments: '{}' } },
+          { id: 'm3', type: 'function', function: { name: 'ConcB', arguments: '{}' } },
+        ] },
+        { content: 'done' }
+      ]
+    }), toolRegistry: tr, messageManager: new MessageManager({ systemPrompt: 't', memoryTokenLimit: 8000 }) });
+
+    const events = [];
+    for await (const e of mixAgent.receive('混合')) events.push(e);
+    // 写工具不与只读并发 → 峰值不超 1（ConcA 单独跑、SerX 单独、ConcB 单独，因中间夹写工具把并发段拆开）
+    assert.ok(maxInFlight === 1, `混合批次写工具串行点拆开并发段,maxInFlight=${maxInFlight} 应为 1`);
+    assert.equal(events.filter(e => e.event === 'tool_result').length, 3, '三个 tool_result');
   });
 
   it('done 事件应包含 usage 信息', async () => {
@@ -433,7 +678,7 @@ describe('Agent (DefaultAgent)', () => {
     const compactModel = new MockModel({
       responses: [
         { content: '这是一段足够长的回复内容用于触发记忆压缩功能测试。' },
-        { content: '这是压缩后的摘要。' },
+        { content: '<summary>这是压缩后的摘要。</summary>' },
       ]
     });
     const compactMM = new MessageManager({

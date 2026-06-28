@@ -6,13 +6,14 @@
 
 import fs from 'fs';
 import path from 'path';
+import { DEFAULT_EXCLUDES, globToRegex, formatSize } from './glob_util.js';
 
-const DEFAULT_EXCLUDES = ['node_modules', '.git'];
 const MAX_RESULTS = 500;
 
 export const Glob = {
   name: 'Glob',
   description: "Find files matching a glob pattern. Returns matching file paths with type and size information. Useful for discovering files in a project by naming convention.",
+  isConcurrencySafe: true,
 
   statusEvent: {
     state: 'searching_files',
@@ -31,7 +32,8 @@ export const Glob = {
     required: ['pattern']
   },
 
-  execute: async (args) => {
+  execute: async (args, signal) => {
+    if (signal?.aborted) return 'Error: aborted';
     const pattern = args.pattern.replace(/\\/g, '/');
     const rootDir = process.cwd();
 
@@ -104,53 +106,3 @@ export const Glob = {
     return output;
   }
 };
-
-/**
- * 将 glob 模式转为正则
- * 支持: **, *, ?, [abc]
- */
-/**
- * 将 glob 模式转为正则（以 / 为分隔符）
- * 支持: ** (多层级), * (单层文件名), ? (单字符), [abc] (字符类)
- */
-function globToRegex(pattern) {
-  let i = 0;
-  let regexStr = '';
-  while (i < pattern.length) {
-    const ch = pattern[i];
-    if (ch === '*' && pattern[i + 1] === '*') {
-      regexStr += '(?:.+/)*';
-      i += 2;
-      if (pattern[i] === '/') i += 1;
-    } else if (ch === '*') {
-      regexStr += '[^/]+';
-      i += 1;
-    } else if (ch === '?') {
-      regexStr += '[^/]';
-      i += 1;
-    } else if (ch === '[') {
-      // 字符类 [abc] — 原样保留给正则引擎
-      const end = pattern.indexOf(']', i);
-      if (end !== -1) {
-        regexStr += pattern.slice(i, end + 1);
-        i = end + 1;
-      } else {
-        regexStr += '\\[';
-        i += 1;
-      }
-    } else if ('.+^${}()|\\'.includes(ch)) {
-      regexStr += '\\' + ch;
-      i += 1;
-    } else {
-      regexStr += ch;
-      i += 1;
-    }
-  }
-  return new RegExp('^' + regexStr + '$');
-}
-
-function formatSize(bytes) {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}

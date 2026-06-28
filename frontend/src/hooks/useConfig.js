@@ -30,16 +30,14 @@ export default function useConfig() {
           const initial = {};
           const model = data.config?.model || {};
           initial.systemPrompt = data.config?.systemPrompt || '';
-          initial.prefix_prompt = data.config?.prefix_prompt || '';
-          initial.suffix_prompt = data.config?.suffix_prompt || '';
           initial.base_url = model.base_url || '';
           initial.auth_token = model.auth_token || '';
           initial.model = model.model || '';
 
           // 从 config 提取其他字段
           if (data.config) {
-            const skip = new Set(['agentId', 'port', 'systemPromptPath', 'prefixPromptPath', 'suffixPromptPath',
-              'avatar', 'userAvatar', '_ui', 'provider', 'systemPrompt', 'prefix_prompt', 'suffix_prompt', 'model', 'modelError']);
+            const skip = new Set(['agentId', 'port', 'systemPromptPath',
+              'avatar', 'userAvatar', '_ui', 'provider', 'systemPrompt', 'model', 'modelError']);
             for (const [k, v] of Object.entries(data.config)) {
               if (skip.has(k)) continue;
               if (v && typeof v === 'object' && !Array.isArray(v)) continue;
@@ -68,8 +66,6 @@ export default function useConfig() {
 
       // 提示词字段
       if (formData.systemPrompt !== undefined) update.systemPrompt = formData.systemPrompt;
-      if (formData.prefix_prompt !== undefined) update.prefix_prompt = formData.prefix_prompt;
-      if (formData.suffix_prompt !== undefined) update.suffix_prompt = formData.suffix_prompt;
 
       // 模型字段
       const modelUpdate = {};
@@ -79,7 +75,7 @@ export default function useConfig() {
       if (Object.keys(modelUpdate).length > 0) update.model = modelUpdate;
 
       // 其他字段
-      const skip = new Set(['systemPrompt', 'prefix_prompt', 'suffix_prompt', 'base_url', 'auth_token', 'model']);
+      const skip = new Set(['systemPrompt', 'base_url', 'auth_token', 'model']);
       for (const [k, v] of Object.entries(formData)) {
         if (skip.has(k)) continue;
         update[k] = v;
@@ -134,23 +130,21 @@ export default function useConfig() {
     await refreshAgents();
   }, [configAgentId, refreshAgents]);
 
-  const handleClearHistory = useCallback(async () => {
-    if (!configAgentId || !confirm('确定要清空聊天记录吗？此操作不可恢复。')) return;
+  const handleClearAll = useCallback(async () => {
+    if (!configAgentId || !confirm('确定要清空聊天记录和 Agent 记忆吗？此操作不可恢复，Agent 将忘记之前的对话内容。')) return;
     const store = useAgentStore.getState();
-    await store.clearHistory(configAgentId);
-  }, [configAgentId]);
-
-  const handleClearMemory = useCallback(async () => {
-    if (!configAgentId || !confirm('确定要清空 Agent 记忆吗？此操作不可恢复，Agent 将忘记之前的对话内容。')) return;
     try {
+      // 先清空聊天记录
+      await store.clearHistory(configAgentId, { silent: true });
+      // 再清空记忆
       const ok = await api.deleteMemory(configAgentId);
       if (ok) {
-        useAgentStore.getState().showToast( 'Agent 记忆已清空');
+        store.showToast('聊天记录与记忆已清空');
       } else {
-        useAgentStore.getState().showToast( '清空失败');
+        store.showToast('聊天记录已清空，但记忆清空失败');
       }
     } catch (e) {
-      useAgentStore.getState().showToast( `清空失败: ${e.message}`);
+      store.showToast(`清空失败: ${e.message}`);
     }
   }, [configAgentId]);
 
@@ -159,7 +153,7 @@ export default function useConfig() {
     isSaving, isStarting, isStopping,
     setActiveTab, handleFieldChange,
     handleSave, handleStart, handleStop,
-    handleClearHistory, handleClearMemory,
+    handleClearAll,
   };
 }
 

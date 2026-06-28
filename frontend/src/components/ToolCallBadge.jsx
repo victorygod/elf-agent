@@ -1,5 +1,6 @@
 import React from 'react';
 import styles from './ToolCallBadge.module.css';
+import EditDiff from './EditDiff';
 
 export default function ToolCallBadge({ toolCall }) {
   const { name, args, status, description } = toolCall;
@@ -21,7 +22,9 @@ export default function ToolCallBadge({ toolCall }) {
         {status === 'success' && <span className={styles.successDot} title="执行成功" />}
         {status === 'executing' && <span className={styles.executingLabel}>● 执行中</span>}
       </div>
-      {args && Object.keys(args).length > 0 && (
+      {name === 'Edit' && status === 'success' && args ? (
+        <EditDiff args={args} />
+      ) : args && Object.keys(args).length > 0 ? (
         <div className={styles.args}>
           {Object.entries(args).map(([key, val]) => {
             const raw = String(val);
@@ -33,7 +36,7 @@ export default function ToolCallBadge({ toolCall }) {
             );
           })}
         </div>
-      )}
+      ) : null}
       {status === 'error' && toolCall.message && (
         <div className={styles.errorMsg}>{toolCall.message}</div>
       )}

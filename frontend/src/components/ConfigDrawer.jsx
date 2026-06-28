@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import useAgentStore from '../stores/agentStore';
 import useConfig from '../hooks/useConfig';
+import * as api from '../api/index.js';
 import ConfigField from './ConfigField';
 import styles from './ConfigDrawer.module.css';
 
@@ -13,8 +14,14 @@ export default function ConfigDrawer({ onClose }) {
     isSaving, isStarting, isStopping,
     setActiveTab, handleFieldChange,
     handleSave, handleStart, handleStop,
-    handleClearHistory, handleClearMemory,
+    handleClearAll,
   } = useConfig();
+
+  // 可用工具列表（用于 tools 字段的多选）
+  const [availableTools, setAvailableTools] = useState([]);
+  useEffect(() => {
+    api.getAvailableTools().then(setAvailableTools).catch(() => setAvailableTools([]));
+  }, []);
 
   if (!configAgentId) return null;
 
@@ -65,6 +72,7 @@ export default function ConfigDrawer({ onClose }) {
                 value={formData[field.key] ?? ''}
                 currentAvatar={field.key === 'avatar' ? (agent?.avatar || null) : null}
                 currentUserAvatar={field.key === 'avatar' ? (agent?.userAvatar || null) : null}
+                options={field.type === 'multiselect' ? availableTools : null}
                 onChange={(val) => handleFieldChange(field.key, val)}
               />
             ))}
@@ -73,8 +81,7 @@ export default function ConfigDrawer({ onClose }) {
       </div>
 
       <div className={styles.footer}>
-        <button className={`${styles.btn} ${styles.btnWarning} ${styles.btnSm}`} onClick={handleClearHistory}>清空聊天记录</button>
-        <button className={`${styles.btn} ${styles.btnWarning} ${styles.btnSm}`} onClick={handleClearMemory}>清空记忆</button>
+        <button className={`${styles.btn} ${styles.btnWarning} ${styles.btnSm}`} onClick={handleClearAll}>清空聊天与记忆</button>
         <span style={{ flex: 1 }} />
         <button className={styles.btn} onClick={onClose}>取消</button>
         <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleSave} disabled={isSaving}>
@@ -90,9 +97,9 @@ function buildDefaultLayout(config) {
   if (!config) return { tabs: [] };
   const agentFields = [];
   const skipKeys = new Set([
-    'agentId', 'port', 'systemPromptPath', 'prefixPromptPath', 'suffixPromptPath',
-    'avatar', 'userAvatar', '_ui', 'provider', 'systemPrompt', 'prefix_prompt',
-    'suffix_prompt', 'model', 'modelError',
+    'agentId', 'port', 'systemPromptPath',
+    'avatar', 'userAvatar', '_ui', 'provider', 'systemPrompt',
+    'model', 'modelError',
   ]);
 
   for (const [key, value] of Object.entries(config)) {
@@ -101,15 +108,16 @@ function buildDefaultLayout(config) {
     const meta = config._ui?.[key] || {};
     let type = meta.type;
     if (!type) {
-      if (typeof value === 'boolean') type = 'checkbox';
+      if (Array.isArray(value) && key === 'tools') type = 'multiselect';
+      else if (typeof value === 'boolean') type = 'checkbox';
       else if (typeof value === 'number') type = 'number';
       else if (typeof value === 'string' && value.length > 100) type = 'textarea';
       else type = 'text';
     }
     agentFields.push({
       key, type,
-      label: meta.label || key,
-      hint: meta.hint || '',
+      label: meta.label || (key === 'tools' ? '工具' : key),
+      hint: meta.hint || (key === 'tools' ? '选择该 Agent 可调用的工具（改后需重启服务生效）' : ''),
     });
   }
 

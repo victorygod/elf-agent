@@ -35,17 +35,26 @@ export class ToolRegistry {
    * 执行工具
    * @param {string} name - 工具名称
    * @param {object} args - 工具参数
+   * @param {AbortSignal} [signal] - 中断信号（并发执行时传，工具按需检查/Bash 杀子进程）
    * @returns {Promise<string>} 工具执行结果
    */
-  async execute(name, args) {
+  async execute(name, args, signal) {
     const tool = this.tools.get(name);
     if (!tool) {
       return `[错误: 工具 "${name}" 不存在]`;
     }
     try {
-      return await tool.execute(args);
+      return await tool.execute(args, signal);
     } catch (err) {
       return `[工具执行错误: ${err.message}]`;
     }
   }
-}
+
+  /**
+   * 工具是否并发安全（isConcurrencySafe 字段，默认 false）
+   */
+  isConcurrencySafe(name) {
+    const tool = this.tools.get(name);
+    return tool?.isConcurrencySafe === true;
+  }
+};

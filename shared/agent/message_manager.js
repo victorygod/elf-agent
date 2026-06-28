@@ -2,9 +2,10 @@
  * 对话历史管理 + 记忆压缩
  *
  * 管理对话消息数组，持久化到 context.json
- * - 支持可选的 prefixPrompt / suffixPrompt 注入到最后一轮 user 消息
  * - compactIfNeeded 为 async generator，触发条件和正常路径事件内聚
  * - 异常不 catch，抛给 Agent 处理
+ *
+ * 可被子类继承扩展（如 elf-001 的 prefix/suffix 注入）
  */
 
 import fs from 'fs';
@@ -17,13 +18,20 @@ export function setLogFileName(name) {
   logFileName = name;
 }
 
+// 摘要包装前缀（对齐 Claude Code oF6 摘要包装）
+const SUMMARY_PREAMBLE =
+  'This session is being continued from a previous conversation that ran out of context. ' +
+  'The summary below covers the earlier portion of the conversation.\n\n';
+
 export class MessageManager {
   constructor(config) {
     this.messages = [];
     this.systemPrompt = config.systemPrompt || '';
     this.memoryTokenLimit = config.memoryTokenLimit || 8000;
-    this.prefixPrompt = config.prefixPrompt || '';
-    this.suffixPrompt = config.suffixPrompt || '';
+
+    // 第 4 层压缩提示词（默认空串，各 agent 显式配）
+    this.compactSystemPrompt = config.compactSystemPrompt || '';
+    this.compactPrompt = config.compactPrompt || '';
 
     // 持久化：context.json 路径
     this.dataDir = config.dataDir || null;
@@ -50,11 +58,11 @@ export class MessageManager {
     if (config.memoryTokenLimit !== undefined) {
       this.memoryTokenLimit = config.memoryTokenLimit;
     }
-    if (config.prefixPrompt !== undefined) {
-      this.prefixPrompt = config.prefixPrompt;
+    if (config.compactSystemPrompt !== undefined) {
+      this.compactSystemPrompt = config.compactSystemPrompt;
     }
-    if (config.suffixPrompt !== undefined) {
-      this.suffixPrompt = config.suffixPrompt;
+    if (config.compactPrompt !== undefined) {
+      this.compactPrompt = config.compactPrompt;
     }
   }
 
@@ -89,19 +97,6 @@ export class MessageManager {
   getMessagesForLLM() {
     const systemMsg = { role: 'system', content: this.systemPrompt };
     const msgs = this.messages.map(m => ({ ...m }));
-
-    // 对最后一条 user 消息拼接 prefixPrompt / suffixPrompt
-    const prefix = this.prefixPrompt || '';
-    const suffix = this.suffixPrompt || '';
-    if (prefix || suffix) {
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === 'user') {
-          msgs[i].content = prefix + msgs[i].content + suffix;
-          break;
-        }
-      }
-    }
-
     return [systemMsg, ...msgs];
   }
 
@@ -120,35 +115,64 @@ export class MessageManager {
   }
 
   /**
-   * 记忆压缩（async generator）
-   * - 触发条件和压缩策略内聚在 MM 中
-   * - 正常路径事件通过 yield 抛出（compact_start / compact）
-   * - 异常（AbortError / 其他错误）不 catch，由调用方（agent）处理
+   * 记忆压缩（async generator）——第 4 层压缩（naive 基线版）
+   *
+   * 设计：基类只提供最朴素可靠的压缩，不依赖模型输出格式（不解析 <summary> 标签）、
+   * 无断路器、无二次压缩递归、无成功钩子。这些「CC 复杂特性」由特化子类（如 elf-002）
+   * override 本方法自行实现。基类职责 = 超阈值 → 调 LLM 总结 → 前缀 SUMMARY_PREAMBLE 替换历史。
+   *
+   * - 触发条件：estimateTokens() > memoryTokenLimit
+   * - 压缩请求：手拼（不走 getMessagesForLLM，避免子类 override 误触副作用，如 elf-002 预算窗口）
+   * - system：compactSystemPrompt 非空用它（临时替换）；留空沿用主 systemPrompt（退化，不发空 system）
+   * - 产物：单条摘要 user 消息（SUMMARY_PREAMBLE + LLM 回复），isCompactSummary:true
+   * - 失败：LLM 回复空 / 非 Abort 异常 → yield compact_error、不替换 messages、loop 继续（无断路器）
+   * - AbortError 抛给 agent 走中断流程
+   * - 二次压缩：不递归；仍超阈值靠下一轮 agent loop 顶部再触发（agent reasoning while 多轮往返可达）
+   * - 事件：compact_start / compact / compact_error
    */
   async *compactIfNeeded(llmModel, options = {}) {
     if (this.estimateTokens() <= this.memoryTokenLimit) return;
 
-    yield { event: 'compact_start', data: {} };
-
     const logger = createLogger('message_manager', logFileName);
     logger.info(`触发记忆压缩: 估算 ${this.estimateTokens()} tokens > 上限 ${this.memoryTokenLimit}`);
 
-    const compressMessages = [
-      ...this.getMessagesForLLM(),
-      { role: 'user', content: '请简要总结以上对话的关键信息和待办事项，保留重要细节。' }
-    ];
+    yield { event: 'compact_start', data: {} };
 
-    logger.info(`记忆压缩 Request messages: ${JSON.stringify(compressMessages, null, 2)}`);
-    const summary = await llmModel.chat(compressMessages, options);
-    logger.info(`记忆压缩 Response: ${summary}`);
+    try {
+      // 手拼压缩请求：[{system}, ...messages, {user:compactPrompt}]
+      // system：compactSystemPrompt 非空用它，留空沿用主 systemPrompt（退化，不发空 system）
+      const summaryRequest = [
+        { role: 'system', content: this.compactSystemPrompt || this.systemPrompt || '' },
+        ...this.messages.map(m => ({ ...m })),
+        { role: 'user', content: this.compactPrompt }
+      ];
 
-    this.messages = [
-      { role: 'user', content: '请简要总结以上对话的关键信息和待办事项，保留重要细节。' },
-      { role: 'assistant', content: summary }
-    ];
+      logger.info(`记忆压缩 Request messages: ${JSON.stringify(summaryRequest, null, 2)}`);
+      const response = await llmModel.chat(summaryRequest, { enable_thinking: false, ...options });
+      logger.info(`记忆压缩 Response: ${response}`);
 
-    this._save();
-    yield { event: 'compact', data: { tokenEstimate: this.estimateTokens() } };
+      // naive：不解析标签，直接用 LLM 回复；空回复视为失败
+      const summary = (typeof response === 'string' ? response : '').trim();
+      if (!summary) {
+        yield { event: 'compact_error', data: { error: '记忆压缩失败：响应为空' } };
+        return;
+      }
+
+      // 前缀 SUMMARY_PREAMBLE + 回复，替换为单条摘要 user 消息 + 落盘
+      this.messages = [{ role: 'user', content: SUMMARY_PREAMBLE + summary, isCompactSummary: true }];
+      this._save();
+
+      yield { event: 'compact', data: { tokenEstimate: this.estimateTokens() } };
+
+      // 仍超阈值不本轮递归，留待下一轮 loop 顶部再压
+      if (this.estimateTokens() > this.memoryTokenLimit) {
+        logger.info(`压缩后仍超阈值 ${this.estimateTokens()} > ${this.memoryTokenLimit}，留待下一轮 loop 顶部再压`);
+      }
+    } catch (err) {
+      if (err?.name === 'AbortError') throw err;
+      logger.error(`记忆压缩失败: ${err.message}`);
+      yield { event: 'compact_error', data: { error: err.message || '记忆压缩失败' } };
+    }
   }
 
   clear() {

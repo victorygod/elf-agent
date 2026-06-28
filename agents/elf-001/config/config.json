@@ -17,10 +17,16 @@
     "type": "path",
     "content": "suffix_prompt.md"
   },
+  "compactPrompt": "请简要总结以上对话的关键信息和待办事项，保留重要细节。",
+  "compactSystemPrompt": "",
   "memoryTokenLimit": 500,
   "maxIterations": 0,
+  "messageManagerClass": "message_manager",
   "tools": [
-    "Read"
+    "Read",
+    "Bash",
+    "Grep",
+    "Glob"
   ],
   "_ui": {
     "name": {
@@ -38,6 +44,14 @@
     "suffix_prompt": {
       "label": "后缀提示词",
       "hint": "附加在用户最新输入之后，仅发送给 LLM 时拼接，不写入记忆"
+    },
+    "compactPrompt": {
+      "label": "压缩提示词",
+      "hint": "记忆压缩时附加在历史末尾的 user 指令（触发自动压缩的摘要请求）"
+    },
+    "compactSystemPrompt": {
+      "label": "压缩系统提示词",
+      "hint": "记忆压缩请求的 system 消息（留空则不带 system）"
     },
     "memoryTokenLimit": {
       "label": "记忆压缩 Token 上限",

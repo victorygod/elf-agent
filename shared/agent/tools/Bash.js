@@ -13,6 +13,7 @@ const MAX_OUTPUT = 100 * 1024;   // 100KB
 export const Bash = {
   name: 'Bash',
   description: "Executes a bash command and returns its output. Working directory persists between calls. Shell state (env vars, functions) does not persist — the shell is initialized from the user's profile each time.",
+  isConcurrencySafe: false,
 
   statusEvent: {
     state: 'executing_command',
@@ -44,7 +45,7 @@ export const Bash = {
     required: ['command']
   },
 
-  execute: async (args) => {
+  execute: async (args, signal) => {
     const command = args.command;
     const timeout = Math.min(args.timeout || DEFAULT_TIMEOUT, MAX_TIMEOUT);
 
@@ -54,6 +55,7 @@ export const Bash = {
       let stdoutLen = 0;
       let stderrLen = 0;
       let timedOut = false;
+      let aborted = false;
 
       const child = spawn('bash', ['-c', command], {
         env: { ...process.env },
@@ -71,6 +73,22 @@ export const Bash = {
           }
         }, 3000);
       }, timeout);
+
+      // abort 中断：signal 触发时杀子进程（对齐 CC execa signal kill，复用 SIGTERM→SIGKILL 模式）
+      const onAbort = () => {
+        if (child.killed) return;
+        aborted = true;
+        child.kill('SIGTERM');
+        setTimeout(() => {
+          if (!child.killed) {
+            child.kill('SIGKILL');
+          }
+        }, 3000);
+      };
+      if (signal) {
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      }
 
       // stdout
       child.stdout.on('data', (data) => {
@@ -94,6 +112,7 @@ export const Bash = {
 
       child.on('close', (exitCode) => {
         clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', onAbort);
 
         // 截断标记
         if (stdoutLen > MAX_OUTPUT) {
@@ -101,6 +120,11 @@ export const Bash = {
         }
         if (stderrLen > MAX_OUTPUT) {
           stderr += `[truncated: ${stderrLen - MAX_OUTPUT} bytes omitted]`;
+        }
+
+        if (aborted) {
+          resolve(`Exit code null (aborted)\n${stdout}${stderr}`);
+          return;
         }
 
         if (timedOut) {
@@ -118,6 +142,7 @@ export const Bash = {
 
       child.on('error', (err) => {
         clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', onAbort);
         resolve(`Exit code null\nFailed to execute command: ${err.message}`);
       });
     });

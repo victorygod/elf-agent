@@ -5,10 +5,8 @@
       "label": "提示词配置",
       "fields": [
         { "key": "systemPrompt", "type": "textarea", "label": "系统提示词", "hint": "定义 Agent 的角色和行为方式" },
-        { "key": "prefix_prompt", "type": "textarea", "label": "前缀提示词", "hint": "附加在用户最新输入之前，仅发送给 LLM 时拼接，不写入记忆" },
-        { "key": "suffix_prompt", "type": "textarea", "label": "后缀提示词", "hint": "附加在用户最新输入之后，仅发送给 LLM 时拼接，不写入记忆" },
-        { "key": "compactPrompt", "type": "textarea", "label": "压缩提示词", "hint": "记忆压缩触发时，附加在历史末尾发给压缩 LLM 的指令（如「请简要总结以上对话的关键信息和待办事项」）。留空则压缩请求不带此指令" },
-        { "key": "compactSystemPrompt", "type": "textarea", "label": "压缩系统提示词", "hint": "记忆压缩请求使用的系统提示词，临时替换主系统提示词。留空则沿用主系统提示词（退化，不发送空 system）" }
+        { "key": "compactSystemPrompt", "type": "textarea", "label": "压缩系统提示词", "hint": "记忆压缩时使用的系统提示词" },
+        { "key": "compactPrompt", "type": "textarea", "label": "压缩提示词", "hint": "记忆压缩时拼接的前缀提示词" }
       ]
     },
     {
@@ -18,7 +16,10 @@
         { "key": "avatar", "type": "avatar" },
         { "key": "name", "type": "text", "label": "Agent 名称", "hint": "显示在前端界面的可读名称" },
         { "key": "tools", "type": "multiselect", "label": "工具", "hint": "选择该 Agent 可调用的工具（改后需重启服务生效）" },
-        { "key": "memoryTokenLimit", "type": "number", "label": "记忆压缩 Token 上限", "hint": "超过此阈值时触发记忆压缩（建议 4000-16000）" },
+        { "key": "memoryTokenLimit", "type": "number", "label": "记忆压缩 Token 上限", "hint": "累计上下文超过此值时，触发整体摘要压缩（建议 4000-16000）" },
+        { "key": "perToolLimit", "type": "number", "label": "单工具结果 Token 上限", "hint": "单个工具结果超过此值时，落盘并改写为占位符（防止一条结果撑爆上下文）" },
+        { "key": "budgetWindow", "type": "number", "label": "单轮工具结果预算", "hint": "一轮对话内的工具结果总量超过此值时，按体积从大到小逐个落盘淘汰（控制单轮工具结果的累积量）" },
+        { "key": "previewLength", "type": "number", "label": "工具结果预览长度", "hint": "工具结果在前端预览时显示的最大字符数" },
         { "key": "maxIterations", "type": "number", "label": "最大迭代轮数", "hint": "Agent Loop 最大循环次数（设为 0 表示无限迭代）" }
       ]
     },

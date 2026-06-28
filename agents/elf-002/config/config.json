@@ -9,14 +9,27 @@
     "type": "path",
     "content": "system_prompt.md"
   },
-  "memoryTokenLimit": 8000,
+  "compactSystemPrompt": {
+    "type": "path",
+    "content": "compact_system_prompt.md"
+  },
+  "compactPrompt": {
+    "type": "path",
+    "content": "compact_prompt.md"
+  },
+  "messageManagerClass": "message_manager",
+  "memoryTokenLimit": 40000,
+  "perToolLimit": 10000,
+  "previewLength": 2000,
+  "budgetWindow": 20000,
   "maxIterations": 0,
   "tools": [
     "Read",
     "Write",
     "Edit",
     "Bash",
-    "Glob"
+    "Glob",
+    "Grep"
   ],
   "_ui": {
     "name": {
@@ -35,7 +48,5 @@
       "label": "最大迭代轮数",
       "hint": "Agent Loop 最大循环次数（设为 0 表示无限迭代）"
     }
-  },
-  "prefix_prompt": "",
-  "suffix_prompt": ""
+  }
 }

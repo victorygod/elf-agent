@@ -193,6 +193,14 @@ export async function getConfigUI(agentId) {
   return await res.json();
 }
 
+/** 获取所有可用工具名（来自 shared/agent/tools/index.js） */
+export async function getAvailableTools() {
+  const res = await fetch(`${API_BASE}/available-tools`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.tools || [];
+}
+
 /** 更新 agent 配置 */
 export async function updateConfig(agentId, data) {
   const res = await fetch(`${API_BASE}/agents/${agentId}/config`, {

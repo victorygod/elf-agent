@@ -17,8 +17,13 @@ import { Config } from '../shared/agent/config_loader.js';
 import { MessageManager } from '../shared/agent/message_manager.js';
 import { Agent } from '../shared/agent/default_agent.js';
 import { ToolRegistry } from '../shared/agent/tools/registry.js';
-import { Read, Write, Edit, Bash, Glob } from '../shared/agent/tools/index.js';
+import { Read, Write, Edit, Bash, Glob, Grep } from '../shared/agent/tools/index.js';
 import { reset as resetReadState } from '../shared/agent/tools/read_state.js';
+import { __setForceFallback } from '../shared/agent/tools/Grep.js';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const repoRoot = path.resolve(path.dirname(__filename), '..');
 
 // ========================
 // LLMModel 构造与方法测试（不发真实请求）
@@ -521,88 +526,15 @@ describe('MessageManager', () => {
     assert.equal(messages[2].content, '你好！有什么可以帮你的？');
   });
 
-  it('prefixPrompt 应拼接到最后一条 user 消息前面', () => {
-    const mm = new MessageManager({
-      systemPrompt: 'You are helpful.',
-      memoryTokenLimit: 8000,
-      prefixPrompt: '[重要] ',
-    });
-    mm.addUserMessage('你好');
-    const messages = mm.getMessagesForLLM();
-    const userMsg = messages.find(m => m.role === 'user');
-    assert.equal(userMsg.content, '[重要] 你好');
-  });
-
-  it('suffixPrompt 应拼接到最后一条 user 消息后面', () => {
-    const mm = new MessageManager({
-      systemPrompt: 'You are helpful.',
-      memoryTokenLimit: 8000,
-      suffixPrompt: ' [请简短回答]',
-    });
-    mm.addUserMessage('你好');
-    const messages = mm.getMessagesForLLM();
-    const userMsg = messages.find(m => m.role === 'user');
-    assert.equal(userMsg.content, '你好 [请简短回答]');
-  });
-
-  it('prefixPrompt 和 suffixPrompt 应同时生效', () => {
-    const mm = new MessageManager({
-      systemPrompt: 'You are helpful.',
-      memoryTokenLimit: 8000,
-      prefixPrompt: '前置 ',
-      suffixPrompt: ' 后置',
-    });
-    mm.addUserMessage('中间');
-    const messages = mm.getMessagesForLLM();
-    const userMsg = messages.find(m => m.role === 'user');
-    assert.equal(userMsg.content, '前置 中间 后置');
-  });
-
-  it('prefix/suffix 应只影响最后一条 user 消息', () => {
-    const mm = new MessageManager({
-      systemPrompt: 'You are helpful.',
-      memoryTokenLimit: 8000,
-      prefixPrompt: '[前] ',
-      suffixPrompt: ' [后]',
-    });
-    mm.addUserMessage('第一条');
-    mm.addAssistantMessage('回复1');
-    mm.addUserMessage('第二条');
-    const messages = mm.getMessagesForLLM();
-    const userMsgs = messages.filter(m => m.role === 'user');
-    assert.equal(userMsgs[0].content, '第一条'); // 不受影响
-    assert.equal(userMsgs[1].content, '[前] 第二条 [后]'); // 受影响
-  });
-
-  it('updateConfig 应更新 prefixPrompt 和 suffixPrompt', () => {
-    const mm = new MessageManager({ systemPrompt: 'old', memoryTokenLimit: 8000 });
-    assert.equal(mm.prefixPrompt, '');
-    assert.equal(mm.suffixPrompt, '');
-    mm.updateConfig({ prefixPrompt: '新前置', suffixPrompt: '新后置' });
-    assert.equal(mm.prefixPrompt, '新前置');
-    assert.equal(mm.suffixPrompt, '新后置');
-  });
-
-  it('空 prefix/suffix 不应影响消息内容', () => {
-    const mm = new MessageManager({
-      systemPrompt: 'You are helpful.',
-      memoryTokenLimit: 8000,
-      prefixPrompt: '',
-      suffixPrompt: '',
-    });
-    mm.addUserMessage('你好');
-    const messages = mm.getMessagesForLLM();
-    const userMsg = messages.find(m => m.role === 'user');
-    assert.equal(userMsg.content, '你好');
-  });
 
   it('compactIfNeeded (generator) 在超阈值时应该压缩', async () => {
     const model = new MockModel({
       responses: [{ content: '这是压缩后的摘要。' }]
     });
-    const mm = new MessageManager({ systemPrompt: 'test', memoryTokenLimit: 5 });
-    mm.addUserMessage('这是一段很长的文本用于触发记忆压缩功能测试，需要使token超过阈值才能触发压缩逻辑的执行');
-    mm.addAssistantMessage('好的，我明白了。这段对话内容需要被压缩以节省token空间，确保后续对话可以继续进行而不丢失关键信息。');
+    // limit 设为「原文超、但短摘要产物(preamble+summary)不超」的值，避免下轮再触发
+    const mm = new MessageManager({ systemPrompt: 'test', memoryTokenLimit: 45 });
+    mm.addUserMessage('这是一段很长的文本用于触发记忆压缩功能测试，需要使token超过阈值才能触发压缩逻辑的执行，反复填充使其超过设阈值以便确实触发压缩逻辑执行而不误判不触发情况发生，继续填充更多文本以确保整体token数量稳定超过四十五的阈值。');
+    mm.addAssistantMessage('好的，我明白了。这段对话内容需要被压缩以节省token空间，确保后续对话可以继续进行而不丢失关键信息，继续填充文本使整体tokens超过上述设定阈值从而稳定触发压缩逻辑的执行。');
 
     const events = [];
     for await (const event of mm.compactIfNeeded(model)) {
@@ -616,6 +548,12 @@ describe('MessageManager', () => {
     // 压缩后消息应该变少
     const msgs = mm.getMessagesForLLM();
     assert.ok(msgs.length <= 3, '压缩后消息应大幅减少');
+
+    // naive 产物：单条带标记的摘要 user（SUMMARY_PREAMBLE + LLM 回复），isCompactSummary
+    const compactMsg = msgs.find(m => m.isCompactSummary);
+    assert.ok(compactMsg, '压缩产物应有 isCompactSummary 标志');
+    assert.equal(compactMsg.role, 'user');
+    assert.ok(compactMsg.content.includes('这是压缩后的摘要。'), '摘要内容应为 LLM 回复加 SUMMARY_PREAMBLE 前缀');
   });
 
   it('compactIfNeeded (generator) 在未超阈值时不应压缩', async () => {
@@ -732,7 +670,7 @@ describe('Agent', () => {
     const compactModel = new MockModel({
       responses: [
         { content: '这是一段足够长的回复内容用于触发记忆压缩功能测试。' },
-        { content: '这是压缩后的摘要。' },
+        { content: '<summary>这是压缩后的摘要。</summary>' },
       ]
     });
     const compactMM = new MessageManager({
@@ -742,7 +680,8 @@ describe('Agent', () => {
     const compactAgent = new Agent({ config, model: compactModel, toolRegistry, messageManager: compactMM });
 
     const events = [];
-    for await (const event of compactAgent.receive('这是一段很长的用户消息用于触发记忆压缩功能测试。')) {
+    // user 消息需本身超阈值(>10 tokens)，循环内 autocompact 在第1轮 getMessagesForLLM 前才会触发
+    for await (const event of compactAgent.receive('这是一段很长的用户消息用于触发记忆压缩功能测试，需要使token超过低阈值才能在第1轮循环顶部触发压缩逻辑的执行。')) {
       events.push(event);
     }
     const compactStartEvent = events.find(e => e.event === 'compact_start');
@@ -799,6 +738,12 @@ describe('Tool metadata', () => {
     assert.equal(Glob.callSummary({ pattern: '**/*.js' }), '**/*.js');
   });
 
+  it('Grep 应有 statusEvent 和 callSummary', () => {
+    assert.ok(Grep.statusEvent, 'Grep 应有 statusEvent');
+    assert.equal(Grep.statusEvent.state, 'searching_content');
+    assert.equal(Grep.callSummary({ pattern: 'foo' }), 'foo');
+  });
+
   it('ToolRegistry.get 应返回完整工具对象（含元数据）', () => {
     const registry = new ToolRegistry();
     registry.register(Read);
@@ -825,6 +770,7 @@ describe('Shared Tools', () => {
     registry.register(Edit);
     registry.register(Bash);
     registry.register(Glob);
+    registry.register(Grep);
     try { fs.unlinkSync(testFile); } catch {}
   });
 
@@ -1026,6 +972,287 @@ describe('Shared Tools', () => {
         pattern: 'shared/agent/tools/[A-Z]*.js'
       });
       assert.match(result, /Read\.js/);
+    });
+  });
+
+  // Glob — 受控夹具（* / ? / 目录类型 / 排除 / 截断）
+  describe('Glob fixtures', () => {
+    const globDir = '/tmp/elf-glob-test';
+    const subDir = path.join(globDir, 'sub');
+    const nmDir = path.join(globDir, 'node_modules');
+
+    beforeEach(() => {
+      fs.rmSync(globDir, { recursive: true, force: true });
+      fs.mkdirSync(subDir, { recursive: true });
+      fs.mkdirSync(nmDir, { recursive: true });
+      fs.writeFileSync(path.join(globDir, 'a.js'), 'x');
+      fs.writeFileSync(path.join(globDir, 'ab.js'), 'x');
+      fs.writeFileSync(path.join(globDir, 'ac.js'), 'x');
+      fs.writeFileSync(path.join(globDir, 'a1.js'), 'x');
+      fs.writeFileSync(path.join(subDir, 'deep.js'), 'x');
+      // node_modules 下放一个文件，确认被默认排除
+      fs.writeFileSync(path.join(nmDir, 'hidden.js'), 'x');
+    });
+
+    afterEach(() => {
+      fs.rmSync(globDir, { recursive: true, force: true });
+    });
+
+    it('在指定 path 下应返回相对路径，而非项目根路径', async () => {
+      // Glob 内部 walk 以 process.cwd() 为根；这里用 cwd 相对模式绕过路径前缀，
+      // 仅验证能命中 fixture 文件且不包含被排除目录内容
+      process.chdir(globDir);
+      try {
+        const result = await registry.execute('Glob', { pattern: 'a.js' });
+        assert.match(result, /^a\.js \(file/);
+      } finally {
+        process.chdir(repoRoot);
+      }
+    });
+
+    it('* 通配符匹配多文件', async () => {
+      process.chdir(globDir);
+      try {
+        // a*.js: '*' 匹配零个或多个字符 → 命中 a/ab/ac/a1（对齐标准 glob）
+        const result = await registry.execute('Glob', { pattern: 'a*.js' });
+        const names = result.split('\n').map(l => l.split(' ')[0]);
+        assert.ok(names.includes('a.js'));
+        assert.ok(names.includes('ab.js'));
+        assert.ok(names.includes('ac.js'));
+        assert.ok(names.includes('a1.js'));
+        assert.ok(!names.includes('deep.js'));
+      } finally {
+        process.chdir(repoRoot);
+      }
+    });
+
+    it('? 单字符通配符', async () => {
+      process.chdir(globDir);
+      try {
+        // a?.js 匹配 ab.js / ac.js / a1.js，但不匹配 a.js
+        const result = await registry.execute('Glob', { pattern: 'a?.js' });
+        const names = result.split('\n').map(l => l.split(' ')[0]);
+        assert.ok(names.includes('ab.js'));
+        assert.ok(names.includes('ac.js'));
+        assert.ok(!names.includes('a.js'));
+      } finally {
+        process.chdir(repoRoot);
+      }
+    });
+
+    it('** 递归匹配子目录文件', async () => {
+      process.chdir(globDir);
+      try {
+        const result = await registry.execute('Glob', { pattern: '**/*.js' });
+        assert.match(result, /sub\/deep\.js/);
+      } finally {
+        process.chdir(repoRoot);
+      }
+    });
+
+    it('默认排除 node_modules / .git', async () => {
+      process.chdir(globDir);
+      try {
+        const result = await registry.execute('Glob', { pattern: '**/*.js' });
+        assert.doesNotMatch(result, /node_modules/);
+        assert.doesNotMatch(result, /hidden\.js/);
+      } finally {
+        process.chdir(repoRoot);
+      }
+    });
+
+    it('目录条目标记为 directory', async () => {
+      process.chdir(globDir);
+      try {
+        const result = await registry.execute('Glob', { pattern: 'sub' });
+        assert.match(result, /sub \(directory\)/);
+      } finally {
+        process.chdir(repoRoot);
+      }
+    });
+
+    it('文件条目带大小信息', async () => {
+      process.chdir(globDir);
+      try {
+        const result = await registry.execute('Glob', { pattern: 'a.js' });
+        assert.match(result, /a\.js \(file, \d+B\)/);
+      } finally {
+        process.chdir(repoRoot);
+      }
+    });
+  });
+
+  // Grep
+  describe('Grep', () => {
+    const grepDir = '/tmp/elf-grep-test';
+    const fileA = path.join(grepDir, 'a.js');
+    const fileB = path.join(grepDir, 'sub', 'b.js');
+    const binFile = path.join(grepDir, 'bin.dat');
+
+    beforeEach(() => {
+      resetReadState();
+      fs.rmSync(grepDir, { recursive: true, force: true });
+      fs.mkdirSync(path.join(grepDir, 'sub'), { recursive: true });
+      fs.writeFileSync(fileA, 'export const foo = 1;\nFOO_BAR\nconst baz = 2;\n');
+      fs.writeFileSync(fileB, 'const value = foo;\n');
+      // 二进制文件（含 NUL）
+      fs.writeFileSync(binFile, Buffer.from([0x41, 0x00, 0x42, 0x66, 0x6f, 0x6f]));
+    });
+
+    afterEach(() => {
+      fs.rmSync(grepDir, { recursive: true, force: true });
+    });
+
+    it('content 模式应返回带行号匹配行', async () => {
+      const result = await registry.execute('Grep', {
+        pattern: 'foo', path: grepDir
+      });
+      assert.match(result, /a\.js:1:/);
+      assert.match(result, /foo/);
+      // 不应搜到二进制文件里的 foo
+      assert.doesNotMatch(result, /bin\.dat/);
+    });
+
+    it('files_with_matches 模式只返回文件路径', async () => {
+      const result = await registry.execute('Grep', {
+        pattern: 'foo', path: grepDir, output_mode: 'files_with_matches'
+      });
+      const files = result.split('\n');
+      assert.ok(files.some(f => /a\.js$/.test(f)));
+      assert.ok(files.some(f => /b\.js$/.test(f)));
+      assert.doesNotMatch(result, /bin\.dat/);
+    });
+
+    it('count 模式返回每文件命中行数', async () => {
+      const result = await registry.execute('Grep', {
+        pattern: 'foo', path: grepDir, output_mode: 'count',
+        '-i': true
+      });
+      // a.js 含 foo (L1) 和 FOO_BAR (L2) -> 忽略大小写 2 行
+      assert.match(result, /a\.js:2/);
+    });
+
+    it('-i 忽略大小写', async () => {
+      const result = await registry.execute('Grep', {
+        pattern: 'foo', path: grepDir, '-i': true
+      });
+      assert.match(result, /FOO_BAR/);
+    });
+
+    it('-A/-B 上下文行', async () => {
+      const result = await registry.execute('Grep', {
+        pattern: 'foo', path: fileA, '-A': 1, '-B': 1, '-i': true
+      });
+      // 应包含前后行 baz
+      assert.match(result, /baz/);
+    });
+
+    it('-C 简写等价于 -A/-B', async () => {
+      const resultC = await registry.execute('Grep',
+        { pattern: 'foo', path: fileA, '-C': 1, '-i': true });
+      const resultAB = await registry.execute('Grep',
+        { pattern: 'foo', path: fileA, '-A': 1, '-B': 1, '-i': true });
+      assert.equal(resultC, resultAB);
+    });
+
+    it('-n=false 隐藏行号', async () => {
+      const result = await registry.execute('Grep', {
+        pattern: 'foo', path: fileA, '-n': false
+      });
+      assert.match(result, /foo/);
+      // 无行号：不应出现 :1: 形式
+      assert.doesNotMatch(result, /:1:/);
+    });
+
+    it('glob 过滤文件', async () => {
+      const result = await registry.execute('Grep', {
+        pattern: 'foo', path: grepDir, output_mode: 'files_with_matches',
+        glob: '*.dat'
+      });
+      // 二进制被跳过，dat 无文本命中 -> 无匹配
+      assert.match(result, /No matches found/);
+    });
+
+    it('无匹配返回提示', async () => {
+      const result = await registry.execute('Grep', {
+        pattern: 'zzz_no_such_zzz', path: grepDir
+      });
+      assert.match(result, /No matches found/);
+    });
+
+    it('非法正则返回错误而非抛出', async () => {
+      const result = await registry.execute('Grep', {
+        pattern: '[invalid', path: grepDir
+      });
+      // 不论 rg 还是回退，都应是 Error 开头的友好文本，绝不抛出
+      assert.match(result, /error|invalid/i);
+    });
+
+    it('不存在路径返回错误', async () => {
+      const result = await registry.execute('Grep', {
+        pattern: 'foo', path: '/tmp/elf-never-exists-zzz'
+      });
+      assert.match(result, /No such file or directory/);
+    });
+
+    // 在纯 Node 回退引擎上重跑核心场景，保证两条路径行为一致
+    for (const engine of ['ripgrep', 'fallback']) {
+      describe(`Grep via ${engine}`, () => {
+        const useFallback = engine === 'fallback';
+        beforeEach(() => __setForceFallback(useFallback));
+
+        it('content 带行号', async () => {
+          const result = await registry.execute('Grep',
+            { pattern: 'foo', path: grepDir });
+          assert.match(result, /a\.js:1:/);
+          assert.match(result, /foo/);
+          assert.doesNotMatch(result, /bin\.dat/);
+        });
+
+        it('files_with_matches', async () => {
+          const result = await registry.execute('Grep',
+            { pattern: 'foo', path: grepDir, output_mode: 'files_with_matches' });
+          const files = result.split('\n');
+          assert.ok(files.some(f => /a\.js$/.test(f)));
+          assert.ok(files.some(f => /b\.js$/.test(f)));
+        });
+
+        it('count + -i', async () => {
+          const result = await registry.execute('Grep',
+            { pattern: 'foo', path: grepDir, output_mode: 'count', '-i': true });
+          assert.match(result, /a\.js:2/);
+        });
+
+        it('-C 上下文含 baz', async () => {
+          const result = await registry.execute('Grep',
+            { pattern: 'foo', path: fileA, '-C': 1, '-i': true });
+          assert.match(result, /baz/);
+        });
+
+        it('两引擎输出一致', async () => {
+          const args = { pattern: 'foo', path: fileA, '-C': 1 };
+          const forRg = await (async () => {
+            __setForceFallback(false);
+            return registry.execute('Grep', args);
+          })();
+          const forFallback = await (async () => {
+            __setForceFallback(true);
+            return registry.execute('Grep', args);
+          })();
+          assert.equal(forRg, forFallback);
+        });
+      });
+    }
+
+    it('回退引擎输出截断', async () => {
+      __setForceFallback(true);
+      // 制造大量命中：每行都含 foo，行总数远超 MAX_OUTPUT
+      const big = path.join(grepDir, 'big.js');
+      fs.writeFileSync(big, 'foo\n'.repeat(20000));
+      const result = await registry.execute('Grep',
+        { pattern: 'foo', path: big });
+      __setForceFallback(false);
+      assert.match(result, /truncated/);
     });
   });
 

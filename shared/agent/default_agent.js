@@ -11,6 +11,8 @@
  */
 
 import path from 'path';
+import fs from 'fs';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { createLogger } from '../logger.js';
 import { Config } from './config_loader.js';
 import { LLMModel } from './llm_model.js';
@@ -25,17 +27,21 @@ export function setAgentLogFileName(name) {
   logFileName = name;
 }
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 export class Agent {
   /**
    * 从配置目录创建 Agent（推荐入口）
    * 自动完成 Config → Model → ToolRegistry → MessageManager → Agent 的创建
+   * config.json 可选声明 agentClass / messageManagerClass 替换默认类
    * @param {string} configDir - 配置目录路径
    * @param {object} [options] - 可选覆盖
    * @param {object} [options.model] - 自定义 model 实例（测试用）
    * @param {object} [options.toolRegistry] - 自定义 toolRegistry 实例（测试用）
    * @param {object} [options.messageManager] - 自定义 messageManager 实例（测试用）
    */
-  static fromConfigDir(configDir, options = {}) {
+  static async fromConfigDir(configDir, options = {}) {
     const logger = createLogger('agent-init', logFileName);
 
     // 1. 加载配置
@@ -71,22 +77,68 @@ export class Agent {
       }
     }
 
-    // 4. 创建 MessageManager
+    // 4. 创建 MessageManager（config.json 的 messageManagerClass 可替换实现）
     const dataDir = path.join(configDir, '..', 'data');
-    const messageManager = new MessageManager({
+    const mmParams = {
       systemPrompt: config.get('systemPrompt') || '',
       memoryTokenLimit: config.get('memoryTokenLimit') || 8000,
-      prefixPrompt: config.get('prefix_prompt') || '',
-      suffixPrompt: config.get('suffix_prompt') || '',
-      dataDir
-    });
+      compactSystemPrompt: config.get('compactSystemPrompt') || '',
+      compactPrompt: config.get('compactPrompt') || '',
+      dataDir,
+      config
+    };
 
-    return new Agent({
+    let messageManager;
+    const mmFile = config.get('messageManagerClass');
+    if (mmFile) {
+      const MMClass = await Agent._loadModuleClass(mmFile, configDir);
+      logger.info(`加载自定义 MessageManager: ${mmFile}`);
+      messageManager = new MMClass(mmParams);
+    } else {
+      messageManager = new MessageManager(mmParams);
+    }
+
+    // 5. 创建 Agent（config.json 的 agentClass 可替换实现）
+    const agentParams = {
       config,
       model: options.model || model,
       toolRegistry: options.toolRegistry || toolRegistry,
       messageManager: options.messageManager || messageManager,
-    });
+    };
+
+    let agent;
+    const agentFile = config.get('agentClass');
+    if (agentFile) {
+      const AgentClass = await Agent._loadModuleClass(agentFile, configDir);
+      logger.info(`加载自定义 Agent: ${agentFile}`);
+      agent = new AgentClass(agentParams);
+    } else {
+      agent = new Agent(agentParams);
+    }
+
+    return agent;
+  }
+
+  /**
+   * 从文件加载类（查找 agents/{id}/ 目录，回退 shared/agent/）
+   * @param {string} fileName - 文件名（不含 .js 后缀）
+   * @param {string} configDir - Agent 配置目录
+   * @returns {Promise<Function>} 模块中导出的第一个 class/function
+   */
+  static async _loadModuleClass(fileName, configDir) {
+    const candidates = [
+      path.join(configDir, '..', fileName + '.js'),  // agents/{id}/{name}.js
+      path.join(__dirname, fileName + '.js'),          // shared/agent/{name}.js
+    ];
+    for (const filePath of candidates) {
+      if (fs.existsSync(filePath)) {
+        const mod = await import(pathToFileURL(filePath).href);
+        const Cls = Object.values(mod).find(v => typeof v === 'function');
+        if (Cls) return Cls;
+        throw new Error(`文件 "${fileName}.js" 未导出类`);
+      }
+    }
+    throw new Error(`文件 "${fileName}.js" 未找到`);
   }
 
   /**
@@ -134,8 +186,8 @@ export class Agent {
     this.messageManager.updateConfig({
       systemPrompt: this.config.get('systemPrompt'),
       memoryTokenLimit: this.config.get('memoryTokenLimit'),
-      prefixPrompt: this.config.get('prefix_prompt'),
-      suffixPrompt: this.config.get('suffix_prompt')
+      compactSystemPrompt: this.config.get('compactSystemPrompt'),
+      compactPrompt: this.config.get('compactPrompt')
     });
 
     logger.info('配置热加载完成');
@@ -175,8 +227,26 @@ export class Agent {
     while (maxIterations <= 0 || iteration < maxIterations) {
       iteration++;
 
-      // a. 构建 LLM 请求
-      const messages = this.messageManager.getMessagesForLLM();
+      // a. 记忆压缩（循环内，对齐 Claude Code）：在构建 LLM 请求前先压，
+      //    保证本轮请求用短历史、不发爆。仅 AbortError 抛出走中断流程；其他失败已被断路器吃掉。
+      this._abortController = new AbortController();
+      try {
+        yield* this.messageManager.compactIfNeeded(this.model, { signal: this._abortController.signal });
+        this._abortController = null;
+      } catch (err) {
+        this._abortController = null;
+        if (err.name === 'AbortError' || this._aborted) {
+          logger.info('用户中断了请求（压缩期间）');
+          yield { event: 'compact_abort', data: {} };
+          yield { event: 'aborted', data: {} };
+          yield { event: 'done', data: { usage: { prompt_tokens: 0, completion_tokens: 0 } } };
+          return;
+        }
+        logger.error(`压缩失败: ${err.message}`);
+      }
+
+      // b. 构建 LLM 请求
+      const messages = await this.messageManager.getMessagesForLLM();
       const tools = this.toolRegistry.getAll();
 
       // 记录发送给 LLM 的 messages
@@ -261,55 +331,77 @@ export class Agent {
           data: { tool_calls: toolCallsSummary }
         };
 
-        for (const tc of toolCallsResult) {
+        // 工具执行：CC processQueue 语义——isConcurrencySafe=true 的只读工具并发（上限 10），
+        // 写工具串行；执行并发、yield 串行（按 tool_call 原序发 status、按原序补 tool_result）。
+        // abort 时立刻中断（signal 传工具、主 loop 不等剩余并发 Promise）。
+        const MAX_TOOL_USE_CONCURRENCY = parseInt(process.env.MAX_TOOL_USE_CONCURRENCY, 10) || 10;
+        const toolExecSignal = this._abortController?.signal;  // 复用当前轮 abortController（工具中断用）
+
+        const isErrorResult = (r) => typeof r === 'string' && (
+          r.startsWith('Error:') || r.startsWith('Exit code') ||
+          r.startsWith('Permission denied') || r.startsWith('File does not exist') ||
+          (r.match && r.match(/is a directory\.?\s*$/))
+        );
+
+        // 预解析每个 tool_call
+        const parsed = toolCallsResult.map(tc => {
           const toolName = tc.function.name;
           let toolArgs = {};
-          try {
-            toolArgs = JSON.parse(tc.function.arguments || '{}');
-          } catch (e) {
-            toolArgs = {};
-          }
+          try { toolArgs = JSON.parse(tc.function.arguments || '{}'); } catch (e) { toolArgs = {}; }
           const tool = this.toolRegistry.get(toolName);
+          return { tc, toolName, toolArgs, tool, safe: this.toolRegistry.isConcurrencySafe(toolName) };
+        });
 
-          // 发射 status 事件 — 从工具元数据读取 statusEvent
-          if (tool?.statusEvent) {
-            yield {
-              event: 'status',
-              data: {
-                state: tool.statusEvent.state,
-                detail: tool.statusEvent.detail?.(toolArgs) || '',
-              },
-            };
+        // 按 tool_call 原序遍历：连续安全工具并发段 + 写工具串行点
+        let idx = 0;
+        let abortedHere = false;
+        while (idx < parsed.length) {
+          const batch = [];
+          while (idx < parsed.length && parsed[idx].safe && batch.length < MAX_TOOL_USE_CONCURRENCY) {
+            batch.push(parsed[idx]); idx++;
           }
 
-          // 执行工具
-          const result = await this.toolRegistry.execute(toolName, toolArgs);
-          this.messageManager.addToolResult(tc.id, result);
-
-          // 发送工具执行结果状态
-          const isError = typeof result === 'string' && (
-            result.startsWith('Error:') ||
-            result.startsWith('Exit code') ||
-            result.startsWith('Permission denied') ||
-            result.startsWith('File does not exist') ||
-            (result.match && result.match(/is a directory\.?\s*$/))
-          );
-          yield {
-            event: 'tool_result',
-            data: {
-              status: isError ? 'error' : 'success',
-              message: isError ? result : undefined
+          if (batch.length > 0) {
+            // 并发段：先按原序 yield 各 status，再并发执行，结果按原序 addToolResult + tool_result
+            for (const item of batch) {
+              if (item.tool?.statusEvent) {
+                yield { event: 'status', data: { state: item.tool.statusEvent.state, detail: item.tool.statusEvent.detail?.(item.toolArgs) || '' } };
+              }
             }
-          };
+            const results = await Promise.all(batch.map(item =>
+              this.toolRegistry.execute(item.toolName, item.toolArgs, toolExecSignal)
+            ));
+            for (let k = 0; k < batch.length; k++) {
+              this.messageManager.addToolResult(batch[k].tc.id, results[k]);
+              yield { event: 'tool_result', data: { status: isErrorResult(results[k]) ? 'error' : 'success', message: isErrorResult(results[k]) ? results[k] : undefined } };
+              if (this._checkAborted('')) {
+                logger.info('用户中断了请求（工具执行后）');
+                yield { event: 'aborted', data: {} };
+                yield { event: 'done', data: { usage: { prompt_tokens: 0, completion_tokens: 0 } } };
+                abortedHere = true; break;
+              }
+            }
+            if (abortedHere) break;
+            continue;
+          }
 
-          // 工具执行后检查中断
+          // 写工具串行点
+          const item = parsed[idx]; idx++;
+          if (item.tool?.statusEvent) {
+            yield { event: 'status', data: { state: item.tool.statusEvent.state, detail: item.tool.statusEvent.detail?.(item.toolArgs) || '' } };
+          }
+          const result = await this.toolRegistry.execute(item.toolName, item.toolArgs, toolExecSignal);
+          this.messageManager.addToolResult(item.tc.id, result);
+          yield { event: 'tool_result', data: { status: isErrorResult(result) ? 'error' : 'success', message: isErrorResult(result) ? result : undefined } };
           if (this._checkAborted('')) {
             logger.info('用户中断了请求（工具执行后）');
             yield { event: 'aborted', data: {} };
             yield { event: 'done', data: { usage: { prompt_tokens: 0, completion_tokens: 0 } } };
-            return;
+            abortedHere = true; break;
           }
         }
+
+        if (abortedHere) return;
 
         continue;
       } else {
@@ -322,7 +414,9 @@ export class Agent {
       yield { event: 'error', data: { message: 'Max iterations reached' } };
     }
 
-    // d. 记忆压缩 — compactIfNeeded 为 generator，触发条件和成功事件内聚到 MM
+    // d. 循环后兜底压缩：loop 退出（break 纯文本回复 / 达 maxIterations）后，
+    //    若最后一轮累积的消息超阈值而循环内没压到（如纯文本长回复 break 前顶部不超、回复后超），
+    //    在 done 前补压一次。compactIfNeeded 内部不超阈值即 return，无副作用。
     this._abortController = new AbortController();
     try {
       yield* this.messageManager.compactIfNeeded(this.model, { signal: this._abortController.signal });
@@ -330,13 +424,13 @@ export class Agent {
     } catch (err) {
       this._abortController = null;
       if (err.name === 'AbortError' || this._aborted) {
-        logger.info('用户中断了请求（压缩期间）');
+        logger.info('用户中断了请求（兜底压缩期间）');
         yield { event: 'compact_abort', data: {} };
         yield { event: 'aborted', data: {} };
         yield { event: 'done', data: { usage: { prompt_tokens: 0, completion_tokens: 0 } } };
         return;
       }
-      yield { event: 'compact_error', data: { error: err.message || '记忆压缩失败' } };
+      logger.error(`兜底压缩失败: ${err.message}`);
     }
 
     // e. done

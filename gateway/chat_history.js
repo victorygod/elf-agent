@@ -160,6 +160,12 @@ export class ChatHistory {
         records = records.slice(0, idx);
       } else if (idx === 0) {
         return { messages: [], hasMore: false };
+      } else {
+        // idx === -1：游标在历史中找不到（前端传入了合成 id / 已删消息 id / 错游标）。
+        // 不能静默降级为"返回最新 limit 条"——那会和首页重复,导致上滚整页翻倍。
+        // 直接返回空,让前端 hasMore=false 停止翻页。
+        logger.warn(`beforeId 未命中历史 (${agentId}): ${beforeId}`);
+        return { messages: [], hasMore: false };
       }
     }
 

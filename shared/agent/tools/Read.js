@@ -13,6 +13,7 @@ const DEFAULT_LIMIT = 2000;
 export const Read = {
   name: 'Read',
   description: "Reads a file from the local filesystem. Returns content in cat -n format (line numbers starting at 1). Supports pagination via offset and limit. Files that don't exist, empty files, and directories return an error.",
+  isConcurrencySafe: true,
 
   statusEvent: {
     state: 'reading_file',
@@ -41,7 +42,8 @@ export const Read = {
     required: ['file_path']
   },
 
-  execute: async (args) => {
+  execute: async (args, signal) => {
+    if (signal?.aborted) return 'Error: aborted';
     const filePath = args.file_path;
     const startLine = args.offset || 1;
     const maxLines = args.limit || DEFAULT_LIMIT;

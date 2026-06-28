@@ -10,6 +10,7 @@ import { hasRead, markRead } from './read_state.js';
 export const Edit = {
   name: 'Edit',
   description: "Performs exact string replacement in a file. old_string must include all whitespace, indentation, blank lines, and surrounding code exactly as it appears in the file. old_string must be unique in the file — the edit fails if there is more than one match. The file must have been previously Read in this conversation, or the call will fail.",
+  isConcurrencySafe: false,
 
   statusEvent: {
     state: 'editing_file',
@@ -41,7 +42,8 @@ export const Edit = {
     required: ['file_path', 'old_string', 'new_string']
   },
 
-  execute: async (args) => {
+  execute: async (args, signal) => {
+    if (signal?.aborted) return 'Error: aborted';
     const filePath = args.file_path;
     const oldString = args.old_string;
     const newString = args.new_string;

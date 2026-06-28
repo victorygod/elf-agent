@@ -82,6 +82,11 @@ const useAgentStore = create((set, get) => ({
     const { activeAgentId, chats } = get();
     if (activeAgentId === agentId) return;
 
+    // 同步到 URL hash,刷新页面后能保留在当前 agent
+    if (typeof window !== 'undefined' && window.location.hash.replace(/^#\/?/, '') !== agentId) {
+      window.location.hash = agentId;
+    }
+
     const newChats = new Map(chats);
 
     // 隐藏当前 chat
@@ -141,6 +146,9 @@ const useAgentStore = create((set, get) => ({
     const chats = new Map(get().chats);
     const chat = chats.get(agentId);
     if (!chat) return;
+    // ★ activeTurn 在途时不 loadHistory —— 发消息瞬间 user 已落盘 jsonl，
+    //   此时 loader 会把这条 user 读进 turns，与 activeTurn 同框渲染导致对话翻倍。
+    if (chat.activeTurn) return;
     try {
       const data = await api.getHistory(agentId, { limit: HISTORY_PAGE_SIZE });
       const messages = data.messages || [];
@@ -163,7 +171,14 @@ const useAgentStore = create((set, get) => ({
     if (!chat || chat.loadingHistory || !chat.hasMore || chat.turns.length === 0) return;
     chats.set(agentId, { ...chat, loadingHistory: true });
     set({ chats });
-    const oldestId = chat.turns[0]?.userMessage?.id || chat.turns[0]?.id;
+    // 游标取当前最旧 turn 内的真实消息 id（jsonl 里存在的 id）。
+    // turns[0].id 可能是 historyToTurns 给孤儿 assistant 造的合成前缀 "turn_…",
+    // 不能直接用,否则后端 findIndex 返回 -1。优先取真实 userMessage.id,
+    // 兜底取该 turn 第一条 assistant 气泡的 id。
+    const oldestTurn = chat.turns[0];
+    const oldestId = oldestTurn?.userMessage?.id
+      || oldestTurn?.assistantBubbles?.[0]?.id
+      || oldestTurn?.id;
     try {
       const data = await api.getHistory(agentId, { limit: HISTORY_PAGE_SIZE, before: oldestId });
       const messages = data.messages || [];
@@ -198,7 +213,7 @@ const useAgentStore = create((set, get) => ({
     }
   },
 
-  clearHistory: async (agentId) => {
+  clearHistory: async (agentId, { silent } = {}) => {
     try {
       const ok = await api.deleteHistory(agentId);
       if (ok) {
@@ -208,11 +223,11 @@ const useAgentStore = create((set, get) => ({
           hasMore: false,
           historyLoaded: false,
         });
-        get().showToast('聊天记录已清空');
+        if (!silent) get().showToast('聊天记录已清空');
         api.log('INFO', `Agent ${agentId} 聊天记录已清空`);
       }
     } catch (e) {
-      get().showToast(`清空失败: ${e.message}`);
+      if (!silent) get().showToast(`清空失败: ${e.message}`);
     }
   },
 

@@ -11,6 +11,7 @@ import { hasRead, markRead } from './read_state.js';
 export const Write = {
   name: 'Write',
   description: "Writes a file to the local filesystem, overwriting if one exists. Creates parent directories automatically. The file to be overwritten must have been previously Read in this conversation, or the call will fail.",
+  isConcurrencySafe: false,
 
   statusEvent: {
     state: 'writing_file',
@@ -33,7 +34,8 @@ export const Write = {
     required: ['file_path', 'content']
   },
 
-  execute: async (args) => {
+  execute: async (args, signal) => {
+    if (signal?.aborted) return 'Error: aborted';
     const filePath = args.file_path;
     const content = args.content;
 

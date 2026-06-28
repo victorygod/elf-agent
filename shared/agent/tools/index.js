@@ -9,3 +9,4 @@ export { Write } from './Write.js';
 export { Edit } from './Edit.js';
 export { Bash } from './Bash.js';
 export { Glob } from './Glob.js';
+export { Grep } from './Grep.js';

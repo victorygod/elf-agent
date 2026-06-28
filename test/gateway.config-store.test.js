@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { readAgentConfig, writeAgentConfig, readApiKey, PROMPT_FILE_FIELDS } from '../gateway/config_store.js';
+import { readAgentConfig, writeAgentConfig } from '../gateway/config_store.js';
 
 describe('config_store', () => {
   let tmpDir;
@@ -36,9 +36,9 @@ describe('config_store', () => {
     return configDir;
   }
 
-  it('readAgentConfig 应读取 config.json + prompt 文件 + api_key.json', () => {
+  it('readAgentConfig 应读取 config.json + type:path 文件 + api_key.json', () => {
     const configDir = setupConfigDir(
-      { agentId: 'test', port: 9000, provider: 'llm' },
+      { agentId: 'test', port: 9000, provider: 'llm', systemPrompt: { type: 'path', content: 'system_prompt.md' }, prefix_prompt: { type: 'path', content: 'prefix_prompt.md' }, suffix_prompt: { type: 'path', content: 'suffix_prompt.md' } },
       { base_url: 'https://api.test.com', auth_token: 'key', model: 'gpt-4o' },
       { 'system_prompt.md': '系统提示', 'prefix_prompt.md': '前缀', 'suffix_prompt.md': '后缀' }
     );
@@ -51,15 +51,13 @@ describe('config_store', () => {
     assert.equal(config.model.provider, 'llm');
   });
 
-  it('readAgentConfig 缺失的 prompt 文件应返回空字符串', () => {
+  it('readAgentConfig type:path 文件不存在时应返回空字符串', () => {
     const configDir = setupConfigDir(
-      { agentId: 'test' },
+      { agentId: 'test', systemPrompt: { type: 'path', content: 'missing.md' } },
       { base_url: 'https://api.test.com', auth_token: 'key', model: 'm' }
     );
     const config = readAgentConfig(configDir);
     assert.equal(config.systemPrompt, '');
-    assert.equal(config.prefix_prompt, '');
-    assert.equal(config.suffix_prompt, '');
   });
 
   it('readAgentConfig 模型配置不完整时应设置 modelError', () => {
@@ -82,34 +80,6 @@ describe('config_store', () => {
     assert.ok(!config.modelError);
   });
 
-  it('readApiKey 不存在时应返回空对象（autoCreate=false）', () => {
-    // 创建不含 api_key.json 的配置目录
-    const configDir = path.join(tmpDir, 'config');
-    fs.mkdirSync(configDir, { recursive: true });
-    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ agentId: 'test' }, null, 2), 'utf-8');
-    const result = readApiKey(configDir, false);
-    assert.deepEqual(result, {});
-  });
-
-  it('readApiKey 不存在时应自动创建空模板（autoCreate=true）', () => {
-    const configDir = path.join(tmpDir, 'config2');
-    fs.mkdirSync(configDir, { recursive: true });
-    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ agentId: 'test' }, null, 2), 'utf-8');
-    const result = readApiKey(configDir, true);
-    assert.equal(result.base_url, '');
-    assert.equal(result.auth_token, '');
-    assert.equal(result.model, '');
-    // 文件应已创建
-    assert.ok(fs.existsSync(path.join(configDir, 'api_key.json')));
-  });
-
-  it('PROMPT_FILE_FIELDS 应包含 3 个字段', () => {
-    assert.equal(PROMPT_FILE_FIELDS.length, 3);
-    assert.equal(PROMPT_FILE_FIELDS[0].contentKey, 'systemPrompt');
-    assert.equal(PROMPT_FILE_FIELDS[1].contentKey, 'prefix_prompt');
-    assert.equal(PROMPT_FILE_FIELDS[2].contentKey, 'suffix_prompt');
-  });
-
   it('writeAgentConfig 应更新 config.json 中的普通字段', () => {
     const configDir = setupConfigDir(
       { agentId: 'test', port: 9000, memoryTokenLimit: 8000 },
@@ -123,9 +93,9 @@ describe('config_store', () => {
     assert.equal(written.memoryTokenLimit, 12000);
   });
 
-  it('writeAgentConfig 应写入 prompt 文件', () => {
+  it('writeAgentConfig 应写入 type:path 文件', () => {
     const configDir = setupConfigDir(
-      { agentId: 'test', systemPromptPath: 'system_prompt.md' },
+      { agentId: 'test', systemPrompt: { type: 'path', content: 'system_prompt.md' } },
       { base_url: 'https://api.test.com', auth_token: 'key', model: 'm' },
       { 'system_prompt.md': '旧提示' }
     );

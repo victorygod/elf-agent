@@ -36,7 +36,7 @@ export async function startAgent(configDir) {
   const logger = createLogger('agent-main', logFileName);
 
   // 2. 创建 Agent（内部自动完成 Config → Model → ToolRegistry → MessageManager）
-  const agent = Agent.fromConfigDir(configDir);
+  const agent = await Agent.fromConfigDir(configDir);
 
   // 3. 启动 HTTP 服务
   const port = agent.config.get('port');

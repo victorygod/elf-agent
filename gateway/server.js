@@ -5,6 +5,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import express from 'express';
 import { createLogger } from '../shared/logger.js';
 import { getConfigUI } from './config-ui.js';
@@ -45,6 +46,17 @@ export function createGatewayApp(pm, chatHistory) {
       agent.streaming = (activeStreams.get(agent.agentId) || 0) > 0;
     }
     res.json(list);
+  });
+
+  // GET /available-tools — 列出所有可用工具名（来自 shared/agent/tools/index.js 的 re-export）
+  app.get('/available-tools', async (req, res) => {
+    try {
+      const tools = await getAvailableTools();
+      res.json({ tools });
+    } catch (err) {
+      logger.error(`获取可用工具列表失败: ${err.message}`);
+      res.status(500).json({ error: `Failed to get available tools: ${err.message}` });
+    }
   });
 
   // POST /agents/rediscover — 重新扫描文件系统，发现新增/变更的 Agent
@@ -297,21 +309,14 @@ export function createGatewayApp(pm, chatHistory) {
 
   // 前端日志 API
   app.post('/api/log', (req, res) => {
-    const logDir = path.join(process.cwd(), 'logs');
-    try {
-      fs.mkdirSync(logDir, { recursive: true });
-    } catch (e) { /* ignore */ }
-    const { level, message, timestamp } = req.body || {};
+    const { level, message } = req.body || {};
     if (!message) {
       return res.status(400).json({ error: 'Missing message' });
     }
-    const ts = timestamp || new Date().toISOString();
-    const lvl = level || 'INFO';
-    const line = `[${ts}] [${lvl}] [frontend] ${message}\n`;
-    const logFile = path.join(logDir, 'frontend.log');
-    try {
-      fs.appendFileSync(logFile, line);
-    } catch (e) { /* ignore */ }
+    const frontendLogger = createLogger('frontend', 'frontend.log');
+    const lvl = (level || 'INFO').toLowerCase();
+    const fn = lvl === 'error' ? 'error' : lvl === 'warn' ? 'warn' : 'info';
+    frontendLogger[fn](message);
     res.json({ status: 'ok' });
   });
 
@@ -330,4 +335,17 @@ export function createGatewayApp(pm, chatHistory) {
   });
 
   return app;
+}
+
+/**
+ * 获取所有可用工具名（来自 shared/agent/tools/index.js 的 re-export）
+ * 缓存结果，tools/index.js 改动需重启服务
+ */
+let _availableToolsCache = null;
+async function getAvailableTools() {
+  if (_availableToolsCache) return _availableToolsCache;
+  const toolsPath = path.join(process.cwd(), 'shared', 'agent', 'tools', 'index.js');
+  const mod = await import(pathToFileURL(toolsPath).href);
+  _availableToolsCache = Object.keys(mod).sort();
+  return _availableToolsCache;
 }

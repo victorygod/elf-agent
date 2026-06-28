@@ -3,7 +3,7 @@ import * as api from '../api/index.js';
 import useAgentStore from '../stores/agentStore';
 import styles from './ConfigField.module.css';
 
-export default function ConfigField({ field, agentId, value, currentAvatar, currentUserAvatar, onChange }) {
+export default function ConfigField({ field, agentId, value, currentAvatar, currentUserAvatar, options, onChange }) {
   const fileRef = useRef(null);
 
   const handleFileChange = async (e, fieldName) => {
@@ -82,8 +82,36 @@ export default function ConfigField({ field, agentId, value, currentAvatar, curr
 
   return (
     <div className={`${styles.field} ${type === 'checkbox' ? styles.checkbox : ''}`}>
-      {type !== 'checkbox' && <label>{label}</label>}
-      {type === 'textarea' ? (
+      {type !== 'checkbox' && type !== 'multiselect' && <label>{label}</label>}
+      {type === 'multiselect' ? (
+        <div className={styles.multiselect} data-key={key}>
+          <label>{label}</label>
+          <div className={styles.multiselectOptions}>
+            {(options || []).map(opt => {
+              const checked = Array.isArray(value) && value.includes(opt);
+              return (
+                <label key={opt} className={styles.multiselectItem}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => {
+                      const next = Array.isArray(value) ? [...value] : [];
+                      if (e.target.checked) {
+                        if (!next.includes(opt)) next.push(opt);
+                      } else {
+                        const i = next.indexOf(opt);
+                        if (i >= 0) next.splice(i, 1);
+                      }
+                      onChange(next);
+                    }}
+                  />
+                  {opt}
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      ) : type === 'textarea' ? (
         <textarea data-key={key} value={value} onChange={(e) => onChange(e.target.value)} />
       ) : type === 'checkbox' ? (
         <label className={styles.checkboxLabel}>
