@@ -213,25 +213,88 @@ hR = A8(async A => {
 
 与 `user-invocable: false`(`isHidden:!M`)正交:后者只控 `/` 菜单显隐,不影响模型可见性。
 
-### 4.2 description 的 token 统计:`l8z` / `EW6`(行 6517 / 1635)
+### 4.2 description 的 token 估算:`l8z` / `EW6` / `X5`(行 6517 / 1635 / 6517)——**仅 UI 统计,不参与注入**
+
+> ⚠️ 注意:`EW6`/`l8z` 不是注入逻辑,容易误读。真正注入见 §4.3。
 
 ```js
-// cli.js:6517  (l8z)
-let w = Y.map(O => ({name:O.userFacingName(), source:..., tokens: EW6(O)}))
-return {skillTokens, skillInfo:{totalSkills, includedSkills, skillFrontmatter:w}}
+// cli.js:6517  X5 = 字符数/4 的粗估 token
+function X5(A, q=4){ return Math.round(A.length/q) }
 
-// cli.js:1635  (EW6)
+// cli.js:1635  EW6 = name+description+whenToUse 拼字符串后估 token 数(返回数字)
 function EW6(A){
   let q = [A.name, A.description, A.whenToUse].filter(Boolean).join(" ")
-  return X5(q)  // token 数
+  return X5(q)  // 即 q.length / 4
+}
+
+// cli.js:6517  l8z = 把每个 skill 的估算 token 数塞进 skillInfo 给 UI/预算展示
+async function l8z(A, q, K){
+  let Y = await yN8(T1())                         // 候选 skill 列表
+  let z = O0q(A)                                  // 找 Skill 工具(sK(A, "Skill"))
+  if(!z) return {skillTokens:0, skillInfo:{...}}
+  let _ = await O86([z], q, K)                    // 工具自身 token
+  let w = Y.map(O => ({name:O.userFacingName(), source:..., tokens: EW6(O)}))  // 每个 skill 估算
+  return {skillTokens:_, skillInfo:{totalSkills, includedSkills, skillFrontmatter:w}}
 }
 ```
 
-**注给模型的全部内容** = `name + description + when_to_use` 三段拼成字符串,**无正文**。多 skill 拼起来作为 system prompt 一部分,模型据此判断是否调 Skill 工具。
+`skillInfo.skillFrontmatter` 流向 UI 进度展示,**不进模型上下文**。`EW6` 返回的是数字(估算 token),不是字符串。
+
+### 4.3 真正的注入:`qC9`/`VN8` 生成清单,经 `kN8` 裁剪,放进 system-reminder(行 1657)
+
+模型每轮看到的 skill 清单来自这条链路,与 §4.2 无关:
+
+**(a) 单行格式化** `VN8` + `qC9`(行 1657):
+
+```js
+function VN8(A){ return A.whenToUse ? `${A.description} - ${A.whenToUse}` : A.description }
+function qC9(A){ ...; return `- ${A.name}: ${VN8(A)}` }   // 每行: "- <name>: <description>" (有 whenToUse 则追加 " - <whenToUse>")
+```
+
+**(b) 字符预算裁剪** `kN8`(行 1657):
+
+```js
+function kN8(skills, ctx){
+  if(skills.length===0) return ""
+  let budget = wP1(ctx)                       // wP1: 默认 16000 字符,或 maxTokens × 4(chars/token) × 0.02(2%)
+  let lines = skills.map(s => ({cmd:s, full: qC9(s)}))
+  let total = lines.reduce((a,x)=>a+x.full.length,0) + (lines.length-1)  // +换行
+  if(total <= budget) return lines.map(x=>x.full).join("\n")             // 全装下直接全返回
+
+  // 装不下:bundled skill 全文优先,其余按剩余预算均分
+  //   单条预算 < KC9(=20 字符) → 降级为只列 `- <name>`
+  //   否则 `- <name>: <desc…>`(描述超长截断加 …)
+}
+```
+
+预算常量(行 1661):`aK4=0.02`(2% 上下文)、`oK4=4`(chars/token)、`sK4=16000`(默认字符兜底)、`KC9=20`(单条最小预算)。
+
+意为装载分档:**bundled 全文 > name+截断 description > 只剩 name**。这解释了挂几十个 skill 也能装下——靠分档裁剪,不是无脑全拼。
+
+**(c) Skill 工具自身只给静态说明,清单在 system-reminder**(`o66`,行 2883):
+
+```js
+o66 = {
+  name: dH,                                            // "Skill"
+  description: async ({skill:A}) => `Execute skill: ${A}`,   // 动态但极简,不含清单
+  prompt: async () => OP1(qY()),                       // OP1 = 静态使用说明
+  ...
+}
+```
+
+`OP1`(行 1661)是纯静态文本,其中明确写道:
+
+> **Available skills are listed in system-reminder messages in the conversation**
+
+即工具 prompt 自己不列 skill,而是告诉模型清单在 system-reminder 消息里。`qC9`/`kN8` 产出的清单文本即注入为该 system-reminder(呼应 §10 的 L1 层)。
+
+**修正结论**:模型每轮看到的 skill 清单 = `qC9` 格式化(``- <name>: <desc> - <whenToUse>``)、`kN8` 按预算(默认 16000 字符 / 上下文 2%)裁剪后,经 `mhY`(行3914)增量推送,在消费侧(行10610944)被 `x5([p1({content:"The following skills…",isMeta:true})])` 包裹——`x5` 调用 `qT` 给 content 包上 `<system-reminder>` 标签,最终格式是 **`<system-reminder>` + isMeta user 消息**(双重标记:`<system-reminder>` 标签让模型识别为系统元信息,`isMeta` 标记让 compaction 优先丢弃);Skill 工具自身 description 仅 `` `Execute skill: <名>` ``,prompt 为静态说明;`OP1`(行1661)里那句"Available skills are listed in system-reminder messages"是**准确描述**,清单确实在 `<system-reminder>` 标签里;`EW6`/`l8z` 的 `length÷4` token 估算仅给 UI 统计用,不参与注入。
 
 ### 4.3 Skill 工具:模型如何触发
 
 工具名常量 `dH = "Skill"`(行 1657)。模型决定调用时进入 `he(..., "skills", "Skill")`(行 2588)分支,最终调用 skill 的 `getPromptForCommand` 注入正文。模型侧看到的是**一个名为 `Skill` 的工具**(带 `skill` 参数指明触发哪个),而非每个 skill 一个工具。
+
+**触发后的副作用**：`$O6(name, path, content, agentId)` 把 skill 的 name + path + **正文全文**（`getPromptForCommand` 返回值——经过变量替换 + `` !`cmd` `` 预处理后）记录到进程内存(`N1.invokedSkills`)，供 compact 后 `dAq()` 读取并重新生成 `invoked_skills` attachment 注入 isMeta 消息。不是摘要——是全文。
 
 ### 4.4 用户手动调用路由(行 2797)
 
@@ -268,6 +331,51 @@ async getPromptForCommand(argStr, ctx){
 - **`${CLAUDE_SKILL_DIR}`**:替换为 skill 所在目录绝对路径(win32 反斜杠转正斜杠)。正文可引用同目录 `template.md`、`scripts/x.sh` 等辅助文件。
 - **`${CLAUDE_SESSION_ID}`**:替换为当前会话 ID。
 - **`QB(V, ctx, toolName)`**:`!`command`` 动态注入预处理。**在发给模型之前**执行 shell 命令,把输出替换进文本——模型看到结果而非命令。并把 skill 自己的 `allowed-tools` 注入 `alwaysAllowRules`(行1637中段),使正文里的 `!`cmd`` 享有该 skill 免确认权限。
+
+> 注:`getPromptForCommand` 真实位置在行 5352934(NK4 对象方法),上文"行 1637"为旧标注。
+
+### 5.1 触发后的多条消息结构 `Fd4`(行 8236640)——关键易漏点
+
+无论模型调 Skill 工具还是用户 `/name`,最终都走 `Fd4`(= `processPromptSlashCommand` 的注入器)产出**多条消息**,不是单条 isMeta。逐条:
+
+```js
+// cli.js:8236640  (改写)
+async function Fd4(skill, args, ctx, ...){
+  let w = await skill.getPromptForCommand(args, ctx)   // 正文(含变量替换、!cmd 预处理)
+  let O = skill.source ? `${skill.source}:${skill.name}` : skill.name
+  let $ = w.filter(t=>t.type==="text").map(t=>t.text).join("\n\n")
+  $O6(skill.name, O, $, agentId)                       // 1. 记录全文供 compact 恢复
+  let H = NWY(skill, args)                              // 2. <command-*> 标签段
+  let J = /* 正文拼接,含额外 messages */
+  let M = await gP1(gf6(正文, ctx, ...))               // 3. !cmd 动态预处理产物
+  return {
+    messages: [
+      p1({content: H, uuid}),                           // ① 非 isMeta!<command-name>/<command-message>/<command-args>
+      p1({content: J, isMeta: true}),                   // ② isMeta 裸正文(不经 x5,不包 <system-reminder>)
+      ...M,                                              // ③ !cmd 预处理产物
+      G4({type:"command_permissions", allowedTools, model}) // ④ 权限 attachment
+    ],
+    shouldQuery: true, allowedTools, model, command: skill
+  }
+}
+```
+
+**① `H = NWY(skill, args)`** 行 8236461:
+- `userInvocable !== false`(常规 skill)→ `ud4(name, args)`(行 8236321):
+  ```
+  <command-name>hello</command-name>
+  <command-message>/hello</command-message>
+  <command-args>你好</command-args>      ← 仅当 args 非空,否则整行省略
+  ```
+  标签常量:`PP="command-message"`、`XP="command-name"`、`dc1="command-args"`。
+- `userInvocable === false`(隐式 skill)→ `gd4(name, progressMessage)`:`<command-name>`+`<command-message>`+`<skill-format>true</skill-format>`,无 `command-args`。
+
+**② 正文 J**:`getPromptForCommand` 产出,前缀 `Base directory for this skill: <root>`。经 `p1({content:J, isMeta:true})`,`isMeta` 但**不经 `x5`**——故不包 `<system-reminder>`(与清单 `skill_listing` 经 `x5`、`invoked_skills` 经 `x5` 形成对照)。
+
+**防重复调用契约**:`OP1`(Skill 工具 prompt,行 1661)明确——
+> "If you see a `<command-name>` tag in the current conversation turn, the skill has ALREADY been loaded - follow the instructions directly instead of calling this tool again"
+
+即模型看到本轮已有 ① 的 `<command-name>` 就不再调 Skill 工具。**所以 ① 是不能省的**:既让 transcript 把 skill 触发渲染成用户命令(体验一致),又是防同轮重复调用的标记。
 
 ---
 
@@ -360,10 +468,11 @@ skill 级 `hooks` 经 `vK4` zod 校验后挂 `skill.hooks`(`NK4` 的 `hooks:W`,�
 | 层级 | 代码证据 | 何时加载 |
 |:--|:--|:--|
 | **L0 对象常驻** | `NK4`(行1635)只存 `contentLength` 不存正文 | 加载即常驻,但极轻 |
-| **L1 description 常驻模型** | `hR` 过滤(行6441)+ `EW6`/`l8z`(行6517)只拼 `name+description+whenToUse` | 每轮都在 system prompt |
-| **L2 正文按需注入** | `getPromptForCommand`(行1637)触发时才读正文+替换+预处理 | 触发瞬间 |
+| **L1 description 常驻模型** | `hR` 过滤(行6441)+ `qC9`/`VN8`(行1657)格式化 + `kN8`(行1657)预算裁剪 → `mhY`(行9004538)**增量推送**(只推 `!nT6.has` 新 skill;未注册 Skill 工具→`return []`)→ 消费侧(行10610944) `x5([p1({content:"The following skills…",isMeta:true})])` → `qT` 包裹 `<system-reminder>` 标签 → **`<system-reminder>` + isMeta user 消息**;`OP1`(行1661)静态指引"清单见 system-reminder"是**准确描述**;`EW6`/`l8z`(行6517)仅 UI 统计,不入上下文 | **首推全量、之后只推新增**(`<system-reminder>` + isMeta);无新增则不产出 |
+| **L2 正文按需注入** | `getPromptForCommand`(行5352934)触发时读正文+替换+预处理;经 `Fd4`(行8236640)注入**两段消息**:① `NWY`(行8236461)= `<command-name>`/`<command-message>`/`<command-args>` 非-isMeta(`ud4`/`gd4`,行8236321/8236195)模拟 /命令;② 正文裸 isMeta(`p1({content:J,isMeta:true})`,**不经 `x5`、不包 `<system-reminder>`**),前缀 `Base directory for this skill: <root>`。防重复靠 `OP1`(行1661)里"看到 `<command-name>` 说明已加载"契约 | 触发瞬间 |
 | **L3 辅助文件更晚** | 正文里手动引用 `${CLAUDE_SKILL_DIR}/reference.md`,模型用 Read 读取 | 模型判断需要时 |
 | **L4 fork 隔离** | `fWY`(行2795)独立子代理上下文 | context:fork 时 |
+| **compact 后 skill 恢复** | `dAq`(行9027944,compact 回调)→ `G4({type:"invoked_skills"})` → dispatch `case "invoked_skills"` → `x5([p1({content:"The following skills were invoked in this session. Continue to follow these guidelines:\n\n### Skill: name\nPath: path\n\n...full content...",isMeta:true})])` 重新注入本会话已触发过的 skill **正文全文**（含变量替换+预处理后结果）。关键链条：skill 触发时 `$O6(name,path,content)` 记录全文 → compact 时 `dAq()` 读取 → dispatch 转 isMeta 消息。**清单不重推**:compact 时 `gc4()` 设 `qE1=true` → 下一轮 `mhY` 把全部 skill 标进 `nT6` 后 `return []`,且 `nT6` 进程内未清 → 后续也无新增 → 清单不产出。只重推 `invoked_skills`,不重推 `skill_listing` | compact 时 |
 | **paths 条件激活** | `kW6` 待命池 + `RW6`(行1637) | 操作匹配文件时 |
 
 核心思想:**默认只让模型看到每个 skill 一句话(descriptions),用最小 token 预算覆盖尽可能多能力;真正用到的瞬间才展开正文、辅助文件、子代理**。这是 skill 相对 CLAUDE.md(全文常驻)的根本优势,也是本环境能挂几十个 skill 而不撑爆上下文的原因。
@@ -387,12 +496,37 @@ skill 级 `hooks` 经 `vK4` zod 校验后挂 `skill.hooks`(`NK4` 的 `hooks:W`,�
 | `getPromptForCommand` | 1637 | 正文注入入口 |
 | `NW6` | 1633 | 参数替换($0/$1/$ARGUMENTS) |
 | `QB` | — | `!`cmd`` 动态命令预处理 |
-| `hR` | 6441 | 模型可见性筛选 |
-| `l8z` / `EW6` | 6517 / 1635 | description token 统计/拼接 |
+| `hR` | 6441 | 模型可见 skill 筛选 |
+| `qC9` / `VN8` | 1657 | skill 清单单行格式化(`- name: desc - whenToUse`) |
+| `kN8` / `wP1` | 1657 | 字符预算裁剪(默认 16000 / 上下文 2%,分档) |
+| `OP1` | 1661 | Skill 工具静态使用说明(指向 system-reminder) |
+| `o66` | 2883 | Skill 工具定义(`name:dH`, description/prompt/call) |
+| `mhY` | 9004538 | skill_listing attachment 生产:**增量推送**(只推 `!nT6.has` 的新 skill;首推 `isInitial=true`);入口先判**未注册 Skill 工具→return []**;`qE1=true`(compact 后)时把当前全部 skill 标进 `nT6` 后 `return []`——**compact 后不重推清单** |
+| `gc4` | 9004510 | 设 `qE1=true`，compact 后调用，通知 `mhY` compact 已发生 |
+| `Pc` | 9004477 | 清空 `nT6` + 重置 `qE1`（仅会话重开时调用，rewind 不调） |
+| `nT6` | 9013199 | `Set<string>`，记录已推送过的 skill 名，用于增量推送去重。会话内常驻，compact 不清 |
+| `NZY` | 2835 | 回放历史 transcript 中的 attachment：遇 `skill_listing` → 调 `gc4()` |
+| 消费侧(行10610944) | 10610944 | `case"skill_listing"` → `x5([p1({content:"The following skills...",isMeta:true})])` → `qT` 包 `<system-reminder>` |
+| `qT` | 6836 | `` `<system-reminder>\n${A}\n</system-reminder>` `` 包裹函数 |
+| `x5` | 6838 | 批量给消息 content 包 `<system-reminder>`(调用 `qT`);已包裹的不重复包(`Gqz` 保护) |
+| `Gqz` | 6829 | 检测 content 是否已以 `<system-reminder>` 开头,已包裹则跳过 |
+| `tI9` | 1780 | `/<system-reminder>\n?([\s\S]*?)\n?<\/system-reminder>/` 正则,用于解析/提取 |
+| `tZq` | 6829 | 把 tool_result 中夹带的 `<system-reminder>` text blocks 提取并重排到 tool_result 后面 |
+| `vE1` | 6546 | context 注入(CLAUDE.md 等),手写 `<system-reminder>` + isMeta |
+| `_GY` | 2883 | skill 无配置时自动 allow(所有可枚举属性为空 → true) |
+| `l8z` / `EW6` / `X5` | 6517 / 1635 / 6517 | token 估算(length÷4),仅 UI 统计,**不注入** |
 | `fWY` | 2795 | fork 子代理执行 |
 | `RW6` | 1637 | conditional paths 激活 |
 | `yW6` / `LW6` | 1637 | 动态目录发现(monorepo) |
 | `dH="Skill"` | 1657 | Skill 工具名常量 |
+| `$O6` | skill 触发回调 | 每次 skill 触发成功时记录（name + path + content），供 `dAq` compact 后读取 |
+| `dAq` | compact 回调 | compact 后重新注入已触发过的 skill **正文全文**（`invoked_skills` attachment，dispatch 走 `x5` 故包 `<system-reminder>`） |
+| `Fd4` | 8236640 | 触发后的注入器:产出 ①`<command-*>` 非-isMeta + ②正文裸 isMeta + ③!cmd 预处理产物 + ④`command_permissions` attachment 多种消息 |
+| `VWY` | 8236640 | `processPromptSlashCommand`,模型/用户触发的最终入口,内部调 `Fd4` |
+| `NWY` | 8236461 | 按 `userInvocable` 选择 `ud4`(常规)或 `gd4`(隐式)生成 `<command-*>` 标签段 |
+| `ud4` | 8236321 | 常规 skill 的 `<command-name>`/`<command-message>`/`<command-args>` 标签段(args 空则省略 `command-args`) |
+| `gd4` | 8236195 | 隐式 skill 的 `<command-name>`/`<command-message>`/`<skill-format>true</skill-format>` |
+| `PP`/`XP`/`dc1` | — | 标签常量: `"command-message"`/`"command-name"`/`"command-args"` |
 | `zl4` | 2883 | 加载成功 UI 渲染 |
 
 ---

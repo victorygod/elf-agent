@@ -135,11 +135,12 @@ CC 是三层覆盖(调用参数 > agent 定义 > inherit 主模型)。**elf 本�
 ```js
 {
   name: "Agent",
-  description: "启动一个子 agent 执行任务。子 agent 有独立上下文(看不到当前对话),需在 prompt 里说明任务背景。可选 subagent_type: Explore(只读检索) / general-purpose(通用,可改文件)。",
+  description: "启动一个子 agent 执行任务。子 agent 有独立上下文(看不到当前对话),需在 prompt 里说明任务背景。subagent_type 必须是启用的子 agent 类型(见配置页「启用的子 agent 类型」)。",
   parameters: {
     type: "object",
     properties: {
-      subagent_type: { type: "string", enum: ["Explore", "general-purpose"], description: "子 agent 类型" },
+      // subagent_type.enum 运行时动态填为 config.subagents(启用集,见 §3.3b);schema 静态示意:
+      subagent_type: { type: "string", enum: ["Explore", "general-purpose"] /* 运行时覆盖为 config.subagents */, description: "子 agent 类型(必填,必须在启用集内)" },
       prompt:        { type: "string", description: "给子 agent 的完整任务描述(零上下文,需 briefing)" },
       description:   { type: "string", description: "3-5 词任务摘要" }
       // model 参数本期不暴露:subagent 一律 inherit 主 agent 模型(见 §四差异2)
@@ -147,7 +148,7 @@ CC 是三层覆盖(调用参数 > agent 定义 > inherit 主模型)。**elf 本�
     required: ["subagent_type", "prompt"]
   },
   isConcurrencySafe: true,   // ★ 多个 subagent 可并行(并发工程已就绪 isConcurrencySafe 机制)
-  async execute(args) { ... }
+  async execute(args) { ... }   // execute 校验 subagent_type ∈ config.subagents(见 §3.3b)
 }
 ```
 
@@ -177,6 +178,33 @@ const subagentDefinitions = {
 ```
 
 > Explore 的 `disallowedTools` 是 elf 工具名空间:去掉 `Agent / Edit / Write`,保留 `Read / Grep / Glob / Bash`(Bash 需在 prompt 里限制只读)。是否把 Bash 也剔出 Explore 待定——CC 的 Explore 保留只读 Bash。见 §3.6。
+
+### 3.3b config UI 配置(两层)
+
+subagent 配置分两层,都经 config UI:
+
+**第一层:主 agent 能否调 subagent(总开关)** —— 用现有 `tools` 字段。Agent 工具注册进 `tools/index.js` 后出现在 `/available-tools`,用户在 config UI「工具」multiselect 勾选 `Agent`。未勾 → 主 agent 工具表无 Agent → 不能调 subagent。
+
+**第二层:启用哪些内置 subagent 类型** —— 新增 `subagents` 字段(数组,如 `["Explore", "general-purpose"]`)。Agent 工具 execute 运行时按 `config.subagents` 过滤 registry —— LLM 的 `subagent_type` 必须在启用集内,否则报错。registry 定义本身内置(§3.3,用户不能改类型定义,只勾启用集)。
+
+config.json(elf-002 示例):
+```json
+"tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "Agent"],
+"subagents": ["Explore", "general-purpose"]
+```
+
+config-ui.json:新增 `subagents` multiselect 字段,**选项写死在字段定义**(内置类型固定,无需后端端点):
+```json
+{ "key": "subagents", "type": "multiselect", "label": "启用的子 agent 类型", "options": ["Explore", "general-purpose"], "hint": "勾选该 Agent 可派发的子 agent 类型(subagent_type 必须在此集内)。需先在「工具」勾选 Agent" }
+```
+
+**ConfigField 支持 field.options**:现有 multiselect 共用 `availableTools` 当 options(ConfigDrawer.jsx `field.type==='multiselect' ? availableTools : null`)。改为优先用字段自带 options:`options={field.options ?? (field.type==='multiselect' ? availableTools : null)}`。即 `subagents` 用 field.options(类型名),`tools` 用 availableTools(工具名)。零新端点。
+
+**运行时过滤**:Agent 工具的 `parameters.properties.subagent_type.enum` 动态填为 `config.subagents`(只列启用类型);execute 时校验 `subagent_type ∈ config.subagents`,不在则返回错误(不让 LLM 用未启用类型)。
+
+**subagent_type 必填**(无隐式默认):LLM 必须显式给 `subagent_type` 且在启用集内。不搞"省略默认 general-purpose"的隐式行为(与 CC 不同,见 §四差异14)。
+
+> 两层独立:可勾 `Agent` 但 `subagents` 空(能调但无可用类型 → 调用必报错,等同没开);或 `subagents` 有但 `tools` 没勾 `Agent`(工具表无 Agent,LLM 调不到)。正常用法两者都配。
 
 ### 3.4 子 agent:零对话上下文 + 引擎部件复用(依赖并发工程 runLoop)
 
@@ -264,6 +292,8 @@ general-purpose 的 system prompt:通用助手,可改文件,briefing 充分。
 | 11 | compaction 与 loop 内核 | CC compaction 在 loop 内 | elf **compaction 不进 runLoop 内核**,主/子 agent 都经 onIterationStart/onLoopEnd 钩子注入各自 MM 的 compactIfNeeded | runLoop 抽离归本工程(§2.0);主子都用钩子注入,统一机制 |
 | 12 | 子 agent 轮数上限(maxTurns) | subagent 定义可有 `maxTurns`(general-purpose 不设=默认无限,implicit fork=200,side_question=1,调用方可覆盖) | **子 agent 继承父 maxIterations**(如 elf-002 子 agent=0 无限;不独立设上限) | 已核实 CC maxTurns 可选可覆盖;elf 取简单策略——子 agent 跟随父,见 §3.4 |
 | 13 | baseDir / hooks / permissionMode | CC subagent 定义含 `baseDir`/`hooks`/`permissionMode` 等 | elf **不实现**(无 baseDir 概念、无 hooks 系统、无权限) | elf 工具空间/架构不同;属特有取舍,本期不做 |
+| 14 | subagent_type 省略默认 | CC 省略 `subagent_type` 默认 general-purpose | elf **subagent_type 必填,无隐式默认** | 已核实 CC 有默认;elf 取简单清晰,LLM 必须显式给类型且在启用集内(§3.3b) |
+| 15 | subagent 启用集 | CC 内置 subagent 全启用(用户不配) | elf **config.subagents 可配启用集**(UI 勾选,§3.3b) | elf 给用户控制:可关掉某类型(如只留 Explore);CC 全启用无此控制。 类型定义仍内置,只配启用集 |
 
 ---
 
@@ -271,9 +301,10 @@ general-purpose 的 system prompt:通用助手,可改文件,briefing 充分。
 
 1. **抽 runLoop 内核**(本工程产出,§2.0):`shared/agent/agent_loop.js`,把 `reasoning()` 核心抽成 `runLoop({model, tools, messageManager, maxIterations, signal, stream, onIterationStart, onLoopEnd})`,compaction 经钩子注入。主 agent `reasoning()` 改包一层(传主 MM 钩子 + 持久化)。先保证主 agent 行为不变(零回归)。
 2. **subAgent 配置**:`shared/agent/subagents/registry.js` + Explore/general-purpose 定义 + system prompt(无 model 字段,inherit)。
-3. **Agent 工具**:`shared/agent/tools/Agent.js`,`isConcurrencySafe=true`,execute 里查 registry + 构造子 agent 临时 MM(继承父 agent MM 类、临时 dataDir、继承父压缩配置)+ 跑 runLoop(`stream:false`,钩子注入 subMM.compactIfNeeded,继承父 maxIterations) + 返回 finalText + 跑完 `fs.rmSync` 临时 dataDir。
-4. **Explore disallowedTools 验证**:确认子 agent 拿不到 Agent/Edit/Write(嵌套阻断)。
-5. **测试**:单 Explore / 单 general-purpose / 多 Explore 并行 / Explore 内尝试调 Agent 应失败;子 agent 长任务触发压缩(继承父策略);临时 dataDir 跑完清、不污染主 agent data/。
+3. **config UI 两层配置**(§3.3b):Agent 工具进 `tools/index.js`(可被「工具」multiselect 勾选);config-ui.json 加 `subagents` multiselect(field.options 写死类型名);ConfigField 支持 field.options;elf-002/elf-001 config.json 加 `subagents`/`tools` 含 Agent。
+4. **Agent 工具**:`shared/agent/tools/Agent.js`,`isConcurrencySafe=true`,subagent_type.enum 动态填 `config.subagents`、execute 校验类型 ∈ 启用集;查 registry + 构造子 agent 临时 MM(继承父 agent MM 类、临时 dataDir、继承父压缩配置)+ 跑 runLoop(`stream:false`,钩子注入 subMM.compactIfNeeded,继承父 maxIterations) + 返回 finalText + 跑完 `fs.rmSync` 临时 dataDir。
+5. **Explore disallowedTools 验证**:确认子 agent 拿不到 Agent/Edit/Write(嵌套阻断)。
+6. **测试**:单 Explore / 单 general-purpose / 多 Explore 并行 / Explore 内尝试调 Agent 应失败;subagent_type 未启用/省略应报错;子 agent 长任务触发压缩(继承父策略);临时 dataDir 跑完清、不污染主 agent data/。
 
 ---
 

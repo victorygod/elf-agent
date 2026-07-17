@@ -3,7 +3,7 @@ import * as api from '../api/index.js';
 import useAgentStore from '../stores/agentStore';
 import styles from './ConfigField.module.css';
 
-export default function ConfigField({ field, agentId, value, currentAvatar, currentUserAvatar, options, onChange }) {
+export default function ConfigField({ field, agentId, value, currentAvatar, options, onChange }) {
   const fileRef = useRef(null);
 
   const handleFileChange = async (e, fieldName) => {
@@ -20,11 +20,7 @@ export default function ConfigField({ field, agentId, value, currentAvatar, curr
         const data = await api.uploadAvatar(agentId, fieldName, base64, file.type);
         const filename = (data.path || '').split('/').pop();
         if (filename) {
-          if (fieldName === 'avatar') {
-            onChange?.({ avatar: filename });
-          } else {
-            onChange?.({ userAvatar: filename });
-          }
+          onChange?.(filename);
         }
         useAgentStore.getState().refreshAgents();
       } catch (err) {
@@ -39,9 +35,6 @@ export default function ConfigField({ field, agentId, value, currentAvatar, curr
   if (type === 'avatar') {
     const avatarSrc = currentAvatar
       ? `/agents/${agentId}/config/${currentAvatar}?t=${Date.now()}`
-      : null;
-    const userAvatarSrc = currentUserAvatar
-      ? `/agents/${agentId}/config/${currentUserAvatar}?t=${Date.now()}`
       : null;
 
     return (
@@ -61,28 +54,13 @@ export default function ConfigField({ field, agentId, value, currentAvatar, curr
             onChange={(e) => handleFileChange(e, 'avatar')}
           />
         </div>
-        <div className={styles.avatarCol}>
-          <label>用户头像</label>
-          <div
-            className={`${styles.avatarPreview} ${styles.userAvatarPreview} ${currentUserAvatar ? styles.hasAvatar : ''}`}
-            onClick={() => document.getElementById(`cfgUserAvatarFile_${agentId}`)?.click()}
-          >
-            {userAvatarSrc ? <img src={userAvatarSrc} alt="我" /> : <span className={styles.placeholder}>点击<br/>上传</span>}
-          </div>
-          <input
-            type="file" id={`cfgUserAvatarFile_${agentId}`}
-            accept="image/png,image/jpeg,image/gif,image/webp"
-            style={{ display: 'none' }}
-            onChange={(e) => handleFileChange(e, 'user-avatar')}
-          />
-        </div>
       </div>
     );
   }
 
   return (
-    <div className={`${styles.field} ${type === 'checkbox' ? styles.checkbox : ''}`}>
-      {type !== 'checkbox' && type !== 'multiselect' && <label>{label}</label>}
+    <div className={`${styles.field} ${type === 'checkbox' ? styles.checkbox : ''} ${type === 'readonly-tags' ? styles.readonlyField : ''}`}>
+      {type !== 'checkbox' && type !== 'multiselect' && type !== 'readonly-tags' && <label>{label}</label>}
       {type === 'multiselect' ? (
         <div className={styles.multiselect} data-key={key}>
           <label>{label}</label>
@@ -109,6 +87,15 @@ export default function ConfigField({ field, agentId, value, currentAvatar, curr
                 </label>
               );
             })}
+          </div>
+        </div>
+      ) : type === 'readonly-tags' ? (
+        <div className={styles.readonlyTags} data-key={key}>
+          <label>{label}</label>
+          <div className={styles.tagsRow}>
+            {Array.isArray(value) && value.length > 0
+              ? value.map(opt => <span key={opt} className={styles.tag}>{opt}</span>)
+              : <span className={styles.tagEmpty}>无</span>}
           </div>
         </div>
       ) : type === 'textarea' ? (

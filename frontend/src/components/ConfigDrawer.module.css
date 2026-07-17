@@ -108,6 +108,18 @@
 
 .btnSm { padding: 5px 12px; font-size: 12px; }
 
+.sectionDivider {
+  margin: 24px 0 16px;
+  padding-top: 16px;
+  border-top: 1px dashed #e0e0e0;
+}
+.sectionTitle {
+  font-size: 11px;
+  font-weight: 500;
+  color: #aaa;
+  letter-spacing: 0.3px;
+}
+
 @media (max-width: 768px) {
   .panel {
     width: 100%;

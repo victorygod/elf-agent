@@ -4,7 +4,9 @@
       "Bash(node *)",
       "Bash(npm install *)",
       "Bash(npm run *)",
-      "Bash(npx vite *)"
+      "Bash(npx vite *)",
+      "mcp__codefusesearchmcp__webSearch",
+      "Skill(code-review)"
     ]
   }
 }

@@ -1,8 +1,8 @@
 {
   "agentId": "elf-001",
-  "name": "Fengyue",
+  "name": "大黑塔",
   "port": 8081,
-  "avatar": "avatar.png",
+  "avatar": "avatar.webp",
   "userAvatar": "user_avatar.webp",
   "provider": "llm",
   "systemPrompt": {
@@ -17,10 +17,11 @@
     "type": "path",
     "content": "suffix_prompt.md"
   },
-  "compactPrompt": "请简要总结以上对话的关键信息和待办事项，保留重要细节。",
-  "compactSystemPrompt": "",
+  "compactPrompt": "总结至今的对话内容",
+  "compactSystemPrompt": "你是说话者的记忆系统，使用高度凝练的话语生成摘要。",
   "memoryTokenLimit": 500,
   "maxIterations": 0,
+  "compactMode": "async",
   "messageManagerClass": "message_manager",
   "tools": [
     "Read",

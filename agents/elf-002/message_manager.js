@@ -1,9 +1,11 @@
 /**
  * elf-002 专属 MessageManager
  *
- * 继承 shared 基类，实现三层上下文压缩（对齐 Claude Code 第 1/2/4 层）：
+ * 继承 shared 基类，实现上下文压缩（对齐 Claude Code 第 1/2 层 + microcompact + 第 4 层）：
  * - 第 1 层：单工具结果超 perToolLimit → 持久化到磁盘 + content 改写为 <persisted-output>
  * - 第 2 层：单次请求内 fresh 工具结果总量超 budgetWindow → 淘汰最大的持久化
+ * - microcompact：estimateTokens ≥ microcompactThreshold 时，跨历史清老的、未持久化的
+ *   tool_result → 占位（落盘可回读），保留最近 keepRecent 个；省不到 minSavings 不触发
  * - 第 4 层：累计超 memoryTokenLimit → 结构化摘要全量替换为 1 条 user 消息
  *
  * 数据模型：context.json = 内存镜像，持久化即改写 content 并 _save()；
@@ -16,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { MessageManager as BaseMessageManager } from '../../shared/agent/message_manager.js';
 import { createLogger } from '../../shared/logger.js';
+import { countTokens, countMessageTokens } from '../../shared/tokenizer.js';
 
 let logFileName = null;
 
@@ -28,8 +31,19 @@ const SUMMARY_PREAMBLE =
   'This session is being continued from a previous conversation that ran out of context. ' +
   'The summary below covers the earlier portion of the conversation.\n\n';
 
+// 续写指令（对齐 CC 全量自动路径 continuationClause；elf-002 选择加，混合行为）
+const CONTINUATION_CLAUSE =
+  'Continue the conversation from where it left off without asking the user any further questions. ' +
+  'Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface ' +
+  'with "I\'ll continue" or similar. Pick up the last task as if the break never happened.\n\n';
+
 // 断路器：连续压缩失败达到此阈值后禁用自动压缩
 const COMPACT_FAIL_THRESHOLD = 3;
+
+// microcompact 常量（对齐 CC 源码硬编码、不可配；CC A$d=5 / $Ls=20000）
+const MC_KEEP_RECENT = 5;          // 保留最近 N 个 tool_result 原样（CC A$d=5）
+const MC_MIN_SAVINGS = 20000;      // 最小节省 token，省不到不触发（CC $Ls=20000）
+// MC 触发阈值 = memoryTokenLimit × 0.6 派生（CC 靠服务端 context_hint,elf 无信号→改客户端阈值）
 
 export class MessageManager extends BaseMessageManager {
   constructor(params) {
@@ -41,6 +55,13 @@ export class MessageManager extends BaseMessageManager {
     this.previewLength = this._getThreshold('previewLength', 2000);
     this.budgetWindow = this._getThreshold('budgetWindow', 200000);
 
+    // microcompact：开关 config 可配；keepRecent/minSavings/threshold 对齐 CC 不可配（常量/派生）。
+    // CC 靠服务端 context_hint 触发,elf 无信号→改客户端阈值 = memoryTokenLimit×0.6 派生。
+    this.microcompactEnabled = this._config?.get('microcompactEnabled') === true;
+    this.microcompactThreshold = Math.floor(this.memoryTokenLimit * 0.6);
+    this.microcompactKeepRecent = MC_KEEP_RECENT;
+    this.microcompactMinSavings = MC_MIN_SAVINGS;
+
     // 注：compactSystemPrompt/compactPrompt 由基类构造/updateConfig 从 mmParams 读（start.js 装配），
     //    此处不再重复读取。基类 reloadConfig 也会同步更新。
 
@@ -50,6 +71,9 @@ export class MessageManager extends BaseMessageManager {
     // 断路器：进程内状态，不持久化，重启清零
     this._compactFailCount = 0;
     this._compactDisabled = false;
+
+    // 群聊动态 roster prefix（RoomAgent._refreshRoster 写入,发往 LLM 时拼到最近一条 user 开头）。
+    this.roomRosterPrefix = '';
   }
 
   /**
@@ -62,6 +86,10 @@ export class MessageManager extends BaseMessageManager {
       this.perToolLimit = this._getThreshold('perToolLimit', 50000);
       this.previewLength = this._getThreshold('previewLength', 2000);
       this.budgetWindow = this._getThreshold('budgetWindow', 200000);
+      this.microcompactEnabled = this._config?.get('microcompactEnabled') === true;
+      this.microcompactThreshold = Math.floor(this.memoryTokenLimit * 0.6);
+      this.microcompactKeepRecent = MC_KEEP_RECENT;
+      this.microcompactMinSavings = MC_MIN_SAVINGS;
       // compactSystemPrompt/compactPrompt 由基类 updateConfig 处理（params 传入），此处不重复
     }
   }
@@ -102,22 +130,36 @@ export class MessageManager extends BaseMessageManager {
   getMessagesForLLM() {
     this._enforceBudgetWindow();
     const systemMsg = { role: 'system', content: this.systemPrompt };
-    const msgs = this.messages.map(m => ({ ...m }));
+    const msgs = this.messages.map(m => {
+      const { isMeta, metaTag, ...rest } = m;
+      return rest;
+    });
+    // 群聊动态 roster prefix：拼到最近一条 user 开头（不发写入记忆）。私聊 roomRosterPrefix 空串不影响。
+    const roster = this.roomRosterPrefix || '';
+    if (roster) {
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role === 'user') {
+          msgs[i].content = roster + msgs[i].content;
+          break;
+        }
+      }
+    }
     return [systemMsg, ...msgs];
   }
 
   /**
-   * override：纯计算，不调 getMessagesForLLM()，无 budget 副作用
-   * 直接读 this.messages + systemPrompt 长度
+   * override：纯计算，不调 getMessagesForLLM()，无 budget/roster 副作用
+   * 直接对 this.messages + systemPrompt 做全量 JSON 序列化计数，
+   * 确保 role、tool_call_id、JSON 结构开销等全部参与 token 估算。
    */
   estimateTokens() {
-    let total = 0;
-    if (this.systemPrompt) total += this.systemPrompt.length;
-    for (const msg of this.messages) {
-      if (msg.content) total += msg.content.length;
-      if (msg.tool_calls) total += JSON.stringify(msg.tool_calls).length;
-    }
-    return Math.ceil(total / 4);
+    const systemMsg = { role: 'system', content: this.systemPrompt };
+    const msgs = this.messages.map(m => {
+      const { id, isMeta, metaTag, ...rest } = m;
+      return rest;
+    });
+    const allMessages = [systemMsg, ...msgs];
+    return countMessageTokens(allMessages);
   }
 
   /**
@@ -179,13 +221,92 @@ export class MessageManager extends BaseMessageManager {
     return groups.filter(g => g.some(m => m.role === 'tool'));
   }
 
-  // ============ 第 4 层：结构化摘要压缩 ============
+  // ============ microcompact：跨历史轻量清理 ============
 
   /**
-   * override：async generator，全量替换 messages 为 1 条摘要 user 消息
-   * 流程对齐 Claude Code sZ6 + QAq
+   * L4 之前的轻量省 token 闸（对齐 CC microcompact / BLs + fZr）。
+   * 不调 LLM、不摘要：跨历史清理偏老的、未持久化的 tool_result content，保留全局最近
+   * keepRecent 个原样。省不到 minSavings（token 口径）不触发，避免无意义裁剪。
+   *
+   * 触发源：CC 用服务端 context_hint SSE；elf 无此信号 → 改客户端 estimateTokens 判定
+   *         （≥ microcompactThreshold 时尝试）。与 L2 正交：L2 管单 group 内 fresh 合计
+   *         超 budgetWindow → 落盘预览；microcompact 管跨 group 累计的老 result → 清成占位。
+   * 占位落盘 + filepath（复用 _persistToolResult），可 Read 回读，不丢信息。
+   * 独立于 L4 断路器（不调 LLM，不会失败）。
+   */
+  _microcompactIfNeeded() {
+    if (!this.microcompactEnabled) return;
+    if (this.estimateTokens() < this.microcompactThreshold) return;
+
+    const toolMsgs = this.messages.filter(m => m.role === 'tool');
+    if (toolMsgs.length <= this.microcompactKeepRecent) return;
+
+    // 保留全局最近 keepRecent 个原样，其余为候选
+    const keepIds = new Set(
+      toolMsgs.slice(-this.microcompactKeepRecent).map(m => m.tool_call_id)
+    );
+    const candidates = toolMsgs.filter(m => !keepIds.has(m.tool_call_id));
+
+    // 只清"未处理过的原始 result"。对齐 CC b4y:跳过已处理的（L1/L2 的 <persisted-output>
+    // 和 microcompact 自己的 [Old tool result content cleared]），防重复清。
+    const toClear = [];
+    let savedTokens = 0;
+    for (const m of candidates) {
+      if (typeof m.content !== 'string') continue;
+      if (m.content.startsWith('<persisted-output>')) continue;          // L1/L2 已压 (CC m4y)
+      if (m.content.startsWith('[Old tool result content cleared]')) continue;  // microcompact 已清 (CC kvo)
+      const placeholder = this._buildMicrocompactPlaceholder(m);
+
+      // 实际 token 差值（与 estimateTokens 同源 BPE 口径）
+      const tokenDiff = countTokens(m.content) - countTokens(placeholder);
+      
+      if (tokenDiff > 0) {
+        savedTokens += tokenDiff;
+        toClear.push({ m, placeholder });
+      }
+    }
+
+    // 最小节省阈值（BPE 口径，对齐 estimateTokens；公共 tokenizer 统一计数）
+    if (savedTokens < this.microcompactMinSavings) return;
+
+    for (const { m, placeholder } of toClear) m.content = placeholder;
+    this._save();
+    const logger = createLogger('message_manager', logFileName);
+    logger.info(`[microcompact] cleared ${toClear.length} tool results (~${savedTokens} tokens saved), kept last ${this.microcompactKeepRecent}`);
+  }
+
+  /**
+   * 构建 microcompact 占位（对齐 CC fZr + T4y）。
+   * CC microcompact 的占位与 L1/L2 的 <persisted-output> 外壳**严格分开**：
+   *   - 落盘成功 → T4y 返回的轻量单行占位（"[Old tool result content cleared] ... saved to <filepath>"），
+   *     模型需细节时主动 Read filepath。不带 <persisted-output> 标签、不带 Preview。
+   *   - 落盘失败 / 含媒体 → 纯 kvo = "[Old tool result content cleared]"。
+   * 三态互斥：L1/L2 = m4y 外壳(+Preview)；microcompact 落盘 = 单行指引；失败 = 纯 kvo。
+   */
+  _buildMicrocompactPlaceholder(msg) {
+    const meta = this._persistToolResult(msg.tool_call_id, msg.content);
+    if (meta) {
+      return `[Old tool result content cleared] Full output saved to: ${meta.filepath}`;
+    }
+    return '[Old tool result content cleared]';
+  }
+
+  // ============ 第 4 层：结构化摘要压缩（保留最近 1 个 group） ============
+
+  /**
+   * override：保留最近 1 个 group 原文不变，只摘要更早的老历史。
+   * 对齐 Claude Code sZ6 + QAq（reactive compact 思路，s=1 不重试）。
+   *
+   * - 固定保留最近 1 个 group（s=1，对齐 CC 起步值）
+   * - 不重试：失败走断路器、不回退全量、不扩保留区
+   * - 老摘要(isCompactSummary)作为普通消息参与，不排除（对齐 CC Ub.slice(r) 含老摘要）
+   * - 续写指令加（elf-002 混合行为）
    */
   async *compactIfNeeded(llmModel, options = {}) {
+    // microcompact：L4 之前的轻量省 token 闸（对齐 CC microcompact）。不调 LLM、不会失败 →
+    // 放在断路器检查之前，不受 L4 断路器连坐。每轮 agent loop 顶部经本入口自然带上，无需改 default_agent.js。
+    this._microcompactIfNeeded();
+
     if (this._compactDisabled) return;
     if (this.estimateTokens() <= this.memoryTokenLimit) return;
 
@@ -195,44 +316,58 @@ export class MessageManager extends BaseMessageManager {
     yield { event: 'compact_start', data: {} };
 
     try {
-      // 1+2. 手拼摘要请求（不走 getMessagesForLLM，避免 budget 误替换）
+      // 1. 切 group（assistant 带 tool_calls 起新 group）
+      const groups = this._groupByAssistantTurn();
+      const o = groups.length;
+      if (o < 2) { this._recordCompactFailure(); return; }  // too_few_groups
+
+      // 2. 固定保留最近 1 个 group（s=1），其余送摘要
+      const s = 1;
+      const summaryCount = o - s;
+      if (summaryCount < 1) { this._recordCompactFailure(); return; }  // 摘要区空 → 没东西可摘 → 断路器
+
+      const summaryGroups = groups.slice(0, summaryCount);     // 老（送摘要，含老摘要 isCompactSummary，不排除）
+      const preserveGroups = groups.slice(summaryCount);       // 近期（保留 1 个）
+
+      // 3. 手拼摘要请求：只送老 history、不送近期
       const summaryRequest = [
         { role: 'system', content: this.compactSystemPrompt },
-        ...this.messages.map(m => ({ ...m })),
+        ...summaryGroups.flat().map(m => ({ ...m })),
         { role: 'user', content: this.compactPrompt }
       ];
 
-      logger.info(`记忆压缩 Request messages: ${JSON.stringify(summaryRequest, null, 2)}`);
+      logger.info(`记忆压缩 Request: 摘要${summaryCount}组/保留${preserveGroups.length}组`);
 
-      // 3. 调用 LLM，禁用 thinking（options 后置覆盖 extraParams）
+      // 4. 调用 LLM，禁用 thinking（options 后置覆盖 extraParams）
       const response = await llmModel.chat(summaryRequest, { enable_thinking: false, ...options });
       logger.info(`记忆压缩 Response: ${response}`);
 
-      // 4. 解析：<analysis> 删除，<summary> 提取并加前缀
+      // 5. 解析：<analysis> 删除，<summary> 提取
       const summary = this._parseSummaryResponse(response);
       if (!summary) {
-        // 解析结果为空 → 计入断路器
         this._recordCompactFailure();
         return;
       }
 
-      // 5. 包装摘要（对齐 oF6）
-      const wrappedSummary = SUMMARY_PREAMBLE + 'Summary:\n' + summary;
+      // 6. 包装摘要（对齐 oF6）+ 续写指令（elf-002 选择加）
+      const wrappedSummary = SUMMARY_PREAMBLE + CONTINUATION_CLAUSE + 'Summary:\n' + summary;
 
-      // 6. 替换消息 + 落盘事务：先 _save，再 _cleanupToolResults
+      // 7. 替换消息 + 落盘事务：先 _save，再 _cleanupToolResults
+      //    消息 = [摘要 user 消息, 近期 group 原文]
       this.messages = [
-        { role: 'user', content: wrappedSummary, isCompactSummary: true }
+        { role: 'user', content: wrappedSummary, isCompactSummary: true },
+        ...preserveGroups.flat()
       ];
+      this._compactHappened = true;
       this._save();
-      this._cleanupToolResults();
+      this._cleanupToolResults(this._referencedToolCallIds());
 
       // 压缩成功，重置断路器
       this._compactFailCount = 0;
 
       yield { event: 'compact', data: { tokenEstimate: this.estimateTokens() } };
 
-      // 7. 对齐 CC：压一次即返回，不本轮递归。仍超阈值靠下一轮 agent loop 顶部再触发
-      // （agent reasoning 的 while 多轮往返保证可达；memoryTokenLimit << 模型上下文窗口，本轮照常发请求不会发爆）。
+      // 8. 对齐 CC：压一次即返回，不本轮递归。仍超阈值靠下一轮 agent loop 顶部再触发
       if (this.estimateTokens() > this.memoryTokenLimit) {
         logger.info(`压缩后仍超阈值 ${this.estimateTokens()} > ${this.memoryTokenLimit}，留待下一轮 loop 顶部再压`);
       }
@@ -242,6 +377,37 @@ export class MessageManager extends BaseMessageManager {
       logger.error(`记忆压缩失败: ${err.message}`);
       this._recordCompactFailure();
     }
+  }
+
+  /**
+   * 按每条 assistant(tool_calls) 消息切 group（对齐 CC xXt 的语义，但无需 message.id）。
+   *
+   * CC 用 message.id 变化判新回合——但 elf-002 无 id，且一个回合有两条 assistant：
+   *   一条带 tool_calls（调工具）、一条纯文本（回复）。
+   * 所以用"assistant 带 tool_calls = 新回合起点"区分，等价于 CC 的"新 assistant id"。
+   *
+   * 一个 group = 一条 assistant(tool_calls) + 紧随其后的 tool/user/assistant(文本) 消息，
+   * 到下一条 assistant(tool_calls) 为止。开头若无 tool_calls assistant（只有 user），首 group 自成。
+   */
+  _groupByAssistantTurn() {
+    const groups = [];
+    let current = [];
+    for (const msg of this.messages) {
+      const isNewTurn = msg.role === 'assistant' && msg.tool_calls && current.length > 0;
+      if (isNewTurn) { groups.push(current); current = [msg]; }
+      else { current.push(msg); }
+    }
+    if (current.length) groups.push(current);
+    return groups;
+  }
+
+  /** 扫当前 messages 里所有 tool 消息的 tool_call_id（保留后引用的 tool-results 文件留） */
+  _referencedToolCallIds() {
+    const ids = new Set();
+    for (const m of this.messages) {
+      if (m.role === 'tool' && m.tool_call_id) ids.add(m.tool_call_id);
+    }
+    return ids;
   }
 
   /** 记录一次压缩失败，达到阈值则禁用 */
@@ -354,19 +520,48 @@ export class MessageManager extends BaseMessageManager {
   }
 
   /**
-   * 清空 tool-results 目录全部文件（摘要成功后调用，孤儿即删）
-   * 先 _save() 已落盘 context.json（无引用），再调本方法删文件
+   * override：rewind 后由 agent /reload 调用，从 context.json 重新 _load messages，
+   * 并重置 elf-002 特有的进程内累计态。
+   *
+   * - 断路器 _compactFailCount / _compactDisabled 是进程内累计、不持久化，
+   *   回退到快照点应丢弃该点之后的 compact 失败计数，重置回构造态。
+   * - tool-results/ 文件由 gateway rewind 整份换回，占位符指向的文件已一致，
+   *   无需在此处理。
+   * - 阈值类（perToolLimit/budgetWindow 等）来自 config，无需动。
    */
-  _cleanupToolResults() {
+  reloadFromDisk() {
+    super.reloadFromDisk();
+    this._compactFailCount = 0;
+    this._compactDisabled = false;
+    this._compactHappened = false;
+  }
+
+  /**
+   * 清理 tool-results 目录中未被保留消息引用的文件。
+   * 保留近期 group 后，近期 group 里的 <persisted-output> 引用的文件必须留，否则引用悬空。
+   *
+   * @param {Set<string>} keepIds - 保留的 tool_call_id 集合（来自 _referencedToolCallIds）
+   */
+  _cleanupToolResults(keepIds) {
     if (!this.toolResultsDir) return;
+    const logger = createLogger('message_manager', logFileName);
     try {
-      fs.rmSync(this.toolResultsDir, { recursive: true, force: true });
-      fs.mkdirSync(this.toolResultsDir, { recursive: true });
-      const logger = createLogger('message_manager', logFileName);
-      logger.info('已清空 tool-results 目录');
+      if (!fs.existsSync(this.toolResultsDir)) return;
+      const files = fs.readdirSync(this.toolResultsDir);
+      let deleted = 0;
+      for (const file of files) {
+        // 文件名格式：<toolCallId>.txt
+        const id = file.replace(/\.txt$/, '');
+        if (!keepIds || !keepIds.has(id)) {
+          try {
+            fs.unlinkSync(path.join(this.toolResultsDir, file));
+            deleted++;
+          } catch (e) { /* 单个文件删除失败不阻塞 */ }
+        }
+      }
+      logger.info(`清理 tool-results: 删 ${deleted} 个孤儿文件, 保留 ${files.length - deleted} 个`);
     } catch (err) {
-      const logger = createLogger('message_manager', logFileName);
-      logger.warn(`清空 tool-results 目录失败: ${err.message}`);
+      logger.warn(`清理 tool-results 目录失败: ${err.message}`);
     }
   }
 }

@@ -18,19 +18,27 @@
     "content": "compact_prompt.md"
   },
   "messageManagerClass": "message_manager",
-  "memoryTokenLimit": 40000,
-  "perToolLimit": 10000,
+  "memoryTokenLimit": 300000,
+  "perToolLimit": 50000,
   "previewLength": 2000,
-  "budgetWindow": 20000,
+  "budgetWindow": 200000,
+  "microcompactEnabled": true,
   "maxIterations": 0,
+  "subagents": [
+    "Explore",
+    "general-purpose"
+  ],
   "tools": [
     "Read",
     "Write",
     "Edit",
     "Bash",
     "Glob",
-    "Grep"
+    "Grep",
+    "Agent",
+    "Skill"
   ],
+  "skills": true,
   "_ui": {
     "name": {
       "label": "Agent 名称",

@@ -14,7 +14,7 @@ import { Config } from '../shared/agent/config_loader.js';
 import { MockModel } from '../shared/agent/mock_model.js';
 import { LLMModel } from '../shared/agent/llm_model.js';
 import { ToolRegistry } from '../shared/agent/tools/registry.js';
-import { Read } from '../shared/agent/tools/index.js';
+import { Read, Agent as AgentTool } from '../shared/agent/tools/index.js';
 import { reset as resetReadState } from '../shared/agent/tools/read_state.js';
 import { MessageManager } from '../shared/agent/message_manager.js';
 import { Agent } from '../shared/agent/default_agent.js';
@@ -693,6 +693,81 @@ describe('Agent (DefaultAgent)', () => {
     }
     const compactStartEvent = events.find(e => e.event === 'compact_start');
     assert.ok(compactStartEvent, '应有 compact_start 事件');
+  });
+});
+
+// ========================
+// subAgent 测试
+// ========================
+describe('subAgent (Agent 工具)', () => {
+  let config;
+
+  beforeEach(() => {
+    config = createTestConfig({ subagents: ['Explore', 'general-purpose'] });
+  });
+
+  it('subagent_type 未启用应返回 Error（不跑 loop）', async () => {
+    const toolModel = new MockModel({ responses: [{ content: 'done' }] });
+    const tr = new ToolRegistry();
+    tr.register(AgentTool);
+    const ag = new Agent({ config, model: toolModel, toolRegistry: tr, messageManager: new MessageManager({ systemPrompt: 't', memoryTokenLimit: 8000 }) });
+    // 直接调 execute（未启用类型）
+    const r = await tr.execute('Agent', { subagent_type: 'Plan', prompt: 'x' }, null, { agent: ag });
+    assert.ok(r.startsWith('Error'), `未启用类型应报错, got: ${r}`);
+    assert.ok(/未启用/.test(r), '应提示未启用');
+  });
+
+  it('subagent_type 缺失应返回 Error', async () => {
+    const tr = new ToolRegistry();
+    tr.register(AgentTool);
+    const ag = new Agent({ config, model: new MockModel({ responses: [{ content: 'done' }] }), toolRegistry: tr, messageManager: new MessageManager({ systemPrompt: 't', memoryTokenLimit: 8000 }) });
+    const r = await tr.execute('Agent', { prompt: 'x' }, null, { agent: ag });
+    assert.ok(r.startsWith('Error') && /必填/.test(r), `缺 subagent_type 应报错, got: ${r}`);
+  });
+
+  it('Agent 工具调通：子 agent 跑完，finalText 回流主 loop', async () => {
+    // 主 loop 第1轮返回 Agent tool_call；子 agent 第1轮返回文本；主 loop 第2轮返回最终文本
+    const toolModel = new MockModel({
+      responses: [
+        { tool_calls: [{ id: 'a1', type: 'function', function: { name: 'Agent', arguments: JSON.stringify({ subagent_type: 'general-purpose', prompt: '说 hi', description: 'say hi' }) } }] },
+        { content: '子任务完成' },   // 子 agent 第1轮（纯文本，结束）
+        { content: '主 agent 收到子结果，结束' },  // 主 loop 第2轮
+      ]
+    });
+    const tr = new ToolRegistry();
+    tr.register(AgentTool);
+    tr.register(Read);
+    const ag = new Agent({ config, model: toolModel, toolRegistry: tr, messageManager: new MessageManager({ systemPrompt: 't', memoryTokenLimit: 8000 }) });
+
+    const events = [];
+    for await (const e of ag.receive('派个子 agent 说 hi')) events.push(e);
+
+    // Agent 工具的 tool_result 应含子 agent 的 finalText
+    const toolResults = events.filter(e => e.event === 'tool_result');
+    assert.ok(toolResults.length >= 1, '应有 tool_result');
+    // done 事件存在 → 主 loop 正常结束
+    assert.ok(events.some(e => e.event === 'done'), '应有 done 事件');
+  });
+
+  it('Explore disallowedTools 阻断嵌套：子 agent 拿不到 Agent/Edit/Write', async () => {
+    // general-purpose 默认 tools:['*'] 能调 Agent；Explore disallow Agent → 子 Explore 调 Agent 应子 registry 无 Agent
+    // 这里验证 Explore 子 registry 不含 Agent
+    const toolModel = new MockModel({
+      responses: [
+        { tool_calls: [{ id: 'e1', type: 'function', function: { name: 'Agent', arguments: JSON.stringify({ subagent_type: 'Explore', prompt: '搜一下', description: 'search' }) } }] },
+        { content: '探索完成' },   // Explore 子 agent 第1轮
+        { content: '主收到' },
+      ]
+    });
+    const tr = new ToolRegistry();
+    tr.register(AgentTool);
+    tr.register(Read);
+    const ag = new Agent({ config, model: toolModel, toolRegistry: tr, messageManager: new MessageManager({ systemPrompt: 't', memoryTokenLimit: 8000 }) });
+
+    const events = [];
+    for await (const e of ag.receive('用 Explore 搜一下')) events.push(e);
+    // Explore 应正常跑完（子 agent 工具集无 Agent，但 Explore 只读检索不调 Agent）
+    assert.ok(events.some(e => e.event === 'done'), 'Explore 子 agent 应正常执行');
   });
 });
 

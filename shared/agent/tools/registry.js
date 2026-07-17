@@ -36,15 +36,16 @@ export class ToolRegistry {
    * @param {string} name - 工具名称
    * @param {object} args - 工具参数
    * @param {AbortSignal} [signal] - 中断信号（并发执行时传，工具按需检查/Bash 杀子进程）
+   * @param {object} [ctx] - 工具上下文 { agent } 主 agent 引用（Agent 工具用，其他工具忽略）
    * @returns {Promise<string>} 工具执行结果
    */
-  async execute(name, args, signal) {
+  async execute(name, args, signal, ctx) {
     const tool = this.tools.get(name);
     if (!tool) {
       return `[错误: 工具 "${name}" 不存在]`;
     }
     try {
-      return await tool.execute(args, signal);
+      return await tool.execute(args, signal, ctx);
     } catch (err) {
       return `[工具执行错误: ${err.message}]`;
     }

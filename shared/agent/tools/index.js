@@ -10,3 +10,6 @@ export { Edit } from './Edit.js';
 export { Bash } from './Bash.js';
 export { Glob } from './Glob.js';
 export { Grep } from './Grep.js';
+export { Agent } from './Agent.js';
+export { Skill } from './Skill.js';
+export { Speak } from './Speak.js';

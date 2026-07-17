@@ -1,0 +1,28 @@
+[
+  {
+    "id": "msg_1784306307098_a54d",
+    "role": "user",
+    "content": "wolfgod: @大黑塔群里都有谁"
+  },
+  {
+    "id": "msg_1784306326433_55c5",
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "tool-facf2d1274e14fc493fba24ec79393ec",
+        "type": "function",
+        "function": {
+          "name": "Speak",
+          "arguments": "{\"message\": \"这里有我——年轻貌美可爱的黑塔女士，elf-003那个长夜月，还有你这个来路不明的变量。想让我记住你们，前提是你们得够有趣。这点很难吗？\"}"
+        }
+      }
+    ]
+  },
+  {
+    "id": "msg_1784306326449_c169",
+    "role": "tool",
+    "tool_call_id": "tool-facf2d1274e14fc493fba24ec79393ec",
+    "content": "已发言"
+  }
+]

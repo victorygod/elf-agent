@@ -7,7 +7,7 @@ import styles from './MarkdownContent.module.css';
  * Markdown 渲染组件 — 用于 assistant 消息的正文。
  * 支持 GFM（表格、删除线、任务列表）和代码高亮。
  */
-export default function MarkdownContent({ content }) {
+export default function MarkdownContent({ content, onMentionClick }) {
   if (!content) return null;
 
   return (
@@ -34,6 +34,22 @@ export default function MarkdownContent({ content }) {
           );
         },
         a({ children, href, ...props }) {
+          // @mention 页内锚点：不新开标签页，触发 onMentionClick 回调
+          if (href?.startsWith('#mention-')) {
+            const mentionName = decodeURIComponent(href.slice('#mention-'.length));
+            return (
+              <a
+                href={href}
+                onClick={(e) => {
+                  e.preventDefault();
+                  onMentionClick?.(mentionName);
+                }}
+                style={{ cursor: 'pointer' }}
+              >
+                {children}
+              </a>
+            );
+          }
           return (
             <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
               {children}

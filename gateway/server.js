@@ -10,8 +10,14 @@ import express from 'express';
 import { createLogger } from '../shared/logger.js';
 import { getConfigUI } from './config-ui.js';
 import { readAgentConfig, writeAgentConfig } from './config_store.js';
+import { loadGatewayConfig, saveGatewayConfig } from './config.js';
 import { handleAvatarUpload } from './avatar.js';
 import { subscribeToStream, proxyChat } from './chat_proxy.js';
+import { snapshotBeforeSend, listCheckpoints, latestCheckpointId, rewindTo } from './snapshot.js';
+import { registerRoomRoutes } from './room_routes.js';
+import {
+  listSkills, getSkillDetail, deleteSkill, installSkill, browseDirs, skillRoots,
+} from './skill_store.js';
 
 const logger = createLogger('gateway-server', 'gateway.log');
 
@@ -19,9 +25,10 @@ const logger = createLogger('gateway-server', 'gateway.log');
  * 创建 Gateway Express 应用
  * @param {ProcessManager} pm - 进程管理器实例
  * @param {ChatHistory} chatHistory - 聊天记录持久化实例
+ * @param {object} [roomManager] - 群聊管理器实例（可选，注入 /rooms/* 路由）
  * @returns {express.Application}
  */
-export function createGatewayApp(pm, chatHistory) {
+export function createGatewayApp(pm, chatHistory, roomManager = null) {
   const app = express();
   app.use(express.json({ limit: '5mb' }));
 
@@ -128,6 +135,56 @@ export function createGatewayApp(pm, chatHistory) {
     }
   });
 
+  // GET /agents/:id/checkpoints — 列出可回退的快照包
+  app.get('/agents/:id/checkpoints', checkAgentExists, (req, res) => {
+    const id = req.params.id;
+    try {
+      const checkpoints = listCheckpoints(pm.agentsDir, id);
+      logger.info(`[GET /checkpoints ${id}] 返回 ${checkpoints.length} 个: ${checkpoints.map((c, i) => `[${i}]${c.id}@${c.createdAt}`).join(' ')}`);
+      res.json({ checkpoints });
+    } catch (err) {
+      logger.error(`列出 checkpoint 失败 (${id}): ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /agents/:id/rewind — 回退到指定快照包（整文件替换）
+  // body: { checkpointId? } 省略 = 最近一个
+  app.post('/agents/:id/rewind', checkAgentExists, (req, res) => {
+    const id = req.params.id;
+
+    // 0. streaming 守卫：正在回复中拒绝，要求先中断
+    if ((activeStreams.get(id) || 0) > 0) {
+      return res.status(409).json({ error: 'Agent 正在回复中，请先中断（abort）再回退' });
+    }
+
+    const checkpointId = req.body?.checkpointId ?? null;
+    logger.info(`[POST /rewind ${id}] 收到请求 checkpointId=${checkpointId || '(latest)'} activeStreams=${activeStreams.get(id) || 0}`);
+    const result = rewindTo(pm.agentsDir, id, checkpointId);
+    if (!result.ok) {
+      logger.warn(`[POST /rewind ${id}] 失败: ${result.error}`);
+      return res.status(400).json({ error: result.error });
+    }
+
+    // agent 运行中 → 转发 /reload 同步内存；未运行 → 跳过（文件已就绪）
+    const status = pm.getAgentStatus(id);
+    if (status === 'running') {
+      const port = pm.getAgentPort(id);
+      fetch(`http://127.0.0.1:${port}/reload`, { method: 'POST' })
+        .then(r => r.json())
+        .then(() => {
+          logger.info(`rewind 后 reload 成功 (${id})`);
+        })
+        .catch(err => {
+          logger.warn(`rewind 后 reload 失败 (${id}): ${err.message}`);
+        });
+    }
+
+    const remaining = listCheckpoints(pm.agentsDir, id);
+    logger.info(`[POST /rewind ${id}] 返回成功，发往前端的 checkpoints 剩余 ${remaining.length} 个: ${remaining.map((c, i) => `[${i}]${c.id}@${c.createdAt}`).join(' ')}`);
+    res.json({ status: 'ok', restoredPrompt: result.restoredPrompt, checkpoints: remaining });
+  });
+
   // POST /agents/:id/chat — 与 Agent 对话
   // Agent 正在回复中时拒绝新消息（同一 agent 不允许并发对话）
   app.post('/agents/:id/chat', checkAgentExists, (req, res) => {
@@ -146,6 +203,14 @@ export function createGatewayApp(pm, chatHistory) {
     // ★ Agent 正在回复中，拒绝新消息
     if ((activeStreams.get(id) || 0) > 0) {
       return res.status(422).json({ error: 'Agent 正在回复中，请稍后再试' });
+    }
+
+    // ★ rewind 快照：在写 user 进 jsonl 之前，打一个「说话前」状态快照包
+    try {
+      snapshotBeforeSend(pm.agentsDir, id, req.body.message);
+    } catch (e) {
+      logger.warn(`打 rewind 快照失败 (${id}): ${e.message}`);
+      // 快照失败不阻塞对话
     }
 
     // 写 user 消息到 jsonl
@@ -284,6 +349,61 @@ export function createGatewayApp(pm, chatHistory) {
     }
   });
 
+  // ========================
+  // Skill 管理（平台级，不带 :id）
+  // ========================
+
+  // GET /skills — 列出 user + project 两目录下所有 skill
+  app.get('/skills', (req, res) => {
+    try {
+      res.json({ skills: listSkills(), roots: skillRoots() });
+    } catch (err) {
+      logger.error(`列出 skill 失败: ${err.message}`);
+      res.status(500).json({ error: `Failed to list skills: ${err.message}` });
+    }
+  });
+
+  // GET /skills/:source/:name — 读单个 skill 的 SKILL.md 全文
+  app.get('/skills/:source/:name', (req, res) => {
+    try {
+      const content = getSkillDetail(req.params.source, req.params.name);
+      res.json({ content });
+    } catch (err) {
+      res.status(404).json({ error: err.message });
+    }
+  });
+
+  // DELETE /skills/:source/:name — 删除一个 skill 目录
+  app.delete('/skills/:source/:name', (req, res) => {
+    try {
+      const result = deleteSkill(req.params.source, req.params.name);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  // POST /skills/install — body: { sourcePath } 把一个目录复制到 ~/.elf/skills/
+  app.post('/skills/install', (req, res) => {
+    try {
+      const { sourcePath } = req.body || {};
+      const result = installSkill(sourcePath);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  // GET /skills/browse?dir=... — 浏览目录子项（仅目录），供前端选 skill 源
+  app.get('/skills/browse', (req, res) => {
+    try {
+      const result = browseDirs(req.query.dir);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
   // 头像上传 API — base64 格式，存入 agents/{id}/config/
   app.post('/agents/:id/avatar', checkAgentExists, (req, res) => {
     handleAvatarUpload(req, res, 'avatar', pm.agentsDir, pm.agents);
@@ -323,6 +443,87 @@ export function createGatewayApp(pm, chatHistory) {
   // 静态文件服务 — 前端页面（Vite 构建产物）
   const frontendPath = path.join(process.cwd(), 'frontend', 'dist');
   app.use(express.static(frontendPath));
+
+  // 群聊路由（/rooms/*，可选注入）
+  if (roomManager) {
+    registerRoomRoutes(app, roomManager);
+  }
+
+  // 全局设置（用户名、用户头像等）
+  // 问题3：同时返回 userUid（稳定身份，默认 default_userid），改名不影响历史归属。
+  // sidebarOrder：侧栏手动排序，随 settings 一起返回。
+  // userAvatar：全局用户头像，null 表示使用默认色块头像。
+  app.get('/settings', (req, res) => {
+    const { userName, userAvatar, userUid, sidebarOrder } = loadGatewayConfig();
+    res.json({ userName, userAvatar, userUid, sidebarOrder });
+  });
+  app.put('/settings', (req, res) => {
+    const { userName, userAvatar, userUid } = req.body || {};
+    if (!userName && !userAvatar) {
+      return res.status(400).json({ error: 'userName 或 userAvatar 必填其一' });
+    }
+    const updates = {};
+    if (typeof userName === 'string' && userName.trim()) updates.userName = userName.trim();
+    if (typeof userAvatar === 'string' || userAvatar === null) updates.userAvatar = userAvatar;
+    if (typeof userUid === 'string' && userUid.trim()) updates.userUid = userUid.trim();
+    const updated = saveGatewayConfig(updates);
+    res.json({ userName: updated.userName, userAvatar: updated.userAvatar, userUid: updated.userUid });
+  });
+
+  // 侧栏排序：单独端点保存，避免与 PUT /settings 的 userName 必填校验耦合
+  app.put('/settings/sidebar-order', (req, res) => {
+    const so = req.body?.sidebarOrder;
+    if (!so || typeof so !== 'object') {
+      return res.status(400).json({ error: 'sidebarOrder 必填' });
+    }
+    const updated = saveGatewayConfig({ sidebarOrder: so });
+    res.json({ sidebarOrder: updated.sidebarOrder });
+  });
+
+  // 用户头像保存（接收 base64，存为 uploads/user_avatar.{ext}，gateway.json 记录文件名）
+  const EXT_MAP = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+  const uploadsDir = path.join(process.cwd(), 'uploads');
+  fs.mkdirSync(uploadsDir, { recursive: true });
+
+  app.post('/settings/avatar', (req, res) => {
+    try {
+      const { data, type } = req.body || {};
+      if (!data || !type) {
+        return res.status(400).json({ error: '缺少 data 或 type 字段' });
+      }
+      const ext = EXT_MAP[type];
+      if (!ext) {
+        return res.status(400).json({ error: '不支持的图片类型，仅 png/jpg/gif/webp' });
+      }
+      // 清理旧头像（不同扩展名）
+      for (const oldExt of ['png', 'jpg', 'gif', 'webp']) {
+        const oldFile = path.join(uploadsDir, `user_avatar.${oldExt}`);
+        if (fs.existsSync(oldFile)) {
+          try { fs.unlinkSync(oldFile); } catch (e) { /* ignore */ }
+        }
+      }
+      const base64Data = data.replace(/^data:image\/\w+;base64,/, '');
+      const buffer = Buffer.from(base64Data, 'base64');
+      const filename = `user_avatar.${ext}`;
+      fs.writeFileSync(path.join(uploadsDir, filename), buffer);
+
+      const updated = saveGatewayConfig({ userAvatar: filename });
+      res.json({ userAvatar: updated.userAvatar });
+    } catch (err) {
+      res.status(500).json({ error: `保存头像失败: ${err.message}` });
+    }
+  });
+
+  // uploads 静态目录（用户头像文件访问）
+  app.use('/uploads', (req, res) => {
+    const filename = req.path.replace(/^\//, '');
+    if (!filename) return res.status(404).json({ error: 'File not found' });
+    const filePath = path.join(uploadsDir, filename);
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      return res.sendFile(filePath);
+    }
+    res.status(404).json({ error: 'File not found' });
+  });
 
   // 错误处理中间件
   app.use((err, req, res, next) => {

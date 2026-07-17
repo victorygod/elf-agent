@@ -83,11 +83,8 @@ export default function useConfig() {
 
       await api.updateConfig(configAgentId, update);
       closeConfigStore();
-      // 配置保存不改变聊天记录和 agent 运行状态，无需 refreshAgents / loadHistory
-      // 服务端 PUT /agents/:id/config 已同步内存中的 config；
-      // agent 侧 fs.watch 会热加载新配置。
-      // 之前 refreshAgents + loadHistory 会导致：正在流式回复时 loadHistory 把
-      // 已写入 jsonl 的 user 消息重建到 turns，与 activeTurn 重复显示。
+      // 刷新 agent 列表，使左侧栏的 name/avatar 等展示字段同步更新
+      await refreshAgents();
       useAgentStore.getState().showToast('配置已保存');
     } catch (e) {
       alert('保存失败: ' + e.message);

@@ -51,6 +51,9 @@ export class ChatHistory {
    * @returns {{ id: string, role: string, content: string, ts: string, toolCalls?: Array }}
    */
   addMessage(agentId, role, content, toolCalls, extraFields) {
+    // isMeta 消息不写入 history（不是用户真正说的，不需要持久化到展示层）
+    if (extraFields?.isMeta) return null;
+
     const id = this._generateId();
     const record = {
       id,

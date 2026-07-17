@@ -1,0 +1,87 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal {
+  background: #fff;
+  border-radius: 12px;
+  width: 400px;
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #eee;
+}
+.header h3 { margin: 0; }
+.header button { border: none; background: none; font-size: 22px; cursor: pointer; }
+
+.body { padding: 16px 20px; overflow-y: auto; flex: 1; }
+
+.nameInput {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+  margin-bottom: 16px;
+  box-sizing: border-box;
+}
+
+.sectionTitle { font-weight: 600; margin-bottom: 8px; }
+
+.agentList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.agentItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.checked { background: #e3f2fd; border-color: #4a90d9; }
+
+.idHint { font-size: 12px; color: #999; }
+
+.err { color: #e53935; padding: 0 20px; font-size: 13px; }
+
+.footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px 20px;
+  border-top: 1px solid #eee;
+}
+.footer button {
+  padding: 8px 16px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  cursor: pointer;
+  background: none;
+}
+.createBtn {
+  background: #4a90d9 !important;
+  color: #fff !important;
+  border: none !important;
+}
+.createBtn:disabled { opacity: 0.5; }

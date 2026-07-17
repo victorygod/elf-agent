@@ -7,6 +7,8 @@
  */
 
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
 import { createLogger } from '../logger.js';
 
 let logFileName = null;
@@ -166,8 +168,17 @@ export function createAgentServer(agent, config) {
   });
 
   // GET /status
+  // 实例化改造：新增 runKey（运行时身份，区分副本）；保留 agentId（类身份）向后兼容。
+  // 注意：gateway process_manager.probeAgent 只读 data.pid（process_manager.js:157），
+  //       test/agent.test.js:815 硬断言 data.agentId，故 agentId 必须保留。
   app.get('/status', (req, res) => {
-    res.json({ status: 'ok', agentId: config.get('agentId'), pid: process.pid });
+    res.json({
+      status: 'ok',
+      agentId: config.get('agentId'),
+      runKey: agent.runContext?.runKey || config.get('agentId'),
+      mode: agent.runContext?.mode || 'private',
+      pid: process.pid,
+    });
   });
 
   // POST /shutdown — 优雅关闭 Agent 进程
@@ -181,6 +192,26 @@ export function createAgentServer(agent, config) {
   app.post('/clear', (req, res) => {
     try {
       agent.messageManager.clear();
+      // 清空记忆 = 会话重开：重置 skill 清单去重快照 + 清触发记录（会话重开，触发历史也归零）
+      if (typeof agent._resetSkillPushState === 'function') {
+        agent._resetSkillPushState();
+      }
+      if (Array.isArray(agent._invokedSkills)) {
+        agent._invokedSkills.length = 0;
+      }
+      // 立即把全量 skill 清单重新注入空 messages——会话重开就该有 listing 在场，
+      // 不必等用户发下一条消息再补。门控在 _injectSkillListing 内（未启用 skill 则跳过）。
+      if (typeof agent._injectSkillListing === 'function') {
+        agent._injectSkillListing();
+      }
+      // §12.4：清记忆时一并清 tool-results/（elf-002 类 MM 有 _cleanupToolResults 用它;
+      //   其它 agent 若 dataDir 下有 tool-results 目录也删,避免孤儿）。
+      if (typeof agent.messageManager._cleanupToolResults === 'function') {
+        agent.messageManager._cleanupToolResults();
+      } else if (agent.messageManager.dataDir) {
+        const trDir = path.join(agent.messageManager.dataDir, 'tool-results');
+        try { if (fs.existsSync(trDir)) fs.rmSync(trDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+      }
       logger.info('Agent 记忆已清空');
       res.json({ status: 'ok' });
     } catch (err) {
@@ -188,6 +219,76 @@ export function createAgentServer(agent, config) {
       res.status(500).json({ error: err.message });
     }
   });
+
+  // POST /reload — rewind 后从 context.json 重新加载 messages
+  // 由 gateway /agents/:id/rewind 转发，整文件覆盖回 data/ 后调本端点同步内存。
+  app.post('/reload', (req, res) => {
+    // streaming 中拒绝（应由 gateway streaming 守卫保证不会到这，双保险）
+    if (isProcessing) {
+      return res.status(409).json({ error: 'Agent 正在处理，无法 reload' });
+    }
+    try {
+      agent.messageManager.reloadFromDisk();
+      logger.info('Agent 已从 context.json reload');
+      res.json({ status: 'ok' });
+    } catch (err) {
+      logger.error(`reload 失败: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ===== 群聊 /observe 端点（仅 room 模式）=====
+  // 设计见 docs/chat-room-design.md §7.2、§12.1。
+  // 与 /chat 的差异：结构化 payload（{from,content,mentions,role}）+ JSON ack（非 SSE）+
+  //   独立队列（不依赖 pendingResponses,避免 JSON ack 模式队列不动坑）。
+  //   RoomAgent.receive 内部判 mentions 决定 reason 还是只累积。
+  if (agent.runContext?.mode === 'room') {
+    let observeProcessing = false;
+    let pendingObserve = null; // {from, contents:string[], mentions:Set}
+
+    async function processObserve(payload) {
+      observeProcessing = true;
+      try {
+        // drain：内部事件不转发（群聊只 Speak 出口,内心隔离），消耗完即可
+        for await (const _evt of agent.receive(payload)) { /* swallow */ }
+      } catch (err) {
+        logger.error(`/observe 处理失败: ${err.message}`);
+      } finally {
+        observeProcessing = false;
+        if (pendingObserve) {
+          const next = pendingObserve; pendingObserve = null;
+          processObserve(next);
+        }
+      }
+    }
+
+    app.post('/observe', (req, res) => {
+      const body = req.body || {};
+      if (typeof body.content !== 'string' && typeof body.message !== 'string') {
+        return res.status(400).json({ error: 'content 必填' });
+      }
+      const payload = {
+        from: body.from,
+        content: body.content ?? body.message,
+        mentions: Array.isArray(body.mentions) ? body.mentions : [],
+        role: body.role || 'chat',
+      };
+
+      if (observeProcessing) {
+        // 忙：合并进 pendingObserve（保留 from/mentions,content 追加）
+        if (!pendingObserve) {
+          pendingObserve = { from: payload.from, contents: [], mentions: new Set(payload.mentions) };
+        }
+        pendingObserve.contents.push(payload.content);
+        for (const m of payload.mentions) pendingObserve.mentions.add(m);
+        return res.json({ ack: true, merged: true });
+      }
+
+      // 空闲：直接处理
+      processObserve(payload).catch(err => logger.error(`processObserve 失败: ${err.message}`));
+      res.json({ ack: true });
+    });
+  }
 
   return app;
 }

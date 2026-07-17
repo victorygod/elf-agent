@@ -56,6 +56,9 @@ const useAgentStore = create((set, get) => ({
 
   // ===== Agent 列表 =====
 
+  // 头像缓存破坏计数器：每次 refreshAgents 递增，附加到头像 URL 防止浏览器缓存旧图
+  _avatarBuster: 0,
+
   loadAgents: async () => {
     try {
       const agents = await api.loadAgents();
@@ -69,7 +72,7 @@ const useAgentStore = create((set, get) => ({
     try {
       const agents = await api.rediscoverAgents();
       if (agents) {
-        set({ agents });
+        set({ agents, _avatarBuster: Date.now() });
       } else {
         await get().loadAgents();
       }

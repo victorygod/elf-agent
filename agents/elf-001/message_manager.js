@@ -17,6 +17,8 @@ export class MessageManager extends BaseMessageManager {
     this._config = params.config || null;
     this.prefixPrompt = this._config?.get('prefix_prompt') || '';
     this.suffixPrompt = this._config?.get('suffix_prompt') || '';
+    // 群聊动态 roster prefix（RoomAgent._refreshRoster 写入,发往 LLM 时拼到最近一条 user 开头）。
+    this.roomRosterPrefix = '';
   }
 
   updateConfig(params) {
@@ -29,16 +31,27 @@ export class MessageManager extends BaseMessageManager {
 
   getMessagesForLLM() {
     const msgs = super.getMessagesForLLM();
+    // 群聊模式:只拼 roster 动态 prefix,不拼私聊 prefix/suffix（§12.2 1:1 语境不适用群聊）。
+    if (this._roomMode) {
+      const roster = this.roomRosterPrefix || '';
+      if (roster) this._prependToLastUser(msgs, roster, '');
+      return msgs;
+    }
     const prefix = this.prefixPrompt || '';
     const suffix = this.suffixPrompt || '';
     if (prefix || suffix) {
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === 'user') {
-          msgs[i].content = prefix + msgs[i].content + suffix;
-          break;
-        }
-      }
+      this._prependToLastUser(msgs, prefix, suffix);
     }
     return msgs;
+  }
+
+  /** 把 prefix/suffix 拼到最近一条 user 消息（不发写入记忆，仅在请求副本上拼）。 */
+  _prependToLastUser(msgs, prefix, suffix) {
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user') {
+        msgs[i].content = prefix + msgs[i].content + suffix;
+        break;
+      }
+    }
   }
 }

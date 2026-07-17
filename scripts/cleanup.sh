@@ -34,9 +34,26 @@ fi
 PORTS=$(echo $PORTS | tr ' ' '\n' | sort -u | tr '\n' ' ')
 
 if [ -z "$PORTS" ]; then
-  echo "未发现任何端口配置，退出"
-  exit 0
+  echo "未发现任何端口配置，继续清理群聊副本..."
 fi
+
+# 3. 杀所有群聊副本进程（detached，按命令行匹配；run.json 端口兜底）
+echo "清理群聊副本进程..."
+PIDS=$(ps aux | grep "start.js" | grep -- "--mode room" | grep -v grep | awk '{print $2}')
+if [ -n "$PIDS" ]; then
+  echo "发现 $(echo "$PIDS" | wc -l | tr -d ' ') 个群聊副本进程，正在终止..."
+  echo "$PIDS" | xargs kill -9 2>/dev/null
+fi
+# run.json 端口兜底
+ROOMS_DIR="$PROJECT_DIR/rooms"
+if [ -d "$ROOMS_DIR" ]; then
+  for run_file in "$ROOMS_DIR"/*/data/*/run.json; do
+    [ -f "$run_file" ] || continue
+    RPORT=$(grep -o '"port"[[:space:]]*:[[:space:]]*[0-9]*' "$run_file" | grep -o '[0-9]*$' | head -1)
+    [ -n "$RPORT" ] && PORTS="$PORTS $RPORT"
+  done
+fi
+PORTS=$(echo $PORTS | tr ' ' '\n' | sort -u | tr '\n' ' ')
 
 echo "检测到端口: $(echo $PORTS | xargs)"
 
@@ -46,7 +63,7 @@ for port in $PORTS; do
     echo "端口 $port 被占用 (PID: $(echo $pids | tr '\n' ' ')), 正在清理..."
     echo "$pids" | xargs kill -9 2>/dev/null
   else
-    echo "端口 $port 空闲"
+    [ -n "$port" ] && echo "端口 $port 空闲"
   fi
 done
 

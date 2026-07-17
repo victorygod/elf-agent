@@ -9,17 +9,13 @@
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
-import { execSync } from 'child_process';
 import { createLogger } from '../shared/logger.js';
+import { probePort, findPidFromPort as probe_findPidFromPort, waitForReady as probe_waitForReady, httpShutdown as probe_httpShutdown, waitForPortFree as probe_waitForPortFree, PROBE_INTERVAL, STOP_PROBE_INTERVAL } from '../shared/agent_probe.js';
 
 const logger = createLogger('process-manager', 'gateway.log');
 
-/** 启动后探活轮询间隔 (ms) */
-const PROBE_INTERVAL = 300;
 /** 启动后探活超时 (ms) */
 const PROBE_TIMEOUT = 10_000;
-/** 停止后确认退出轮询间隔 (ms) */
-const STOP_PROBE_INTERVAL = 300;
 /** 停止后确认退出超时 (ms) */
 const STOP_PROBE_TIMEOUT = 5_000;
 /** 强制杀死前等待间隔 (ms) */
@@ -146,20 +142,12 @@ export class ProcessManager {
     const agent = this.agents.get(id);
     if (!agent) return false;
 
-    try {
-      const response = await fetch(`http://127.0.0.1:${agent.port}/status`, {
-        method: 'GET',
-        signal: AbortSignal.timeout(3000)
-      });
-      if (response.ok) {
-        const data = await response.json();
-        agent.status = 'running';
-        agent.pid = data.pid || agent.pid;
-        logger.info(`Agent ${id} 探活成功 (port: ${agent.port}, pid: ${agent.pid})`);
-        return true;
-      }
-    } catch (err) {
-      // 不可达
+    const r = await probePort(agent.port);
+    if (r.ok) {
+      agent.status = 'running';
+      agent.pid = r.pid ?? agent.pid;
+      logger.info(`Agent ${id} 探活成功 (port: ${agent.port}, pid: ${agent.pid})`);
+      return true;
     }
 
     agent.status = 'stopped';
@@ -173,20 +161,7 @@ export class ProcessManager {
    * @returns {number|null} PID 或 null
    */
   findPidFromPort(port) {
-    try {
-      const result = execSync(`lsof -ti :${port} -sTCP:LISTEN 2>/dev/null`, {
-        encoding: 'utf-8',
-        timeout: 5000
-      }).trim();
-      if (result) {
-        // 取第一行（可能有多个 PID，取最相关的一个）
-        const pids = result.split('\n').filter(Boolean).map(Number);
-        return pids[0] || null;
-      }
-    } catch (err) {
-      // lsof 未找到或执行失败
-    }
-    return null;
+    return probe_findPidFromPort(port);
   }
 
   /**
@@ -395,13 +370,7 @@ export class ProcessManager {
    * @returns {Promise<void>}
    */
   async _httpShutdown(port) {
-    const response = await fetch(`http://127.0.0.1:${port}/shutdown`, {
-      method: 'POST',
-      signal: AbortSignal.timeout(5000)
-    });
-    if (!response.ok) {
-      throw new Error(`/shutdown 返回 ${response.status}`);
-    }
+    await probe_httpShutdown(port);
   }
 
   /**
@@ -411,13 +380,9 @@ export class ProcessManager {
    * @returns {Promise<boolean>}
    */
   async _waitForReady(id, timeout) {
-    const start = Date.now();
-    while (Date.now() - start < timeout) {
-      const alive = await this.probeAgent(id);
-      if (alive) return true;
-      await new Promise(resolve => setTimeout(resolve, PROBE_INTERVAL));
-    }
-    return false;
+    const agent = this.agents.get(id);
+    if (!agent) return false;
+    return probe_waitForReady(agent.port, timeout, PROBE_INTERVAL);
   }
 
   /**
@@ -446,12 +411,6 @@ export class ProcessManager {
    * @returns {Promise<void>}
    */
   async _waitForPortFree(port, timeout) {
-    const start = Date.now();
-    while (Date.now() - start < timeout) {
-      const pid = this.findPidFromPort(port);
-      if (!pid) return;
-      await new Promise(resolve => setTimeout(resolve, 200));
-    }
-    throw new Error(`端口 ${port} 在 ${timeout}ms 内未释放`);
+    await probe_waitForPortFree(port, timeout);
   }
 }

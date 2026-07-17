@@ -50,6 +50,16 @@
 .item:hover { background: #3a3a3a; }
 .item.active { background: #3a3a3a; border-left-color: #07c160; }
 
+/* 拖拽排序 */
+.item { cursor: grab; }
+.item:active { cursor: grabbing; }
+.item.dragOver {
+  background: #3a3a3a;
+  border-top: 2px solid #4a90d9;
+  padding-top: 10px;
+}
+.item.dragging { opacity: 0.4; }
+
 .avatar {
   width: 40px;
   height: 40px;
@@ -125,3 +135,113 @@
 .spinning { animation: spin 0.6s linear; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
+/* 群聊区段 */
+.sectionHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 16px 4px;
+  font-size: 12px;
+  color: #888;
+  text-transform: uppercase;
+}
+
+.groupAvatar {
+  width: 100%;
+  height: 100%;
+  border-radius: 8px;
+  background: #4a90d9;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+}
+
+.emptyHint {
+  padding: 4px 16px 8px;
+  font-size: 12px;
+  color: #999;
+}
+
+/* 头部头像 + 设置按钮 */
+/* 用户名编辑弹窗（复用为全局设置弹窗） */
+.nameEditModal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+.nameEditBox {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.nameEditTitle { font-weight: 600; color: #333; }
+.nameEditInput {
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: 14px;
+}
+.nameEditActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.nameEditActions button {
+  padding: 6px 16px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+.nameEditSave {
+  background: #4a90d9 !important;
+  color: #fff !important;
+  border: none !important;
+}
+.settingAvatarRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.settingAvatarPreview {
+  width: 64px;
+  height: 64px;
+  border-radius: 8px;
+  border: 1px dashed #ccc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  overflow: hidden;
+  background: #fafafa;
+  flex-shrink: 0;
+}
+.settingAvatarPreview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.removeAvatarBtn {
+  border: none;
+  background: none;
+  color: #e53935;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 0;
+}
+.settingLabel {
+  font-size: 12px;
+  font-weight: 500;
+  color: #999;
+  margin-bottom: 4px;
+}

@@ -54,6 +54,28 @@ export async function abortAgent(id) {
   await fetch(`${API_BASE}/agents/${id}/abort`, { method: 'POST' });
 }
 
+// ===== Rewind（双击 Esc 回退）=====
+
+/** 列出可回退的快照包 */
+export async function listCheckpoints(agentId) {
+  const res = await fetch(`${API_BASE}/agents/${agentId}/checkpoints`);
+  return res.json();
+}
+
+/**
+ * 回退到指定快照包（省略 checkpointId = 最近一个）
+ * @returns {Promise<{ status, restoredPrompt, checkpoints }>}
+ */
+export async function rewindAgent(agentId, checkpointId = null) {
+  const res = await fetch(`${API_BASE}/agents/${agentId}/rewind`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ checkpointId }),
+  });
+  return res.json();
+}
+
+
 // ===== 聊天 =====
 
 /**
@@ -201,6 +223,60 @@ export async function getAvailableTools() {
   return data.tools || [];
 }
 
+// ===== Skill 管理（平台级） =====
+
+/** 列出 user + project 两目录下所有 skill */
+export async function listSkills() {
+  const res = await fetch(`${API_BASE}/skills`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();   // { skills, roots }
+}
+
+/** 读单个 skill 的 SKILL.md 全文 */
+export async function getSkillDetail(source, name) {
+  const res = await fetch(`${API_BASE}/skills/${source}/${encodeURIComponent(name)}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return await res.json();   // { content }
+}
+
+/** 删除一个 skill 目录 */
+export async function deleteSkill(source, name) {
+  const res = await fetch(`${API_BASE}/skills/${source}/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return await res.json();
+}
+
+/** 安装 skill：把一个目录复制到 ~/.elf/skills/ */
+export async function installSkill(sourcePath) {
+  const res = await fetch(`${API_BASE}/skills/install`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sourcePath }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return await res.json();
+}
+
+/** 浏览目录子项（仅目录），供前端选 skill 源目录 */
+export async function browseSkillDirs(dir) {
+  const url = `${API_BASE}/skills/browse${dir ? `?dir=${encodeURIComponent(dir)}` : ''}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return await res.json();   // { current, entries: [{name,path,isDirectory}] }
+}
+
 /** 更新 agent 配置 */
 export async function updateConfig(agentId, data) {
   const res = await fetch(`${API_BASE}/agents/${agentId}/config`, {
@@ -245,4 +321,149 @@ export function log(level, message) {
       body: JSON.stringify({ level, message, timestamp: ts })
     }).catch(() => {});
   } catch (e) { /* ignore */ }
+}
+
+// ===== 群聊 /rooms/* =====
+
+export const ROOM_HISTORY_PAGE_SIZE = 50;
+
+/** 列所有群 */
+export async function loadRooms() {
+  const res = await fetch(`${API_BASE}/rooms`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.rooms || [];
+}
+
+/** 获取群详情（含成员在线状态） */
+export async function getRoom(roomId) {
+  const res = await fetch(`${API_BASE}/rooms/${roomId}`);
+  if (!res.ok) return null;
+  return await res.json();
+}
+
+/** 建群 {name, members:[agentId]} */
+export async function createRoom(name, members) {
+  const res = await fetch(`${API_BASE}/rooms`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, members }),
+  });
+  if (!res.ok) throw new Error(`建群失败: ${res.status}`);
+  return await res.json();
+}
+
+/** 解散群 */
+export async function deleteRoom(roomId) {
+  const res = await fetch(`${API_BASE}/rooms/${roomId}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`解散群失败: ${res.status}`);
+  return await res.json();
+}
+
+/** 加成员 {agentId} */
+export async function addRoomMember(roomId, agentId) {
+  const res = await fetch(`${API_BASE}/rooms/${roomId}/members`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agentId }),
+  });
+  if (!res.ok) throw new Error(`加成员失败: ${res.status}`);
+  return await res.json();
+}
+
+/** 移除成员 */
+export async function removeRoomMember(roomId, agentId) {
+  const res = await fetch(`${API_BASE}/rooms/${roomId}/members/${agentId}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`移除成员失败: ${res.status}`);
+  return await res.json();
+}
+
+/** 群历史分页 */
+export async function getRoomHistory(roomId, limit = ROOM_HISTORY_PAGE_SIZE, beforeId = null) {
+  const qs = beforeId ? `?limit=${limit}&before=${encodeURIComponent(beforeId)}` : `?limit=${limit}`;
+  const res = await fetch(`${API_BASE}/rooms/${roomId}/history${qs}`);
+  if (!res.ok) return { messages: [], hasMore: false };
+  return await res.json();
+}
+
+/** 用户发言 */
+export async function sendRoomMessage(roomId, message) {
+  const res = await fetch(`${API_BASE}/rooms/${roomId}/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  });
+  if (!res.ok) throw new Error(`发送失败: ${res.status}`);
+  return await res.json();
+}
+
+/** 清空群历史 */
+export async function clearRoomHistory(roomId) {
+  const res = await fetch(`${API_BASE}/rooms/${roomId}/history`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`清空历史失败: ${res.status}`);
+  return await res.json();
+}
+
+/** 清空各成员记忆 */
+export async function clearRoomMemory(roomId) {
+  const res = await fetch(`${API_BASE}/rooms/${roomId}/clear-memory`, { method: 'POST' });
+  if (!res.ok) throw new Error(`清空记忆失败: ${res.status}`);
+  return await res.json();
+}
+
+/** 清空聊天记录 + 成员记忆（合一原子操作） */
+export async function clearRoomAll(roomId) {
+  const res = await fetch(`${API_BASE}/rooms/${roomId}/clear-all`, { method: 'POST' });
+  if (!res.ok) throw new Error(`清空失败: ${res.status}`);
+  return await res.json();
+}
+
+/** 群聊 SSE 订阅 URL（EventSource 用） */
+export function roomSubscribeUrl(roomId) {
+  return `${API_BASE}/rooms/${roomId}/subscribe`;
+}
+
+// ===== 全局设置（用户名等）=====
+
+/** 获取设置（含 userName、userAvatar、userUid、sidebarOrder） */
+export async function getSettings() {
+  const res = await fetch(`${API_BASE}/settings`);
+  if (!res.ok) return { userName: 'user', userAvatar: null, userUid: 'default_userid', sidebarOrder: { rooms: [], agents: [] } };
+  return await res.json();
+}
+
+/** 更新设置（userName / userAvatar / userUid） */
+export async function putSettings(data) {
+  const res = await fetch(`${API_BASE}/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`保存设置失败: ${res.status}`);
+  return await res.json();
+}
+
+/** 保存侧栏手动排序（区段内：rooms/agents 各自顺序） */
+export async function putSidebarOrder(sidebarOrder) {
+  const res = await fetch(`${API_BASE}/settings/sidebar-order`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sidebarOrder }),
+  });
+  if (!res.ok) throw new Error(`保存侧栏排序失败: ${res.status}`);
+  return await res.json();
+}
+
+/** 上传用户头像（base64 + mime type），返回保存后的文件名 */
+export async function uploadUserAvatar(data, type) {
+  const res = await fetch(`${API_BASE}/settings/avatar`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data, type }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `头像上传失败: ${res.status}`);
+  }
+  return await res.json();
 }

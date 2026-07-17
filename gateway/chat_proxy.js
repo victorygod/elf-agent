@@ -223,20 +223,36 @@ function buildBubblesFromContext(ctx) {
 
 
 /**
+ * 快照窗口大小：与前端 agentStore.HISTORY_PAGE_SIZE 一致（首页 loadHistory 也取这么多）。
+ * 之前固定取 50 且丢弃 hasMore，导致 rewind / 流式中刷新后前端 hasMore 恒为 false，
+ * 无法上翻加载更早历史。
+ */
+const SNAPSHOT_PAGE = 30;
+
+/**
+ * 调 getRecent 取最近一页，保证返回结构含 hasMore（不要只取 .messages）
+ */
+function _recentPage(agentId, chatHistory) {
+  if (!chatHistory) return { messages: [], hasMore: false };
+  const r = chatHistory.getRecent(agentId, SNAPSHOT_PAGE);
+  return { messages: r.messages || [], hasMore: !!r.hasMore };
+}
+
+/**
  * 从 StreamContext + ChatHistory 构建当前状态快照
- * @returns {{ streaming: boolean, turns: Array, activeTurn: object|null }}
+ * @returns {{ streaming: boolean, turns: Array, activeTurn: object|null, hasMore: boolean }}
  */
 function buildSnapshot(agentId, ctx, chatHistory) {
   // 无活跃流：返回 idle 快照
   if (!ctx || ctx.closed || ctx.streamEnded) {
-    const rawMessages = chatHistory ? chatHistory.getRecent(agentId, 50).messages : [];
-    const turns = messagesToTurns(rawMessages);
-    return { streaming: false, turns, activeTurn: null };
+    const { messages, hasMore } = _recentPage(agentId, chatHistory);
+    const turns = messagesToTurns(messages);
+    return { streaming: false, turns, activeTurn: null, hasMore };
   }
 
   // 有活跃流：turns 去掉 activeTurn 对应的轮次
-  const rawMessages = chatHistory ? chatHistory.getRecent(agentId, 50).messages : [];
-  const turns = messagesToTurns(rawMessages, ctx._activeUserMessage);
+  const { messages, hasMore } = _recentPage(agentId, chatHistory);
+  const turns = messagesToTurns(messages, ctx._activeUserMessage);
 
   const bubbles = buildBubblesFromContext(ctx);
   const activeTurn = {
@@ -247,7 +263,7 @@ function buildSnapshot(agentId, ctx, chatHistory) {
     assistantBubbles: bubbles,
   };
 
-  return { streaming: true, turns, activeTurn };
+  return { streaming: true, turns, activeTurn, hasMore };
 }
 
 

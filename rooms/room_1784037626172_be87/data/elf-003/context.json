@@ -1,0 +1,28 @@
+[
+  {
+    "id": "msg_1784306325509_0e2e",
+    "role": "user",
+    "content": "wolfgod: @大黑塔群里都有谁\nwolfgod: @长夜月你知道群里都有谁吗？"
+  },
+  {
+    "id": "msg_1784306331043_aec1",
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call_f6901e3d083d432f8f51c409",
+        "type": "function",
+        "function": {
+          "name": "Speak",
+          "arguments": "{\"message\": \"这个群里有三个人……大黑塔，wolfgod，还有我，长夜月♭\\n\\n就这些。不算多，但也不算少。\"}"
+        }
+      }
+    ]
+  },
+  {
+    "id": "msg_1784306331061_4bd1",
+    "role": "tool",
+    "tool_call_id": "call_f6901e3d083d432f8f51c409",
+    "content": "已发言"
+  }
+]

@@ -1,0 +1,10 @@
+{
+  "runKey": "room_1784037626172_be87/elf-003",
+  "roomId": "room_1784037626172_be87",
+  "agentId": "elf-003",
+  "port": 56245,
+  "pid": 67173,
+  "memberName": "elf-003",
+  "dataDir": "/Users/wolf/Desktop/elf/rooms/room_1784037626172_be87/data/elf-003",
+  "roomBusUrl": "http://127.0.0.1:8080/rooms/room_1784037626172_be87"
+}

@@ -162,6 +162,7 @@
   display: flex;
   gap: 10px;
   align-items: flex-end;
+  position: relative;   /* RewindMenu overlay 的定位锚（浮在输入框正上方） */
 }
 
 .textarea {
@@ -211,6 +212,23 @@
   flex-shrink: 0;
 }
 .stopBtn:hover { background: #ff7875; }
+
+.rewindBtn {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  background: #f0f0f0;
+  color: #666;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.rewindBtn:hover { background: #e0e0e0; color: #333; }
 
 /* Turn 模型：用户消息样式 */
 .userMessage {

@@ -404,6 +404,35 @@ export default function useChat(agentId) {
 
   startPollingRef.current = startPolling;
 
+  // ===== Rewind（双击 Esc 回退）=====
+  // 调 gateway /rewind 整文件替换，成功后 re-subscribe 从 snapshot 刷新 turns
+  const rewind = useCallback(async (checkpointId = null) => {
+    try {
+      const data = await api.rewindAgent(agentId, checkpointId);
+      if (data?.status === 'ok') {
+        // re-subscribe：snapshot 事件会带截断后的 turns，直接替换 store（见 _handleSSEEvent snapshot 分支）
+        startPolling();
+        return { ok: true, restoredPrompt: data.restoredPrompt ?? null };
+      }
+      api.log('WARN', `rewind 失败: ${data?.error || 'unknown'}`);
+      return { ok: false, error: data?.error };
+    } catch (e) {
+      api.log('ERROR', `rewind 请求失败: ${e.message}`);
+      return { ok: false, error: e.message };
+    }
+  }, [agentId, startPolling]);
+
+  /** 列出可回退的快照包 */
+  const listCheckpoints = useCallback(async () => {
+    try {
+      const data = await api.listCheckpoints(agentId);
+      return data?.checkpoints ?? [];
+    } catch (e) {
+      api.log('ERROR', `列出 checkpoint 失败: ${e.message}`);
+      return [];
+    }
+  }, [agentId]);
+
   // ===== 清理 =====
   const cleanup = useCallback(() => {
     if (rafIdRef.current) {
@@ -419,6 +448,8 @@ export default function useChat(agentId) {
   return {
     send,
     abort,
+    rewind,
+    listCheckpoints,
     startPolling,
     cleanup,
   };

@@ -4,8 +4,10 @@ import ToolCallBadge from './ToolCallBadge';
 import CompactBadge from './CompactBadge';
 import MarkdownContent from './MarkdownContent';
 import EmptyState from './EmptyState';
+import RewindMenu from './RewindMenu';
 import useChat from '../hooks/useChat';
 import useAgentStore from '../stores/agentStore';
+import { useRoomStore } from '../stores/roomStore';
 import styles from './ChatPanel.module.css';
 
 /**
@@ -73,7 +75,7 @@ function AssistantBubble({ bubble, isStreaming, isLastInTurn, onToggleTime, show
  * 渲染一个 Turn（用户消息 + Agent 回复气泡组）
  * React.memo：已完成的 turn（isStreamingActiveTurn=false）不会因 activeTurn 变化而重渲染
  */
-const TurnView = React.memo(function TurnView({ turn, agentId, agent, isStreamingActiveTurn, showTimes, toggleTime }) {
+const TurnView = React.memo(function TurnView({ turn, agentId, agent, isStreamingActiveTurn, showTimes, toggleTime, userAvatar }) {
   const { userMessage, assistantBubbles } = turn;
   const userShowTime = userMessage && showTimes.has(userMessage.id);
   const assistantShowTime = assistantBubbles[0] && showTimes.has(assistantBubbles[0].id);
@@ -89,7 +91,7 @@ const TurnView = React.memo(function TurnView({ turn, agentId, agent, isStreamin
       {userMessage && (
         <div className={styles.userMessage}>
           <div className={styles.userAvatar}>
-            <Avatar agentId={agentId} avatar={agent.userAvatar} fallback="U" bgColor="#07c160" />
+            <Avatar kind="user" avatar={userAvatar} fallback="U" bgColor="#07c160" />
           </div>
           <div className={`${styles.userBody} ${userShowTime ? styles.showTime : ''}`}>
             {userMessage.ts && (
@@ -145,17 +147,33 @@ export default function ChatPanel({ agentId }) {
 
   const agent = useAgentStore(useCallback(state => state.getAgent(agentId), [agentId]));
   const loadHistory = useAgentStore(s => s.loadHistory);
+  const userAvatar = useRoomStore(s => s.userAvatar);
 
-  const { send, abort, startPolling, cleanup } = useChat(agentId);
+  const { send, abort, rewind, listCheckpoints, startPolling, cleanup } = useChat(agentId);
 
   const messagesElRef = useRef(null);
   const inputRef = useRef(null);
   const [showTimes, setShowTimes] = useState(new Set());
 
+  // ===== Rewind 菜单状态 =====
+  const [rewindOpen, setRewindOpen] = useState(false);
+  const [rewindCheckpoints, setRewindCheckpoints] = useState([]);
+  const lastEscAtRef = useRef(0);
+  const DOUBLE_ESC_WINDOW = 400;
+
   const isRunning = agent?.status === 'running';
   // ★ streaming = activeTurn 存在时正在回复，禁止发送新消息
   const isStreaming = activeTurn !== null;
   const hasContent = turns.length > 0 || activeTurn;
+
+  // ★ canOpenRewind：能否开 rewind 菜单的唯一谓词（双击 Esc 与回退按钮共享）
+  //   输入框是非受控 textarea，值变化不触重渲染，故用 inputEmpty state 同步
+  //   （在 autoResize / 回填 / 清草稿处调 syncInputEmpty 更新）。
+  const [inputEmpty, setInputEmpty] = useState(true);
+  const syncInputEmpty = useCallback(() => {
+    setInputEmpty((inputRef.current?.value.trim() ?? '') === '');
+  }, []);
+  const canOpenRewind = !isStreaming && inputEmpty;
 
   const prevActiveTurnIdRef = useRef(null);
   // 用户是否主动上滑离开底部 — 置 true 后停止自动滚底，直到用户滚回底部附近
@@ -225,7 +243,8 @@ export default function ChatPanel({ agentId }) {
     if (!el) return;
     el.style.height = 'auto';
     el.style.height = Math.min(el.scrollHeight, 120) + 'px';
-  }, []);
+    syncInputEmpty();   // 输入框值变化时同步 inputEmpty（驱动回退按钮显隐）
+  }, [syncInputEmpty]);
 
   // 检测是否在底部附近
   const isNearBottom = useCallback((threshold = 100) => {
@@ -340,9 +359,10 @@ export default function ChatPanel({ agentId }) {
     if (!text) return;
     inputRef.current.value = '';
     inputRef.current.style.height = 'auto';
+    syncInputEmpty();
     historyNavRef.current = { index: -1, draft: '' };
     send(text);
-  }, [send, isStreaming]);
+  }, [send, isStreaming, syncInputEmpty]);
 
   const isComposingRef = useRef(false);
 
@@ -412,25 +432,112 @@ export default function ChatPanel({ agentId }) {
     isComposingRef.current = false;
   }, []);
 
-  // ★ 回复途中（abort 按钮出现）按 ESC 触发中止
-  //   回复期间 textarea 处于 disabled，无法接收 keydown，因此用 window 级监听。
-  //   回调里实时读 store 的 activeTurn + _isActive，空闲时不拦截 ESC。
+  // ===== Rewind 菜单打开/回退 =====
+  const [rewindSelected, setRewindSelected] = useState(0);
+  const openRewindMenu = useCallback(async () => {
+    const cps = await listCheckpoints();
+    setRewindCheckpoints(cps);
+    setRewindSelected(Math.max(0, cps.length - 1));   // 默认聚焦最近一项（列表最下）
+    setRewindOpen(true);
+  }, [listCheckpoints]);
+
+  const handleRewind = useCallback(async (checkpointId) => {
+    setRewindOpen(false);
+    const result = await rewind(checkpointId);
+    if (result?.ok && result.restoredPrompt != null) {
+      // 截断后被丢弃的 user prompt 回填输入框（对标 CC "还原进输入框"）
+      if (inputRef.current) {
+        inputRef.current.value = result.restoredPrompt;
+        inputRef.current.focus();
+        autoResize();   // 同步高度 + inputEmpty
+      }
+    }
+  }, [rewind, autoResize]);
+
+  // ★ window 级键盘监听——唯一监听，避免多 window capture 监听冲突
+  //   菜单打开时：路由 Arrow/Enter/Esc 给菜单
+  //   菜单关闭时：Esc 三分流（①中断 ②清草稿 ③双击开菜单）
   const abortRef = useRef(abort);
   abortRef.current = abort;
+  const openRewindMenuRef = useRef(openRewindMenu);
+  openRewindMenuRef.current = openRewindMenu;
+  const handleRewindRef = useRef(handleRewind);
+  handleRewindRef.current = handleRewind;
+  const checkpointsCountRef = useRef(0);
+  checkpointsCountRef.current = rewindCheckpoints.length;
+  const rewindCheckpointsRef = useRef(rewindCheckpoints);
+  rewindCheckpointsRef.current = rewindCheckpoints;
+  const selectedRef = useRef(rewindSelected);
+  selectedRef.current = rewindSelected;
   useEffect(() => {
     const onGlobalKeyDown = (e) => {
-      if (e.key !== 'Escape') return;
-      // 只在当前页面真正回复途中拦截
       const chat = useAgentStore.getState().chats.get(agentId);
-      if (!chat?.activeTurn) return;
-      if (!chat._isActive) return;
-      e.preventDefault();
-      e.stopPropagation();
-      abortRef.current();
+
+      // —— 菜单打开时：所有导航键归菜单消费（必须 stopPropagation，否则 Enter 会冒泡到 textarea 触发 handleSend，把回填的 prompt 自动发出去）——
+      if (rewindOpen) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          setRewindOpen(false);
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          e.stopPropagation();
+          setRewindSelected(i => Math.max(i - 1, 0));   // 往更旧
+          return;
+        }
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          e.stopPropagation();
+          setRewindSelected(i => Math.min(i + 1, Math.max(0, checkpointsCountRef.current - 1)));   // 往最近
+          return;
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          e.stopPropagation();   // ★ 关键：阻止 Enter 冒泡到 textarea 的 handleSend
+          if (checkpointsCountRef.current > 0) {
+            const cps = rewindCheckpointsRef.current;
+            const id = cps[selectedRef.current]?.id;
+            if (id) handleRewindRef.current(id);
+          }
+          return;
+        }
+        return; // 菜单开着时其他键不进三分流
+      }
+
+      // —— 菜单关闭时：Esc 三分流 ——
+      if (e.key !== 'Escape') return;
+
+      // 分流①：回复途中 → 中断
+      if (chat?.activeTurn && chat._isActive) {
+        e.preventDefault();
+        e.stopPropagation();
+        abortRef.current();
+        return;
+      }
+      // 分流②：输入框有字 → 清草稿
+      const input = inputRef.current?.value ?? '';
+      if (input.trim() !== '') {
+        e.preventDefault();
+        if (inputRef.current) {
+          inputRef.current.value = '';
+          autoResize();   // 同步 inputEmpty（autoResize 内含 syncInputEmpty）
+        }
+        return;
+      }
+      // 分流③：输入框空 + 空闲 → 双击开菜单
+      const now = Date.now();
+      if (now - lastEscAtRef.current < DOUBLE_ESC_WINDOW) {
+        e.preventDefault();
+        lastEscAtRef.current = 0;
+        openRewindMenuRef.current();
+      }
+      lastEscAtRef.current = now;
     };
     window.addEventListener('keydown', onGlobalKeyDown, true);
     return () => window.removeEventListener('keydown', onGlobalKeyDown, true);
-  }, [agentId]);
+  }, [agentId, rewindOpen, autoResize]);
 
   if (!isActive) return null;
   if (!agent) return <div className={styles.panel} style={{ display: 'flex', padding: 16, color: '#666' }}>Agent 未就绪</div>;
@@ -453,6 +560,7 @@ export default function ChatPanel({ agentId }) {
                 isStreamingActiveTurn={false}
                 showTimes={showTimes}
                 toggleTime={toggleTime}
+                userAvatar={userAvatar}
               />
             ))}
             {/* 当前流式回合 */}
@@ -464,6 +572,7 @@ export default function ChatPanel({ agentId }) {
                 isStreamingActiveTurn={isStreaming}
                 showTimes={showTimes}
                 toggleTime={toggleTime}
+                userAvatar={userAvatar}
               />
             )}
           </>
@@ -471,6 +580,18 @@ export default function ChatPanel({ agentId }) {
       </div>
       <div className={styles.inputArea}>
         <div className={styles.inputWrapper}>
+          {rewindOpen && (
+            <RewindMenu
+              checkpoints={rewindCheckpoints}
+              selectedIndex={rewindSelected}
+              onSelect={setRewindSelected}
+              onConfirm={() => {
+                const id = rewindCheckpoints[rewindSelected]?.id;
+                if (id) handleRewind(id);
+              }}
+              onClose={() => setRewindOpen(false)}
+            />
+          )}
           <textarea
             ref={inputRef}
             className={styles.textarea}
@@ -485,12 +606,22 @@ export default function ChatPanel({ agentId }) {
           {isStreaming ? (
             <button className={styles.stopBtn} onClick={abort} title="停止生成">■</button>
           ) : (
-            <button
-              className={styles.sendBtn}
-              onClick={handleSend}
-              disabled={!isRunning}
-              title="发送"
-            />
+            <>
+              {/* 回退按钮：显隐与双击 Esc 开菜单时机严格一致（canOpenRewind）；菜单已开时点击=toggle 关闭 */}
+              {canOpenRewind && (
+                <button
+                  className={styles.rewindBtn}
+                  onClick={() => (rewindOpen ? setRewindOpen(false) : openRewindMenu())}
+                  title="回退到上一个状态（双击 Esc）"
+                >⟲</button>
+              )}
+              <button
+                className={styles.sendBtn}
+                onClick={handleSend}
+                disabled={!isRunning}
+                title="发送"
+              />
+            </>
           )}
         </div>
       </div>

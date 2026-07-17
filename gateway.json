@@ -1,3 +1,13 @@
 {
-  "port": 8080
+  "port": 8080,
+  "userName": "wolfgod",
+  "userAvatar": "user_avatar.webp",
+  "sidebarOrder": {
+    "rooms": [],
+    "agents": [
+      "elf-002",
+      "elf-003",
+      "elf-001"
+    ]
+  }
 }

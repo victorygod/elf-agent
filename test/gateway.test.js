@@ -32,6 +32,13 @@ describe('Gateway Config', () => {
     assert.ok(config.port);
     assert.equal(config.port, 8080);
   });
+
+  it('loadGatewayConfig 返回稳定 userUid(默认 default_userid,问题3)', () => {
+    const config = loadGatewayConfig();
+    assert.ok(config.userUid, 'userUid 应存在');
+    assert.equal(config.userUid, 'default_userid');
+    assert.ok(config.userName, 'userName 应存在');
+  });
 });
 
 // ========================

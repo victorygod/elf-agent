@@ -3,6 +3,7 @@ import useAgentStore from '../stores/agentStore';
 import useConfig from '../hooks/useConfig';
 import * as api from '../api/index.js';
 import ConfigField from './ConfigField';
+import SkillManager from './SkillManager';
 import styles from './ConfigDrawer.module.css';
 
 export default function ConfigDrawer({ onClose }) {
@@ -59,25 +60,43 @@ export default function ConfigDrawer({ onClose }) {
       </div>
 
       <div className={styles.body}>
-        {tabs.map(tab => (
+        {tabs.map(tab => {
+          const editableFields = tab.fields.filter(f => f.type !== 'readonly-tags');
+          const readonlyFields = tab.fields.filter(f => f.type === 'readonly-tags');
+          const renderField = (field) => (
+            <ConfigField
+              key={field.key}
+              field={field}
+              agentId={configAgentId}
+              value={formData[field.key] ?? ''}
+              currentAvatar={field.key === 'avatar' ? (agent?.avatar || null) : null}
+              options={field.options ?? (field.type === 'multiselect' ? availableTools : null)}
+              onChange={(val) => handleFieldChange(field.key, val)}
+            />
+          );
+          return (
           <div
             key={tab.key}
             className={`${styles.tabPanel} ${activeTab === tab.key ? styles.tabPanelActive : ''}`}
           >
-            {tab.fields.map(field => (
-              <ConfigField
-                key={field.key}
-                field={field}
-                agentId={configAgentId}
-                value={formData[field.key] ?? ''}
-                currentAvatar={field.key === 'avatar' ? (agent?.avatar || null) : null}
-                currentUserAvatar={field.key === 'avatar' ? (agent?.userAvatar || null) : null}
-                options={field.type === 'multiselect' ? availableTools : null}
-                onChange={(val) => handleFieldChange(field.key, val)}
-              />
-            ))}
+            {tab.type === 'skill-manager' ? (
+              <SkillManager agentId={configAgentId} />
+            ) : (
+              <>
+                {editableFields.map(renderField)}
+                {readonlyFields.length > 0 && (
+                  <>
+                    <div className={styles.sectionDivider}>
+                      <span className={styles.sectionTitle}>当前能力（只读 · 改 config.json 后重启生效）</span>
+                    </div>
+                    {readonlyFields.map(renderField)}
+                  </>
+                )}
+              </>
+            )}
           </div>
-        ))}
+          );
+        })}
       </div>
 
       <div className={styles.footer}>
@@ -108,7 +127,7 @@ function buildDefaultLayout(config) {
     const meta = config._ui?.[key] || {};
     let type = meta.type;
     if (!type) {
-      if (Array.isArray(value) && key === 'tools') type = 'multiselect';
+      if (Array.isArray(value) && (key === 'tools' || key === 'subagents')) type = 'readonly-tags';
       else if (typeof value === 'boolean') type = 'checkbox';
       else if (typeof value === 'number') type = 'number';
       else if (typeof value === 'string' && value.length > 100) type = 'textarea';
@@ -116,8 +135,8 @@ function buildDefaultLayout(config) {
     }
     agentFields.push({
       key, type,
-      label: meta.label || (key === 'tools' ? '工具' : key),
-      hint: meta.hint || (key === 'tools' ? '选择该 Agent 可调用的工具（改后需重启服务生效）' : ''),
+      label: meta.label || (key === 'tools' ? '已启用工具' : key === 'subagents' ? '已启用子 agent 类型' : key),
+      hint: meta.hint || (key === 'tools' ? '该 Agent 当前可调用的工具（只读，改 config.json 后重启生效）' : ''),
     });
   }
 
