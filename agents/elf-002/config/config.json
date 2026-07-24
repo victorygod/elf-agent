@@ -18,11 +18,12 @@
     "content": "compact_prompt.md"
   },
   "messageManagerClass": "message_manager",
-  "memoryTokenLimit": 300000,
+  "memoryTokenLimit": 400000,
   "perToolLimit": 50000,
   "previewLength": 2000,
   "budgetWindow": 200000,
   "microcompactEnabled": true,
+  "fileChangeDetection": true,
   "maxIterations": 0,
   "subagents": [
     "Explore",

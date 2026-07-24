@@ -3,7 +3,7 @@
  *
  * 本文件只实现不起真实子进程的内核：
  *   - RoomBroadcaster：per-room SSE 订阅者管理 + 广播 speak/member_status 事件
- *   - RoomHistory：群历史 group-history.jsonl（append+JSONL，room 维度 + speaker/event schema）
+ *   - RoomHistory：群历史 history.jsonl（append+JSONL，room 维度 + speaker/event schema）
  *   - allocPort：动态分配空闲端口
  *   - RoomRegistry：副本注册表（run.json 读写，re-discover 用）
  *
@@ -19,34 +19,45 @@ import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { createLogger } from '../shared/logger.js';
 import { probePort, waitForReady, httpShutdown } from '../shared/agent_probe.js';
+import { loadGatewayConfig } from './config.js';
 
 const logger = createLogger('room-bus', 'gateway.log');
 
 // ============================================================
-// RoomBroadcaster —— per-room SSE 订阅者管理
+// RoomBroadcaster —— per-room 统一订阅者管理（SSE + agent）
 // ============================================================
 
 /**
- * 群聊 SSE 广播器。借鉴 chat_proxy.js StreamContext.broadcastChunk 的失败剔除写法，
- * 但无"单轮/主客户端"语义——群聊是多头持续广播。
+ * 群聊广播器。统一管理前端 SSE 订阅者和 agent 副本订阅者，
+ * 通过 notifyAll() 同时推送给两类消费者。
+ *
+ * subscribeSSE / unsubscribeSSE — 前端（SSE 长连接）
+ * subscribeAgent / unsubscribeAgent — agent 副本（POST /observe）
+ *
+ * 见 docs/chat-room-design.md §7.2（交互协议）。
  */
 export class RoomBroadcaster {
-  constructor(roomId) {
+  constructor(roomId, opts = {}) {
     this.roomId = roomId;
-    this.subscribers = []; // [{ res }]
+    /** @type {{ res: object }[]} 前端 SSE 订阅者 */
+    this._sseSubscribers = [];
+    /** @type {Map<string, { port: number }>} agent 订阅者 agentId → { port } */
+    this._agentSubscribers = new Map();
+    /** @type {(agentId: string) => void} agent POST 失败回调 */
+    this._onAgentOffline = opts.onAgentOffline || null;
+    /** v3：gateway 端口，供 _broadcastToAgents 给 /observe body 带 roomBusUrl（agent Speak 回调用，懒建 RoomState 需此字段否则缺 roomBusUrl 无法发言）*/
+    this._gatewayPort = opts.gatewayPort || null;
   }
 
-  /** 当前订阅者数量 */
-  get size() {
-    return this.subscribers.length;
-  }
+  // ────────────── SSE 订阅者（前端）──────────────
+
+  /** @deprecated 别名，用 subscribeSSE */
+  add(res, snapshotData) { return this.subscribeSSE(res, snapshotData); }
 
   /**
-   * 加入订阅：设置 SSE 头 + 推 snapshot + 注册订阅者
-   * @param {object} res - express/http 响应对象（需 writeHead/flushHeaders/write/end/on）
-   * @param {{members:Array, messages:Array}} snapshotData - 初始快照
+   * 前端加入 SSE 订阅：设置 SSE 头 + 推 snapshot + 注册订阅者
    */
-  add(res, snapshotData = { members: [], messages: [] }) {
+  subscribeSSE(res, snapshotData = { members: [], messages: [] }) {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -56,28 +67,39 @@ export class RoomBroadcaster {
     res.flushHeaders?.();
     if (res.socket) res.socket.setNoDelay(true);
 
-    // 推初始 snapshot
     res.write(`event: snapshot\ndata: ${JSON.stringify(snapshotData)}\n\n`);
 
     const sub = { res };
-    this.subscribers.push(sub);
+    this._sseSubscribers.push(sub);
 
     res.on('close', () => {
-      const idx = this.subscribers.indexOf(sub);
-      if (idx !== -1) this.subscribers.splice(idx, 1);
+      const idx = this._sseSubscribers.indexOf(sub);
+      if (idx !== -1) this._sseSubscribers.splice(idx, 1);
     });
 
     return sub;
   }
 
+  // ────────────── agent 订阅者（副本）──────────────
+
+  /** agent 副本加入广播 */
+  subscribeAgent(agentId, port) {
+    this._agentSubscribers.set(agentId, { port });
+  }
+
+  /** agent 副本退出广播 */
+  unsubscribeAgent(agentId) {
+    this._agentSubscribers.delete(agentId);
+  }
+
+  // ────────────── 统一的广播 ──────────────
+
   /**
-   * 广播一个事件给所有订阅者，写失败的剔除（对齐 broadcastChunk 失败剔除语义）
-   * @param {string} event - 事件名（speak/member_status/user_echo/error）
-   * @param {object} data
+   * SSE-only 广播（member_status 等不需要推给 agent 的事件）
    */
   broadcast(event, data) {
     const chunk = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    this.subscribers = this.subscribers.filter(sub => {
+    this._sseSubscribers = this._sseSubscribers.filter(sub => {
       try {
         if (sub.res.writable) {
           sub.res.write(chunk);
@@ -90,24 +112,95 @@ export class RoomBroadcaster {
     });
   }
 
+  /**
+   * 统一通知所有订阅者（SSE + agent）。
+   * 前端 SSE：speaker=name，content=name 版（@ 已改写成 name）。
+   * agent /observe：from=speakerUid（agent 自消息过滤靠 uid），content=name 版。
+   * @param {string} event - 事件名（speak）
+   * @param {{speakerUid,speakerName,contentNames,ts,id,seq,mentions}} data
+   */
+  notifyAll(event, data) {
+    // SSE 给前端（name 版）
+    const sseData = {
+      speaker: data.speakerName,
+      speakerUid: data.speakerUid,
+      content: data.contentNames,
+      ts: data.ts, id: data.id, seq: data.seq,
+    };
+    const chunk = `event: ${event}\ndata: ${JSON.stringify(sseData)}\n\n`;
+    this._sseSubscribers = this._sseSubscribers.filter(sub => {
+      try {
+        if (sub.res.writable) { sub.res.write(chunk); return true; }
+        return false;
+      } catch (e) { return false; }
+    });
+
+    // POST /observe 给 agent 副本（from=uid，content=name 版）
+    this._broadcastToAgents(data);
+  }
+
+  /**
+   * Fire-and-forget POST /observe 给所有 agent 订阅者
+   * from=speakerUid（agent 自消息过滤靠 uid），content=name 版（gateway 已改写）
+   */
+  async _broadcastToAgents(data) {
+    const body = {
+      roomId: this.roomId,          // v3：带 roomId 供 agent 进程路由到该群 RoomState
+      mode: 'room',
+      from: data.speakerUid,
+      content: data.contentNames,
+      mentions: Array.isArray(data.mentions) ? data.mentions : [],
+      role: 'chat',
+      seq: data.seq ?? null,
+      // v3：懒建群 RoomState 时 buildRunContext 需 roomBusUrl，否则 Speak 报"缺 roomBusUrl,无法发言"。
+      roomBusUrl: this._gatewayPort ? `http://127.0.0.1:${this._gatewayPort}/rooms/${this.roomId}` : null,
+    };
+    const bodyStr = JSON.stringify(body);
+    const failed = [];
+
+    await Promise.all([...this._agentSubscribers].map(async ([agentId, sub]) => {
+      try {
+        const resp = await fetch(`http://127.0.0.1:${sub.port}/observe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: bodyStr,
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (!resp.ok) failed.push(agentId);
+      } catch (err) {
+        failed.push(agentId);
+      }
+    }));
+
+    // 失败回调
+    if (this._onAgentOffline) {
+      for (const agentId of failed) this._onAgentOffline(agentId);
+    }
+  }
+
   /** 关闭所有订阅者连接 */
   removeAll() {
-    for (const sub of this.subscribers) {
-      try {
-        if (sub.res.writable) sub.res.end();
-      } catch (e) { /* ignore */ }
+    for (const sub of this._sseSubscribers) {
+      try { if (sub.res.writable) sub.res.end(); } catch (e) { /* ignore */ }
     }
-    this.subscribers = [];
+    this._sseSubscribers = [];
+    this._agentSubscribers.clear();
   }
+
+  /** @type {{ res: object }[]} @deprecated 兼容旧引用，用 _sseSubscribers */
+  get subscribers() { return this._sseSubscribers; }
+  set subscribers(v) { this._sseSubscribers = v; }
+
+  get size() { return this._sseSubscribers.length + this._agentSubscribers.size; }
 }
 
 // ============================================================
-// RoomHistory —— 群历史 group-history.jsonl（append + JSONL）
+// RoomHistory —— 群历史 history.jsonl（append + JSONL）
 // ============================================================
 
 /**
  * 群聊历史持久化。抄 chat_history.js 的 append+JSONL+游标分页模式，
- * 换成 room 维度（rooms/<rid>/group-history.jsonl）+ 扩展 schema（speaker/event）。
+ * 换成 room 维度（rooms/<rid>/history.jsonl）+ 扩展 schema（speaker/event）。
  * 不含 chat_history 的 _mergeCompactRecords（私聊压缩特有，群聊不需要）。
  */
 export class RoomHistory {
@@ -118,7 +211,22 @@ export class RoomHistory {
   constructor(roomsDir, roomId) {
     this.roomsDir = roomsDir;
     this.roomId = roomId;
-    this.filePath = path.join(roomsDir, roomId, 'group-history.jsonl');
+    this.filePath = path.join(roomsDir, roomId, 'history.jsonl');
+    this._nextSeq = this._loadLastSeq() + 1;
+  }
+
+  /** 从文件最后一条记录恢复 seq 计数器 */
+  _loadLastSeq() {
+    try {
+      if (!fs.existsSync(this.filePath)) return 0;
+      const raw = fs.readFileSync(this.filePath, 'utf-8');
+      const lines = raw.trim().split('\n').filter(Boolean);
+      if (lines.length === 0) return 0;
+      const last = JSON.parse(lines[lines.length - 1]);
+      return last.seq ?? 0;
+    } catch (err) {
+      return 0;
+    }
   }
 
   _generateId() {
@@ -143,8 +251,10 @@ export class RoomHistory {
    * @returns {{id,roomId,speaker,content,event,ts,speakerUid?}}
    */
   add(speaker, content, event = 'speak', speakerUid = null) {
+    const seq = this._nextSeq++;
     const record = {
       id: this._generateId(),
+      seq,
       roomId: this.roomId,
       speaker,
       content,
@@ -159,6 +269,28 @@ export class RoomHistory {
       logger.error(`写入群历史失败 (${this.roomId}): ${err.message}`);
     }
     return record;
+  }
+
+  /** 读全部记录（内部用） */
+  _readAll() {
+    if (!fs.existsSync(this.filePath)) return [];
+    try {
+      const raw = fs.readFileSync(this.filePath, 'utf-8');
+      return raw.split('\n')
+        .filter(line => line.trim())
+        .map(line => { try { return JSON.parse(line); } catch (e) { return null; } })
+        .filter(Boolean);
+    } catch (err) {
+      return [];
+    }
+  }
+
+  /** 返回指定 seq 之后的全部消息。seq=0 返回所有；seq>0 返回 seq 严格大于该值的记录。 */
+  getAfterSeq(seq = 0) {
+    const all = this._readAll();
+    const messages = seq > 0 ? all.filter(m => (m.seq ?? 0) > seq) : all;
+    const lastMsg = all.length > 0 ? all[all.length - 1] : null;
+    return { messages, latestSeq: lastMsg?.seq ?? 0 };
   }
 
   /**
@@ -218,7 +350,7 @@ export class RoomHistory {
     return { messages, hasMore };
   }
 
-  /** 清空群历史 */
+  /** 清空群历史 + 重置 seq 计数器 */
   clear() {
     try {
       if (fs.existsSync(this.filePath)) {
@@ -227,6 +359,7 @@ export class RoomHistory {
     } catch (err) {
       logger.error(`清空群历史失败 (${this.roomId}): ${err.message}`);
     }
+    this._nextSeq = 1;
   }
 }
 
@@ -428,10 +561,10 @@ export class RoomConfig {
 /** 副本运行态 */
 const MEMBER_STATUS = { RUNNING: 'running', OFFLINE: 'offline', STARTING: 'starting', STOPPED: 'stopped' };
 
-/** 真实 spawn 副本进程：调 shared/agent/start.js --mode room ... */
+/** 真实 spawn 副本进程：调 engine/start.js --mode room ... */
 function defaultSpawnFn({ configDir, roomId, agentId, port, dataDir, roomBusUrl }) {
   const child = spawn(process.execPath, [
-    'shared/agent/start.js',
+    'engine/start.js',
     '--config', configDir,
     '--mode', 'room',
     '--port', String(port),
@@ -460,6 +593,7 @@ export class RoomManager {
    * @param {object} [opts]
    * @param {Function} [opts.spawnFn] - 注入 fake spawn（测试用）
    * @param {Function} [opts.agentConfigDir] - 纯函数 (agentId)=>configDir，默认 agents/<id>/config
+   * @param {string} [opts.chatRoot] - 成员 agent 记忆根（chat/），默认 cwd/chat；解散/移除成员清 chat/<id>/<rid>/ 用
    */
   constructor(roomsDir, gatewayPort, opts = {}) {
     this.roomsDir = roomsDir;
@@ -468,8 +602,46 @@ export class RoomManager {
     this.spawnFn = opts.spawnFn || defaultSpawnFn;
     this.agentConfigDir = opts.agentConfigDir || ((id) => path.join(process.cwd(), 'agents', id, 'config'));
     this.startTimeout = opts.startTimeout || 10_000;
+    /** v3：注入 ProcessManager（pm）。有 pm 时 ensureAgentPresent 直接复用已运行的 agent 进程，
+     *   通过 POST /observe（payload 带 roomId）路由到该 agent 进程内的 RoomState，不再 spawn 副本。
+     *   无 pm 时（旧测试注入 spawnFn）回退 spawnReplica。 */
+    this.pm = opts.pm || null;
+    this.gatewayUrl = opts.gatewayUrl || null;
+    this.chatRoot = opts.chatRoot || path.join(process.cwd(), 'chat');   // 成员记忆根
     /** roomId → { config: RoomConfig, broadcaster: RoomBroadcaster, history: RoomHistory, members: Map<agentId, {port,pid,status}> } */
     this.rooms = new Map();
+  }
+
+  /**
+   * v3：确保某 agent 进程在场并订阅本群广播。有 pm 时复用 pm.startAgent（不再 spawn 副本），
+   *   /observe 经 payload.roomId 路由到该 agent 进程内的 RoomState[roomId]（懒建）。
+   *   无 pm 时回退 spawnReplica（旧 spawnFn 测试路径）。
+   * @returns {Promise<{port, pid, status}>}
+   */
+  async ensureAgentPresent(roomId, agentId) {
+    const room = this._ensureRoom(roomId);
+    if (!this.pm) {
+      return this.spawnReplica(roomId, agentId);
+    }
+    const configDir = this.agentConfigDir(agentId);
+    if (!fs.existsSync(path.join(configDir, 'config.json'))) {
+      room.members.set(agentId, { port: null, pid: null, status: MEMBER_STATUS.OFFLINE });
+      throw new Error(`agent 不存在: ${agentId}`);
+    }
+    // 复用已运行的 agent 进程（pm.startAgent 幂等：已运行直接返回）。
+    if (this.pm.getAgentStatus?.(agentId) !== 'running') {
+      await this.pm.startAgent(agentId);
+    }
+    const port = this.pm.getAgentPort(agentId);
+    const pid = this.pm.getAgent?.(agentId)?.pid ?? null;
+    room.members.set(agentId, { port, pid, status: MEMBER_STATUS.RUNNING });
+    room.broadcaster.subscribeAgent(agentId, port);
+    // 落盘 run.json 仍供 cleanup.sh 兼容（v3 不再 spawn，但保留记录）。
+    const dataDir = path.join(this.roomsDir, roomId, 'data', agentId);
+    const roomBusUrl = `http://127.0.0.1:${this.gatewayPort}/rooms/${roomId}`;
+    this.registry.write(roomId, agentId, { port, pid, memberName: agentId, dataDir, roomBusUrl });
+    logger.info(`ensureAgentPresent ${roomId}/${agentId} 复用进程 (port ${port})`);
+    return { port, pid, status: MEMBER_STATUS.RUNNING };
   }
 
   /** 确保群在内存态（懒加载） */
@@ -478,7 +650,13 @@ export class RoomManager {
     const cfg = new RoomConfig(this.roomsDir, roomId);
     const entry = {
       config: cfg,
-      broadcaster: new RoomBroadcaster(roomId),
+      broadcaster: new RoomBroadcaster(roomId, {
+        gatewayPort: this.gatewayPort,
+        onAgentOffline: (agentId) => {
+          const m = entry.members.get(agentId);
+          if (m) entry.members.set(agentId, { ...m, status: MEMBER_STATUS.OFFLINE });
+        },
+      }),
       history: new RoomHistory(this.roomsDir, roomId),
       members: new Map(),
     };
@@ -496,7 +674,7 @@ export class RoomManager {
     const rec = cfg.create(name, members);
     this._ensureRoom(roomId);
     for (const agentId of rec.members) {
-      await this.spawnReplica(roomId, agentId).catch(err => {
+      await this.ensureAgentPresent(roomId, agentId).catch(err => {
         logger.warn(`建群时拉起 ${agentId} 失败: ${err.message}`);
       });
     }
@@ -532,6 +710,7 @@ export class RoomManager {
       }
       this.registry.write(roomId, agentId, { port, pid, memberName: agentId, dataDir, roomBusUrl });
       room.members.set(agentId, { port, pid, status: MEMBER_STATUS.RUNNING });
+      room.broadcaster.subscribeAgent(agentId, port);
       logger.info(`副本 ${roomId}/${agentId} 已起 (port ${port}, pid ${pid})`);
       return { port, pid, status: MEMBER_STATUS.RUNNING };
     } catch (err) {
@@ -541,14 +720,25 @@ export class RoomManager {
     }
   }
 
-  /** 停一个副本 */
+  /** 停一个副本。
+   *  v3：有 pm 时 agent 进程被多 room（含私聊 chat-<id>）复用，绝不能因退群/停某房而 shutdown 它——
+   *    仅退订本房广播。无 pm（旧 spawn 模式）才 shutdown 副本进程。 */
   async stopReplica(roomId, agentId) {
     const room = this._ensureRoom(roomId);
     const m = room.members.get(agentId);
+    if (this.pm) {
+      // 共享进程：只退订，不动进程
+      this.registry.remove(roomId, agentId);
+      room.broadcaster.unsubscribeAgent(agentId);
+      room.members.set(agentId, { port: null, pid: null, status: MEMBER_STATUS.STOPPED });
+      logger.info(`副本 ${roomId}/${agentId} 退订（pm 共享进程保留）`);
+      return;
+    }
     if (m && m.port) {
       try { await httpShutdown(m.port); } catch (err) { /* 进程可能已不在 */ }
     }
     this.registry.remove(roomId, agentId);
+    room.broadcaster.unsubscribeAgent(agentId);
     room.members.set(agentId, { port: null, pid: null, status: MEMBER_STATUS.STOPPED });
     logger.info(`副本 ${roomId}/${agentId} 已停`);
   }
@@ -558,7 +748,7 @@ export class RoomManager {
     const room = this._ensureRoom(roomId);
     if (!room.config.exists()) throw new Error(`群不存在: ${roomId}`);
     room.config.addMember(agentId);
-    await this.spawnReplica(roomId, agentId).catch(err => {
+    await this.ensureAgentPresent(roomId, agentId).catch(err => {
       logger.warn(`加成员时拉起 ${agentId} 失败: ${err.message}`);
     });
     return this.getRoom(roomId);
@@ -569,8 +759,10 @@ export class RoomManager {
     const room = this._ensureRoom(roomId);
     await this.stopReplica(roomId, agentId);
     room.config.removeMember(agentId);
-    const dataDir = path.join(this.roomsDir, roomId, 'data', agentId);
-    try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    // v3：清该成员对本群的记忆目录 chat/<agentId>/<rid>/（旧 rooms/<rid>/data/<agentId>/ 已不用）
+    const chatRoot = this.chatRoot;
+    const memberRoomDir = path.join(chatRoot, agentId, roomId);
+    try { fs.rmSync(memberRoomDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
     return this.getRoom(roomId);
   }
 
@@ -582,18 +774,25 @@ export class RoomManager {
     const room = this._ensureRoom(roomId);
     const cfg = room.config.read();
     if (!cfg) throw new Error(`群不存在: ${roomId}`);
-    // 停所有副本
+    // 停所有副本（v3 pm 模式仅退订，不动共享 agent 进程）
     for (const agentId of cfg.members) {
       await this.stopReplica(roomId, agentId).catch(() => { /* ignore */ });
     }
     // 关订阅者
     room.broadcaster.removeAll();
-    // 删整目录（含 room.json / data/ / group-history.jsonl）
+    // 删 rooms/<rid>/ 整目录（含 room.json / history.jsonl）
     const roomDir = path.join(this.roomsDir, roomId);
     try { fs.rmSync(roomDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    // v3：各成员 agent 对该群的 RoomState 记忆目录 chat/<agentId>/<rid>/（context/tool-results）一并清，
+    //   否则解散后成员对该群的记忆残留。路径来源 pm.chatDir（gateway/index.js 设 chat/）。
+    const chatRoot = this.chatRoot;
+    for (const agentId of cfg.members) {
+      const memberRoomDir = path.join(chatRoot, agentId, roomId);
+      try { fs.rmSync(memberRoomDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    }
     // 清内存态
     this.rooms.delete(roomId);
-    logger.info(`群 ${roomId} 已解散`);
+    logger.info(`群 ${roomId} 已解散（ rooms/<rid>/ + 各成员 chat/<id>/<rid>/ 已清）`);
   }
 
   /** 读取某 agent config.json 的 name（失败/无则回退 agentId，容错不抛） */
@@ -659,6 +858,13 @@ export class RoomManager {
     const room = this._ensureRoom(roomId);
     const cfg = room.config.read();
     if (!cfg) return;
+    // v3：有 pm 时直接 ensureAgentPresent（复用已运行 agent 进程），跳过 run.json/probe re-discover 逻辑。
+    if (this.pm) {
+      await Promise.all(cfg.members.map((agentId) =>
+        this.ensureAgentPresent(roomId, agentId).catch(err => logger.warn(`ensureReplicasAlive ${agentId}: ${err.message}`))
+      ));
+      return;
+    }
     await Promise.all(cfg.members.map(async (agentId) => {
       const m = room.members.get(agentId);
       if (m?.status === MEMBER_STATUS.STOPPED) {
@@ -674,6 +880,7 @@ export class RoomManager {
           const r = await probePort(rec.port);
           if (r.ok) {
             room.members.set(agentId, { port: rec.port, pid: rec.pid ?? r.pid ?? null, status: MEMBER_STATUS.RUNNING });
+            room.broadcaster.subscribeAgent(agentId, rec.port);
             logger.info(`副本 ${agentId} re-discover 成功 (port ${rec.port} 存活),回填内存态`);
             return;
           }
@@ -689,6 +896,7 @@ export class RoomManager {
       const r = await probePort(m.port);
       if (r.ok) {
         room.members.set(agentId, { ...m, status: MEMBER_STATUS.RUNNING, pid: r.pid ?? m.pid });
+        room.broadcaster.subscribeAgent(agentId, m.port);
       } else {
         // 死了，重拉
         logger.info(`副本 ${agentId} 不存活，重拉`);
@@ -717,6 +925,74 @@ export class RoomManager {
   /** 取某群历史（路由用） */
   getHistory(roomId) {
     return this._ensureRoom(roomId).history;
+  }
+
+  /**
+   * 处理一条群消息的完整流水线：写历史 → 统一通知所有订阅者（SSE + agent）。
+   * 被 /say 路由复用。
+   *
+   * 落盘层（A 方案）：speaker/speakerUid 都存 uid；content 里的 @ 统一存 uid。
+   * 发送层：SSE 给前端用 name 版（speaker=name，content @=name）；/observe 给 agent
+   *   from=uid（agent 自消息过滤靠 uid），content @=name。
+   *
+   * @param {string} roomId - 群 id
+   * @param {string} speakerUid - 发言者 uid（用户用 userUid，agent 用 agentId）
+   * @param {string} content - 消息原文（@ 可能是 id 或 name）
+   * @returns {{id: string, seq: number}} 写入的历史记录
+   */
+  async processRoomMessage(roomId, speakerUid, content) {
+    const room = this._ensureRoom(roomId);
+    const history = room.history;
+    const bc = room.broadcaster;
+    const { membersWithNames, user } = this._rosterForRewrite(roomId);
+
+    // 1. 写群历史（落盘 uid 版：speaker=uid，content @=uid）
+    const contentUids = RoomManager.rewriteMentions(content, membersWithNames, user, 'uid');
+    const rec = history.add(speakerUid, contentUids, 'speak', speakerUid);
+
+    // 2. 解析 mentions（uid 列表，给 agent 判被@用）
+    const mentions = RoomManager.parseMentions(content, membersWithNames);
+
+    // 3. 发送层 name 版（content @=name）
+    const contentNames = RoomManager.rewriteMentions(contentUids, membersWithNames, user, 'name');
+    const speakerName = this._speakerName(speakerUid, membersWithNames, user);
+
+    // notifyAll 内部给 SSE 传 name 版、给 agent observe 传 from=uid + name 版 content
+    bc.notifyAll('speak', {
+      speakerUid, speakerName, contentNames,
+      ts: rec.ts, id: rec.id, seq: rec.seq, mentions,
+    });
+
+    return rec;
+  }
+
+  /**
+   * 启动某个房间的所有成员副本
+   * 只启动当前状态为 stopped/offline 的成员
+   */
+  async startRoomAgents(roomId) {
+    const cfg = this._ensureRoom(roomId).config.read();
+    if (!cfg?.members?.length) return;
+    const results = await Promise.allSettled(
+      cfg.members.map(agentId =>
+        this.spawnReplica(roomId, agentId).catch(err => {
+          logger.warn(`启动房间 ${roomId} 的成员 ${agentId} 失败: ${err.message}`);
+          return { agentId, status: 'failed', reason: err.message };
+        })
+      )
+    );
+    return results.map(r => (r.status === 'fulfilled' ? r.value : { status: 'failed', reason: r.reason }));
+  }
+
+  /**
+   * 停止某个房间的所有成员副本
+   */
+  async stopRoomAgents(roomId) {
+    const cfg = this._ensureRoom(roomId).config.read();
+    if (!cfg?.members?.length) return;
+    await Promise.all(cfg.members.map(agentId =>
+      this.stopReplica(roomId, agentId).catch(() => {})
+    ));
   }
 
   /**
@@ -764,45 +1040,105 @@ export class RoomManager {
   }
 
   /**
-   * 并发把一条群消息转发给所有成员副本的 /observe。
-   * 失败（404 / 连接失败）的副本标 offline，不阻塞其它。
-   * 注：B 阶段副本尚无 /observe 端点（C 阶段加），故会广泛 404——预期内。
-   * @param {string} roomId
-   * @param {string} content - 消息文本
-   * @param {string} from - 发言者（'user' 或成员名）
+   * 改写 content 里的 @<成员> 为指定方向（uid 或 name）。
+   * 候选同时认 id 和 name，按长度降序最长匹配，逐处 @ 替换。
+   * 用户 uid 也参与（用户可能被 @）：user 候选 = { uid, name: userName }。
+   *
+   * @param {string} content
+   * @param {Array<{agentId:string,name?:string}>} membersWithNames - 含 name 的成员列表
+   * @param {object} [user] - { uid, name }，可选（用户也参与改写）
+   * @param {'uid'|'name'} [target='uid'] - 改写方向
+   * @returns {string}
    */
-  async broadcastObserve(roomId, content, from) {
-    const room = this._ensureRoom(roomId);
-    const cfg = room.config.read();
-    if (!cfg || !cfg.members.length) return;
-    // 传带 name 的成员列表，使 @name 同样被 parseMentions 命中
-    const membersWithNames = cfg.members.map(agentId => ({ agentId, name: this._readAgentName(agentId) }));
-    const mentions = RoomManager.parseMentions(content, membersWithNames);
-    await Promise.all(cfg.members.map(async (agentId) => {
-      const m = room.members.get(agentId);
-      if (!m || !m.port) return;
-      try {
-        const resp = await fetch(`http://127.0.0.1:${m.port}/observe`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ from, content, mentions, role: 'chat' }),
-          signal: AbortSignal.timeout(30_000),
-        });
-        if (!resp.ok) {
-          // 副本无 /observe（404）或其它错误 → 标 offline
-          this._markOffline(room, agentId);
+  static rewriteMentions(content, membersWithNames, user, target = 'uid') {
+    if (!content) return content;
+    // 候选:{value, to} —— value 是待匹配的 id/name，to 是改写目标值
+    const candidates = [];
+    const seenVals = new Set();
+    const push = (value, to) => {
+      if (!value || seenVals.has(value)) return;
+      seenVals.add(value); candidates.push({ value, to });
+    };
+    for (const m of (membersWithNames || [])) {
+      if (!m?.agentId) continue;
+      const name = m.name || m.agentId;
+      const to = target === 'uid' ? m.agentId : name;
+      push(m.agentId, to);
+      push(name, to);
+    }
+    if (user?.uid) {
+      const uname = user.name || user.uid;
+      const to = target === 'uid' ? user.uid : uname;
+      push(user.uid, to);
+      push(uname, to);
+    }
+    // 最长匹配优先
+    candidates.sort((a, b) => b.value.length - a.value.length);
+    let result = '';
+    let i = 0;
+    while (i < content.length) {
+      if (content[i] === '@') {
+        const after = content.slice(i + 1);
+        let hit = null;
+        for (const c of candidates) {
+          if (after.startsWith(c.value)) { hit = c; break; }
         }
-      } catch (err) {
-        // 连接失败 → 标 offline
-        this._markOffline(room, agentId);
+        if (hit) {
+          result += `@${hit.to}`;
+          i += 1 + hit.value.length;
+          continue;
+        }
       }
-    }));
+      result += content[i];
+      i++;
+    }
+    return result;
   }
 
-  _markOffline(room, agentId) {
-    const m = room.members.get(agentId);
-    if (!m) return;
-    room.members.set(agentId, { ...m, status: MEMBER_STATUS.OFFLINE });
+  /**
+   * 读取房间成员（含 name）+ 用户身份，供改写工具用。
+   * @param {string} roomId
+   * @returns {{membersWithNames: Array, user: {uid, name}}}
+   */
+  _rosterForRewrite(roomId) {
+    const room = this._ensureRoom(roomId);
+    const cfg = room.config.read();
+    const membersWithNames = (cfg?.members || []).map(agentId => ({ agentId, name: this._readAgentName(agentId) }));
+    const gcfg = loadGatewayConfig();
+    const user = { uid: gcfg.userUid || 'default_userid', name: gcfg.userName || 'user' };
+    return { membersWithNames, user };
+  }
+
+  /** uid → 显示名（成员优先 name，回退 agentId；用户返回 userName）。失败回退 uid 本身 */
+  _speakerName(uid, membersWithNames, user) {
+    if (user && uid === user.uid) return user.name || uid;
+    for (const m of (membersWithNames || [])) {
+      if (m.agentId === uid) return m.name || m.agentId;
+    }
+    return uid;
+  }
+
+  /**
+   * 把落盘的 uid 版消息渲染成发送给消费方（前端/agent）的 name 版。
+   * - speaker（uid）→ name
+   * - content 里 @uid → @name
+   * - 附带 mentions（uid 列表，基于原文 uid 解析）
+   * @param {object} msg - history 记录（speaker/content 为 uid 版）
+   * @param {Array<{agentId,name}>} membersWithNames
+   * @param {{uid,name}} user
+   * @param {boolean} [withMentions=true] - 是否附带 mentions 字段
+   * @returns {object} 渲染后的消息
+   */
+  _renderMessageForSend(msg, membersWithNames, user, withMentions = true) {
+    const out = {
+      ...msg,
+      speaker: this._speakerName(msg.speaker, membersWithNames, user),
+      content: RoomManager.rewriteMentions(msg.content, membersWithNames, user, 'name'),
+    };
+    if (withMentions) {
+      out.mentions = RoomManager.parseMentions(msg.content, membersWithNames);
+    }
+    return out;
   }
 
   /**
@@ -839,10 +1175,11 @@ export class RoomManager {
       } else {
         reason = 'no-port';
       }
-      // 3) 兜底：副本未确认清理 → 直接清记忆本体 context.json(写 []) + 删 tool-results（问题2）
-      //    记忆本体即 context.json(message_manager._save 写它)，清空语义对齐 mm.clear()。
+      // 3) 兜底：副本未确认清理 → 直接清记忆本体。v3 记忆目录 = chat/<agentId>/<rid>/（context+tool-results）。
+      //    旧 rooms/<rid>/data/<agentId>/ 已废；此处整目录删（context/tool-results 一起）。
       if (!ok) {
-        const dataDir = path.join(this.roomsDir, roomId, 'data', agentId);
+        const chatRoot = this.chatRoot;
+        const dataDir = path.join(chatRoot, agentId, roomId);
         const ctxFile = path.join(dataDir, 'context.json');
         try {
           if (fs.existsSync(ctxFile)) {

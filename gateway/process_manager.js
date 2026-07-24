@@ -11,6 +11,8 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { createLogger } from '../shared/logger.js';
 import { probePort, findPidFromPort as probe_findPidFromPort, waitForReady as probe_waitForReady, httpShutdown as probe_httpShutdown, waitForPortFree as probe_waitForPortFree, PROBE_INTERVAL, STOP_PROBE_INTERVAL } from '../shared/agent_probe.js';
+import { connectAgentEvents, disconnectAgentEvents } from './agent_events.js';
+import { handlePrivateAgentEvent } from './private_room_stream.js';
 
 const logger = createLogger('process-manager', 'gateway.log');
 
@@ -26,6 +28,9 @@ export class ProcessManager {
     // agents: Map<agentId, { port, pid, status, config }>
     this.agents = new Map();
     this.agentsDir = path.join(process.cwd(), 'agents');
+    // v3：privateRoomHistory 由 gateway/index.js 注入，供 _onAgentEvent 路由私聊房事件落 history。
+    this.privateRoomHistory = null;
+    this.chatDir = null;
   }
 
   /**
@@ -150,8 +155,11 @@ export class ProcessManager {
       return true;
     }
 
+    // 进程不存活（崩溃 / 已 stop / 异常退出）：清状态 + 断 /events 重连器，
+    // 否则 connectAgentEvents 的 5s 重连会针对已死端口死循环刷日志。
     agent.status = 'stopped';
     agent.pid = null;
+    disconnectAgentEvents(id);
     return false;
   }
 
@@ -208,13 +216,16 @@ export class ProcessManager {
     }
 
     const entryFile = path.join(this.agentsDir, id, 'index.js');
+    // 私聊 chat 实例 data 目录：根级 chat/<agentId>/data（与 rooms/<roomId>/ 对称）。
+    //   agent 进程经 ELF_DATA_DIR env 读用；阶段二一进程一实例。老 agents/<id>/data 由 start.js 首启迁移。
+    const chatDataDir = path.join(process.cwd(), 'chat', id, 'data');
 
     try {
       const child = spawn(process.execPath, [entryFile], {
         cwd: process.cwd(),
         detached: true,
         stdio: 'ignore',
-        env: { ...process.env }
+        env: { ...process.env, ELF_GATEWAY_URL: this._gatewayUrl || '', ELF_DATA_DIR: chatDataDir }
       });
       child.unref();
 
@@ -236,6 +247,13 @@ export class ProcessManager {
         } else {
           logger.warn(`Agent ${id} 启动后探活超时，状态可能不准确`);
         }
+      }
+
+      // 建立到 Agent /events 的长连接（后台压缩完成等异步事件通道）
+      if (agent.status === 'running') {
+        agent._eventsConn = connectAgentEvents(id, agent.port, (event, data) => {
+          this._onAgentEvent(id, event, data);
+        });
       }
 
       return { agentId: id, status: agent.status, pid: agent.pid };
@@ -298,6 +316,8 @@ export class ProcessManager {
     }
 
     logger.info(`Agent ${id} 已停止`);
+    // 断开 events 长连接
+    disconnectAgentEvents(id);
     return { agentId: id, status: 'stopped' };
   }
 
@@ -360,6 +380,20 @@ export class ProcessManager {
   getAgentStatus(id) {
     const agent = this.agents.get(id);
     return agent ? agent.status : null;
+  }
+
+  /**
+   * 收到 Agent /events 通道的事件（v3）。
+   * 私聊房事件（data._roomId 以 chat- 开头）→ private_room_stream 转发到常驻 /rooms/chat-<id>/subscribe SSE。
+   * 其余（无 _roomId 的群聊异步事件，如 compact）无前端订阅者消费，仅记日志。
+   */
+  _onAgentEvent(agentId, event, data) {
+    logger.info(`[events] _onAgentEvent: agentId=${agentId} event=${event}`);
+    if (data && typeof data === 'object' && typeof data._roomId === 'string' && data._roomId.startsWith('chat-')) {
+      handlePrivateAgentEvent(event, data, this.privateRoomHistory || null);
+      return;
+    }
+    // 群聊异步事件（compact 等）：内部压缩不外露，前端无订阅者，忽略。
   }
 
   // ─── 私有方法 ───────────────────────────────────────────

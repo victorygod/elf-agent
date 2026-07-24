@@ -8,7 +8,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { MessageManager } from '../agents/elf-001/message_manager.js';
-import { MockModel } from '../shared/agent/mock_model.js';
+import { MockModel } from '../engine/mock_model.js';
 
 function createMockConfig(values = {}) {
   return { get: (key) => values[key] };

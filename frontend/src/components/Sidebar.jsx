@@ -328,7 +328,7 @@ export default function Sidebar({ onSelect }) {
                 agentId={agent.agentId}
                 avatar={agent.avatar}
                 bgColor="#07c160"
-                fallback={(agent.name || agent.agentId).charAt(0).toUpperCase()}
+                fallback={(agent.name || agent.agentId || 'A').charAt(0).toUpperCase()}
               />
             </div>
             <div className={styles.info}>

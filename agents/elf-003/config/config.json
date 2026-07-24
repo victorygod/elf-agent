@@ -19,9 +19,9 @@
   },
   "compactPrompt": "总结至今的对话内容",
   "compactSystemPrompt": "",
-  "memoryTokenLimit": 1000,
-  "maxIterations": 0,
   "compactMode": "async",
+  "memoryTokenLimit": 10000,
+  "maxIterations": 0,
   "messageManagerClass": "message_manager",
   "tools": [
     "Read",

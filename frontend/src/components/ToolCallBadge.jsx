@@ -12,6 +12,8 @@ export default function ToolCallBadge({ toolCall }) {
     statusClass = styles.success;
   } else if (status === 'error') {
     statusClass = styles.error;
+  } else if (status === 'canceled') {
+    statusClass = styles.canceled;
   }
 
   return (
@@ -19,6 +21,7 @@ export default function ToolCallBadge({ toolCall }) {
       <div className={styles.header}>
         <span className={styles.name}>[工具] {name}</span>
         {status === 'error' && <span className={styles.errorLabel}>✕ 失败</span>}
+        {status === 'canceled' && <span className={styles.canceledLabel}>⊘ 已取消</span>}
         {status === 'success' && <span className={styles.successDot} title="执行成功" />}
         {status === 'executing' && <span className={styles.executingLabel}>● 执行中</span>}
       </div>

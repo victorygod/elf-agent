@@ -385,11 +385,12 @@ describe('RoomConfig', () => {
 // ============================================================
 
 describe('RoomManager', () => {
-  let tmpDir, roomsDir, agentsDir;
+  let tmpDir, roomsDir, chatDir, agentsDir;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-rm-'));
     roomsDir = path.join(tmpDir, 'rooms');
+    chatDir = path.join(tmpDir, 'chat');
     agentsDir = path.join(tmpDir, 'agents');
     // 造两个假 agent config 目录，让 agentConfigDir 能找到 config.json
     for (const id of ['elf-001', 'elf-002']) {
@@ -582,14 +583,192 @@ describe('RoomManager', () => {
 });
 
 // ============================================================
-// RoomManager.broadcastObserve（mock 副本 http server）
+// RoomBroadcaster.notifyAll（统一 SSE + agent 订阅者通知）
 // ============================================================
 
-describe('RoomManager.broadcastObserve', () => {
-  let tmpDir, roomsDir, agentsDir, mockServers = [];
+describe('RoomBroadcaster agent subscription', () => {
+  it('subscribeAgent 注册 agent 订阅者', () => {
+    const bc = new RoomBroadcaster('r1');
+    bc.subscribeAgent('elf-001', 9001);
+    assert.equal(bc._agentSubscribers.size, 1);
+    assert.equal(bc._agentSubscribers.get('elf-001').port, 9001);
+  });
+
+  it('unsubscribeAgent 移除 agent 订阅者', () => {
+    const bc = new RoomBroadcaster('r1');
+    bc.subscribeAgent('elf-001', 9001);
+    bc.unsubscribeAgent('elf-001');
+    assert.equal(bc._agentSubscribers.size, 0);
+  });
+
+  it('notifyAll 同时发送给 SSE 和 agent 订阅者（SSE=name 版, observe from=uid）', async () => {
+    const bc = new RoomBroadcaster('r1');
+    // SSE 订阅者
+    let sseChunks = [];
+    const res = mockRes();
+    const origWrite = res.write.bind(res);
+    res.write = (chunk) => { sseChunks.push(chunk); return origWrite(chunk); };
+    bc.subscribeSSE(res, { members: [], messages: [] });
+
+    // agent 订阅者（起 mock http server）
+    let agentReceived = null;
+    const srv = http.createServer((req, res2) => {
+      if (req.url === '/observe' && req.method === 'POST') {
+        let body = '';
+        req.on('data', c => body += c);
+        req.on('end', () => {
+          agentReceived = JSON.parse(body);
+          res2.writeHead(200, { 'Content-Type': 'application/json' });
+          res2.end(JSON.stringify({ ack: true }));
+        });
+      } else {
+        res2.writeHead(404); res2.end();
+      }
+    });
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    const agentPort = srv.address().port;
+    bc.subscribeAgent('elf-001', agentPort);
+
+    bc.notifyAll('speak', {
+      speakerUid: 'default_userid', speakerName: 'wolfgod',
+      contentNames: '你好 elf-001', ts: '2025-01-01T00:00:00Z', id: 'rmsg_1', seq: 5, mentions: ['elf-001'],
+    });
+
+    // 等 agent POST 完成
+    await new Promise(r => setTimeout(r, 100));
+
+    // SSE 收到：speaker=name, speakerUid=uid, content=name 版
+    assert.ok(sseChunks.length > 0);
+    const sseChunk = sseChunks.find(c => c.includes('你好 elf-001'));
+    assert.ok(sseChunk);
+    const sseJson = JSON.parse(sseChunk.slice(sseChunk.indexOf('data: ') + 6).trim());
+    assert.equal(sseJson.speaker, 'wolfgod');
+    assert.equal(sseJson.speakerUid, 'default_userid');
+    assert.equal(sseJson.content, '你好 elf-001');
+
+    // agent 收到：from=uid（自消息过滤用 uid），content=name 版
+    assert.ok(agentReceived);
+    assert.equal(agentReceived.from, 'default_userid');
+    assert.equal(agentReceived.content, '你好 elf-001');
+    assert.deepEqual(agentReceived.mentions, ['elf-001']);
+    assert.equal(agentReceived.seq, 5);
+
+    await new Promise(r => srv.close(r));
+    bc.removeAll();
+  });
+
+  it('notifyAll agent POST 失败触发 onAgentOffline', async () => {
+    const offlineCalls = [];
+    const bc = new RoomBroadcaster('r1', {
+      onAgentOffline: (agentId) => offlineCalls.push(agentId),
+    });
+    bc.subscribeSSE(mockRes(), { members: [], messages: [] });
+
+    // 注册两个 agent：一个好端口，一个空闲端口（POST 失败）
+    const srv = http.createServer((req, res2) => {
+      if (req.url === '/observe') { res2.writeHead(200); res2.end(JSON.stringify({ ack: true })); }
+      else { res2.writeHead(404); res2.end(); }
+    });
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    const goodPort = srv.address().port;
+    bc.subscribeAgent('elf-001', goodPort);
+
+    const freePort = await allocPort();
+    bc.subscribeAgent('elf-002', freePort);
+
+    bc.notifyAll('speak', {
+      speakerUid: 'default_userid', speakerName: 'user',
+      contentNames: 'hi', ts: '2025-01-01T00:00:00Z', id: 'rmsg_2', seq: 1, mentions: [],
+    });
+
+    await new Promise(r => setTimeout(r, 200));
+
+    // elf-002 连接失败 → offline 回调
+    assert.ok(offlineCalls.includes('elf-002'));
+    // elf-001 正常 → 不触发
+    assert.ok(!offlineCalls.includes('elf-001'));
+
+    await new Promise(r => srv.close(r));
+    bc.removeAll();
+  });
+
+  it('notifyAll agent POST 404 也触发 onAgentOffline', async () => {
+    const offlineCalls = [];
+    const bc = new RoomBroadcaster('r1', {
+      onAgentOffline: (agentId) => offlineCalls.push(agentId),
+    });
+    bc.subscribeSSE(mockRes(), { members: [], messages: [] });
+
+    const srv = http.createServer((req, res2) => {
+      res2.writeHead(404); res2.end();
+    });
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    bc.subscribeAgent('elf-001', srv.address().port);
+
+    bc.notifyAll('speak', {
+      speakerUid: 'default_userid', speakerName: 'user',
+      contentNames: 'hi', ts: '2025-01-01T00:00:00Z', id: 'rmsg_3', seq: 1, mentions: [],
+    });
+
+    await new Promise(r => setTimeout(r, 100));
+    assert.ok(offlineCalls.includes('elf-001'));
+
+    await new Promise(r => srv.close(r));
+    bc.removeAll();
+  });
+
+  it('removeAll 清空 SSE 和 agent 订阅者', () => {
+    const bc = new RoomBroadcaster('r1');
+    bc.subscribeSSE(mockRes(), { members: [], messages: [] });
+    bc.subscribeAgent('elf-001', 9001);
+    bc.removeAll();
+    assert.equal(bc._sseSubscribers.length, 0);
+    assert.equal(bc._agentSubscribers.size, 0);
+  });
+});
+
+describe('parseMentions', () => {
+  it('解析消息里 @成员名', () => {
+    const m = RoomManager.parseMentions('你好 @elf-001 看', ['elf-001', 'elf-002']);
+    assert.deepEqual(m, ['elf-001']);
+    const none = RoomManager.parseMentions('你好', ['elf-001']);
+    assert.deepEqual(none, []);
+  });
+
+  it('最长匹配: elf 与 elf-001 同存,@elf-001 只匹配 elf-001 不误匹配 elf', () => {
+    const m = RoomManager.parseMentions('喂 @elf-001 你好', ['elf', 'elf-001']);
+    assert.deepEqual(m, ['elf-001']);
+    const m2 = RoomManager.parseMentions('喂 @elf 你好', ['elf', 'elf-001']);
+    assert.deepEqual(m2, ['elf']);
+  });
+
+  it('多个@/去重', () => {
+    const m = RoomManager.parseMentions('@elf-001 和 @elf-002', ['elf-001', 'elf-002']);
+    assert.deepEqual(m.sort(), ['elf-001', 'elf-002']);
+    const dup = RoomManager.parseMentions('@elf-001 @elf-001', ['elf-001']);
+    assert.deepEqual(dup, ['elf-001']);
+  });
+
+  it('@name 同样命中且归一到 agentId', () => {
+    const members = [{ agentId: 'elf-001', name: 'Alice' }, { agentId: 'elf-003', name: 'Star' }];
+    assert.deepEqual(RoomManager.parseMentions('@Star 你好', members), ['elf-003']);
+    assert.deepEqual(RoomManager.parseMentions('@elf-003 你好', members), ['elf-003']);
+    assert.deepEqual(RoomManager.parseMentions('@Alice 和 @elf-003', members).sort(), ['elf-001', 'elf-003']);
+    // name 与 id 重叠时不重复
+    const same = [{ agentId: 'elf-001', name: 'elf-001' }];
+    assert.deepEqual(RoomManager.parseMentions('@elf-001 hi', same), ['elf-001']);
+  });
+});
+
+// ============================================================
+// RoomManager.processRoomMessage（统一 SSE + agent 通知）
+// ============================================================
+
+describe('RoomManager.processRoomMessage', () => {
+  let tmpDir, roomsDir, chatDir, agentsDir;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-bo-'));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-prm-'));
     roomsDir = path.join(tmpDir, 'rooms');
     agentsDir = path.join(tmpDir, 'agents');
     fs.mkdirSync(agentsDir, { recursive: true });
@@ -600,33 +779,31 @@ describe('RoomManager.broadcastObserve', () => {
         agentId: id, name: id, port: 0, provider: 'mock', systemPrompt: 't', tools: [],
       }));
     }
-    mockServers = [];
   });
 
-  afterEach(async () => {
-    for (const s of mockServers) { try { await new Promise(r => s.close(r)); } catch (e) {} }
+  afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  /** 起一个 mock 副本 http server，observeStatus 决定 /observe 行为 */
-  function startMockReplica(observeStatus = 200) {
-    const srv = http.createServer((req, res) => {
-      if (req.url === '/status') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', agentId: 'mock', pid: process.pid }));
-      } else if (req.url === '/observe' && req.method === 'POST') {
-        let body = '';
-        req.on('data', (c) => body += c);
-        req.on('end', () => {
-          res.writeHead(observeStatus, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ack: true }));
-          srv._lastObserve = body; // 捕获供断言
-        });
-      } else {
-        res.writeHead(404); res.end();
-      }
-    });
+  /** 起一个 mock 副本 http server */
+  function startMockReplica() {
     return new Promise((resolve) => {
+      const srv = http.createServer((req, res) => {
+        if (req.url === '/observe' && req.method === 'POST') {
+          let body = '';
+          req.on('data', (c) => body += c);
+          req.on('end', () => {
+            srv._lastObserve = body;
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ack: true }));
+          });
+        } else if (req.url === '/status') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ok' }));
+        } else {
+          res.writeHead(404); res.end();
+        }
+      });
       srv.listen(0, '127.0.0.1', () => {
         srv._port = srv.address().port;
         resolve(srv);
@@ -634,93 +811,57 @@ describe('RoomManager.broadcastObserve', () => {
     });
   }
 
-  it('parseMentions 解析消息里 @成员名', () => {
-    const m = RoomManager.parseMentions('你好 @elf-001 看', ['elf-001', 'elf-002']);
-    assert.deepEqual(m, ['elf-001']);
-    const none = RoomManager.parseMentions('你好', ['elf-001']);
-    assert.deepEqual(none, []);
-  });
-
-  it('parseMentions 最长匹配: elf 与 elf-001 同存,@elf-001 只匹配 elf-001 不误匹配 elf', () => {
-    const m = RoomManager.parseMentions('喂 @elf-001 你好', ['elf', 'elf-001']);
-    assert.deepEqual(m, ['elf-001']);
-    const m2 = RoomManager.parseMentions('喂 @elf 你好', ['elf', 'elf-001']);
-    assert.deepEqual(m2, ['elf']);
-  });
-
-  it('parseMentions 多个@/去重', () => {
-    const m = RoomManager.parseMentions('@elf-001 和 @elf-002', ['elf-001', 'elf-002']);
-    assert.deepEqual(m.sort(), ['elf-001', 'elf-002']);
-    const dup = RoomManager.parseMentions('@elf-001 @elf-001', ['elf-001']);
-    assert.deepEqual(dup, ['elf-001']);
-  });
-
-  it('parseMentions @name 同样命中且归一到 agentId', () => {
-    const members = [{ agentId: 'elf-001', name: 'Alice' }, { agentId: 'elf-003', name: 'Star' }];
-    assert.deepEqual(RoomManager.parseMentions('@Star 你好', members), ['elf-003']);
-    assert.deepEqual(RoomManager.parseMentions('@elf-003 你好', members), ['elf-003']);
-    assert.deepEqual(RoomManager.parseMentions('@Alice 和 @elf-003', members).sort(), ['elf-001', 'elf-003']);
-    // name 与 id 重叠时不重复
-    const same = [{ agentId: 'elf-001', name: 'elf-001' }];
-    assert.deepEqual(RoomManager.parseMentions('@elf-001 hi', same), ['elf-001']);
-  });
-
-  it('broadcastObserve 并发给所有成员,200 的保持 running', async () => {
-    const replica1 = await startMockReplica(200);
-    const replica2 = await startMockReplica(200);
-    mockServers = [replica1, replica2];
+  it('processRoomMessage 写历史 + 通知 SSE 和 agent', async () => {
     const mgr = new RoomManager(roomsDir, 8080, {
       spawnFn: () => ({ _fakeReady: true, pid: 1 }),
       agentConfigDir: (id) => path.join(agentsDir, id, 'config'),
     });
     const r = await mgr.createRoom('群', ['elf-001', 'elf-002']);
-    // 把成员端口指向 mock 副本
+
+    // 把 agent 订阅者换成 mock http server
     const room = mgr.rooms.get(r.roomId);
-    room.members.set('elf-001', { port: replica1._port, pid: 1, status: MEMBER_STATUS.RUNNING });
-    room.members.set('elf-002', { port: replica2._port, pid: 2, status: MEMBER_STATUS.RUNNING });
+    const srv1 = await startMockReplica();
+    const srv2 = await startMockReplica();
+    room.members.set('elf-001', { port: srv1._port, pid: 1, status: MEMBER_STATUS.RUNNING });
+    room.members.set('elf-002', { port: srv2._port, pid: 2, status: MEMBER_STATUS.RUNNING });
+    room.broadcaster.subscribeAgent('elf-001', srv1._port);
+    room.broadcaster.subscribeAgent('elf-002', srv2._port);
+    // swap out res in SSE subscribers to capture chunks
+    let sseChunks = [];
+    const fakeRes = mockRes();
+    fakeRes.write = (chunk) => { sseChunks.push(chunk); return true; };
+    room.broadcaster._sseSubscribers = [{ res: fakeRes }];
 
-    await mgr.broadcastObserve(r.roomId, '你好 @elf-001', 'user');
+    const rec = await mgr.processRoomMessage(r.roomId, 'default_userid', '你好 @elf-001');
 
-    // 两个副本都收到 observe（elf-002 未被@也收到,用于累积上下文）
-    assert.ok(replica1._lastObserve);
-    assert.ok(replica2._lastObserve);
-    const body1 = JSON.parse(replica1._lastObserve);
+    // 等 agent POST 完成
+    await new Promise(r2 => setTimeout(r2, 100));
+
+    // 写历史（落盘 uid 版：speaker=uid, content @=uid）
+    const history = mgr.getHistory(r.roomId);
+    const msgs = history.getRecent(10);
+    assert.equal(msgs.messages.length, 1);
+    assert.equal(msgs.messages[0].speaker, 'default_userid', '落盘 speaker=uid');
+    assert.equal(msgs.messages[0].content, '你好 @elf-001', '落盘 content @=uid');
+    assert.equal(typeof rec.seq, 'number');
+
+    // SSE 收到 name 版（speaker=name=srv 用 user, 因 gateway.json 默认 userName=user）
+    // 这里只验证 content 进了 SSE
+    assert.ok(sseChunks.some(c => c.includes('你好')));
+
+    // agent 收到：from=uid, content=name 版（agent name=id 故不变）
+    assert.ok(srv1._lastObserve);
+    const body1 = JSON.parse(srv1._lastObserve);
+    assert.equal(body1.from, 'default_userid');
+    assert.equal(body1.content, '你好 @elf-001');
     assert.deepEqual(body1.mentions, ['elf-001']);
-    assert.equal(body1.from, 'user');
-    // 收到的成员保持 running
-    assert.equal(room.members.get('elf-001').status, MEMBER_STATUS.RUNNING);
-    assert.equal(room.members.get('elf-002').status, MEMBER_STATUS.RUNNING);
-  });
+    assert.equal(body1.seq, rec.seq);
 
-  it('broadcastObserve 404 的成员标 offline', async () => {
-    const ok = await startMockReplica(200);
-    const bad = await startMockReplica(404);
-    mockServers = [ok, bad];
-    const mgr = new RoomManager(roomsDir, 8080, {
-      spawnFn: () => ({ _fakeReady: true, pid: 1 }),
-      agentConfigDir: (id) => path.join(agentsDir, id, 'config'),
-    });
-    const r = await mgr.createRoom('群', ['elf-001', 'elf-002']);
-    const room = mgr.rooms.get(r.roomId);
-    room.members.set('elf-001', { port: ok._port, pid: 1, status: MEMBER_STATUS.RUNNING });
-    room.members.set('elf-002', { port: bad._port, pid: 2, status: MEMBER_STATUS.RUNNING });
+    assert.ok(srv2._lastObserve);
+    const body2 = JSON.parse(srv2._lastObserve);
+    assert.deepEqual(body2.mentions, ['elf-001']);
+    assert.equal(body2.seq, rec.seq);
 
-    await mgr.broadcastObserve(r.roomId, 'hi', 'user');
-    assert.equal(room.members.get('elf-001').status, MEMBER_STATUS.RUNNING);
-    assert.equal(room.members.get('elf-002').status, MEMBER_STATUS.OFFLINE);
-  });
-
-  it('broadcastObserve 连不上的成员标 offline', async () => {
-    const mgr = new RoomManager(roomsDir, 8080, {
-      spawnFn: () => ({ _fakeReady: true, pid: 1 }),
-      agentConfigDir: (id) => path.join(agentsDir, id, 'config'),
-    });
-    const r = await mgr.createRoom('群', ['elf-001']);
-    const room = mgr.rooms.get(r.roomId);
-    // 指向一个空闲端口（连接失败）
-    const free = await allocPort();
-    room.members.set('elf-001', { port: free, pid: 1, status: MEMBER_STATUS.RUNNING });
-    await mgr.broadcastObserve(r.roomId, 'hi', 'user');
-    assert.equal(room.members.get('elf-001').status, MEMBER_STATUS.OFFLINE);
+    await Promise.all([srv1, srv2].map(s => new Promise(r2 => s.close(r2))));
   });
 });

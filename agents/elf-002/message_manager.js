@@ -16,7 +16,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { MessageManager as BaseMessageManager } from '../../shared/agent/message_manager.js';
+import { MessageManager as BaseMessageManager, COMPACT_MIN_SAVINGS } from '../../engine/message_manager.js';
 import { createLogger } from '../../shared/logger.js';
 import { countTokens, countMessageTokens } from '../../shared/tokenizer.js';
 
@@ -72,7 +72,7 @@ export class MessageManager extends BaseMessageManager {
     this._compactFailCount = 0;
     this._compactDisabled = false;
 
-    // 群聊动态 roster prefix（RoomAgent._refreshRoster 写入,发往 LLM 时拼到最近一条 user 开头）。
+    // 群聊动态 roster prefix（RoomMiddleware._refreshRoster 写入,发往 LLM 时拼到最近一条 user 开头）。
     this.roomRosterPrefix = '';
   }
 
@@ -130,10 +130,14 @@ export class MessageManager extends BaseMessageManager {
   getMessagesForLLM() {
     this._enforceBudgetWindow();
     const systemMsg = { role: 'system', content: this.systemPrompt };
-    const msgs = this.messages.map(m => {
-      const { isMeta, metaTag, ...rest } = m;
-      return rest;
-    });
+    // skill_listing 改为临注入：旧持久化清单不再送 LLM（对齐 CC 每轮重算 attachment）。
+    const msgs = this.messages
+      .filter(m => m.metaTag !== 'skill_listing')
+      .map(m => {
+        // strip id、isMeta、metaTag — LLM API 不接受额外字段（对齐基类 getMessagesForLLM）
+        const { id, isMeta, metaTag, ...rest } = m;
+        return rest;
+      });
     // 群聊动态 roster prefix：拼到最近一条 user 开头（不发写入记忆）。私聊 roomRosterPrefix 空串不影响。
     const roster = this.roomRosterPrefix || '';
     if (roster) {
@@ -144,21 +148,27 @@ export class MessageManager extends BaseMessageManager {
         }
       }
     }
-    return [systemMsg, ...msgs];
+    // skill 清单临注入到最近一条 user 之前（与基类 getMessagesForLLM 一致）。
+    const out = this._injectTransientListing(msgs);
+    return [systemMsg, ...out];
   }
 
   /**
    * override：纯计算，不调 getMessagesForLLM()，无 budget/roster 副作用
    * 直接对 this.messages + systemPrompt 做全量 JSON 序列化计数，
    * 确保 role、tool_call_id、JSON 结构开销等全部参与 token 估算。
+   * 与 getMessagesForLLM 口径对齐：过滤旧 skill_listing 持久化消息 + 临注入本轮 listing。
    */
   estimateTokens() {
     const systemMsg = { role: 'system', content: this.systemPrompt };
-    const msgs = this.messages.map(m => {
-      const { id, isMeta, metaTag, ...rest } = m;
-      return rest;
-    });
-    const allMessages = [systemMsg, ...msgs];
+    const msgs = this.messages
+      .filter(m => m.metaTag !== 'skill_listing')
+      .map(m => {
+        const { id, isMeta, metaTag, ...rest } = m;
+        return rest;
+      });
+    const out = this._injectTransientListing(msgs);
+    const allMessages = [systemMsg, ...out];
     return countMessageTokens(allMessages);
   }
 
@@ -307,24 +317,53 @@ export class MessageManager extends BaseMessageManager {
     // 放在断路器检查之前，不受 L4 断路器连坐。每轮 agent loop 顶部经本入口自然带上，无需改 default_agent.js。
     this._microcompactIfNeeded();
 
-    if (this._compactDisabled) return;
+    if (this._compactDisabled) {
+      // 断路器已禁：若有未决压缩任务的气泡（上次失败没 final 收尾），补一个 final error 收尾
+      if (this._pendingCompact) {
+        const c = this._pendingCompact;
+        this._endCompactAbandoned();
+        yield { event: 'compact_error', data: { ...c, error: '记忆压缩已禁用（连续失败）', final: true } };
+      }
+      return;
+    }
     if (this.estimateTokens() <= this.memoryTokenLimit) return;
 
-    const logger = createLogger('message_manager', logFileName);
-    logger.info(`触发记忆压缩: 估算 ${this.estimateTokens()} tokens > 上限 ${this.memoryTokenLimit}`);
+    // 预判：保留最近 1 个 group 后老区 token 是否达到最小可压缩阈值。
+    // 基类 _countCompactableTokens 调用本类的 _groupByAssistantTurn（按 tool_calls 切），
+    // 与基类同源阈值 COMPACT_MIN_SAVINGS。老区不足则压了得不偿失，跳过——不发气泡、不调 LLM。
+    // 天然涵盖单组对话（老区为空 = 0 token）。
+    const compactableTokens = this._countCompactableTokens();
+    if (compactableTokens < COMPACT_MIN_SAVINGS) {
+      const logger = createLogger('message_manager', logFileName);
+      logger.info(`[compact] 老区可压缩 token ${compactableTokens} < ${COMPACT_MIN_SAVINGS}，跳过压缩`);
+      return;
+    }
 
-    yield { event: 'compact_start', data: {} };
+    const logger = createLogger('message_manager', logFileName);
+
+    // 复用基类未决压缩任务封装：首次 attempt=1；上次失败未 final → attempt++（跨轮同气泡重试）
+    const compact = this._beginCompactAttempt();
+    logger.info(`[compact] 触发压缩 ${compact.compactId} (attempt ${compact.attempt}): 估算 ${this.estimateTokens()} tokens > 上限 ${this.memoryTokenLimit}`);
+    yield { event: 'compact_start', data: compact };
 
     try {
       // 1. 切 group（assistant 带 tool_calls 起新 group）
       const groups = this._groupByAssistantTurn();
       const o = groups.length;
-      if (o < 2) { this._recordCompactFailure(); return; }  // too_few_groups
+      if (o < 2) {
+        const f = this._fail(compact, '记忆压缩失败：无可压缩内容（group 不足）');
+        yield { event: 'compact_error', data: { ...compact, ...f } };
+        return;
+      }
 
       // 2. 固定保留最近 1 个 group（s=1），其余送摘要
       const s = 1;
       const summaryCount = o - s;
-      if (summaryCount < 1) { this._recordCompactFailure(); return; }  // 摘要区空 → 没东西可摘 → 断路器
+      if (summaryCount < 1) {
+        const f = this._fail(compact, '记忆压缩失败：无可压缩内容');
+        yield { event: 'compact_error', data: { ...compact, ...f } };
+        return;
+      }
 
       const summaryGroups = groups.slice(0, summaryCount);     // 老（送摘要，含老摘要 isCompactSummary，不排除）
       const preserveGroups = groups.slice(summaryCount);       // 近期（保留 1 个）
@@ -345,7 +384,8 @@ export class MessageManager extends BaseMessageManager {
       // 5. 解析：<analysis> 删除，<summary> 提取
       const summary = this._parseSummaryResponse(response);
       if (!summary) {
-        this._recordCompactFailure();
+        const f = this._fail(compact, '记忆压缩失败：响应为空或无 <summary>');
+        yield { event: 'compact_error', data: { ...compact, ...f } };
         return;
       }
 
@@ -362,21 +402,37 @@ export class MessageManager extends BaseMessageManager {
       this._save();
       this._cleanupToolResults(this._referencedToolCallIds());
 
-      // 压缩成功，重置断路器
+      // 压缩成功，重置断路器 + 清未决任务
       this._compactFailCount = 0;
+      this._endCompactSuccess();
+      logger.info(`[compact] 压缩成功 ${compact.compactId} (attempt ${compact.attempt}): 压后 ${this.estimateTokens()} tokens`);
 
-      yield { event: 'compact', data: { tokenEstimate: this.estimateTokens() } };
+      yield { event: 'compact', data: { tokenEstimate: this.estimateTokens(), compactId: compact.compactId } };
 
       // 8. 对齐 CC：压一次即返回，不本轮递归。仍超阈值靠下一轮 agent loop 顶部再触发
       if (this.estimateTokens() > this.memoryTokenLimit) {
         logger.info(`压缩后仍超阈值 ${this.estimateTokens()} > ${this.memoryTokenLimit}，留待下一轮 loop 顶部再压`);
       }
     } catch (err) {
-      // 异常不由这里 catch 负全部责任：AbortError 抛给 agent；其他错误计断路器
+      // AbortError 抛给 agent，不清状态、不收尾（收尾归 default_agent 的 _abortCompactBubble）
       if (err?.name === 'AbortError') throw err;
       logger.error(`记忆压缩失败: ${err.message}`);
-      this._recordCompactFailure();
+      const f = this._fail(compact, err.message || '记忆压缩失败');
+      yield { event: 'compact_error', data: { ...compact, ...f } };
     }
+  }
+
+  /**
+   * 压缩失败收尾：记断路器 + 算 final + 按需清未决任务。返回 { error, final } 供
+   * 调用方 yield compact_error 用（普通方法不能 yield）。
+   * - final=true（断路器到阈值）→ 彻底放弃，清 _pendingCompact（下轮不再重试同气泡）
+   * - final=false → 保留 _pendingCompact，下轮 _beginCompactAttempt 走 attempt++（同气泡重试）
+   */
+  _fail(compact, msg) {
+    this._recordCompactFailure();
+    const final = this._compactDisabled;
+    if (final) this._endCompactAbandoned();
+    return { error: msg, final: final || undefined };
   }
 
   /**

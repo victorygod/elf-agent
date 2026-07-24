@@ -44,7 +44,10 @@ export default function RewindMenu({ checkpoints, selectedIndex, onSelect, onCon
                   <div
                     key={cp.id}
                     className={`${styles.item} ${i === selectedIndex ? styles.selected : ''}`}
-                    onClick={() => { onSelect(i); onConfirm(); }}
+                    onClick={() => {
+                      onSelect(i);
+                      onConfirm(i);   // 直接把被点的 index 传给 onConfirm，避免依赖尚未生效的 selectedIndex state
+                    }}
                     title={cp.prompt}
                   >
                     <span className={styles.time}>{time}</span>

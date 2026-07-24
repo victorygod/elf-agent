@@ -12,8 +12,6 @@ import { getConfigUI } from './config-ui.js';
 import { readAgentConfig, writeAgentConfig } from './config_store.js';
 import { loadGatewayConfig, saveGatewayConfig } from './config.js';
 import { handleAvatarUpload } from './avatar.js';
-import { subscribeToStream, proxyChat } from './chat_proxy.js';
-import { snapshotBeforeSend, listCheckpoints, latestCheckpointId, rewindTo } from './snapshot.js';
 import { registerRoomRoutes } from './room_routes.js';
 import {
   listSkills, getSkillDetail, deleteSkill, installSkill, browseDirs, skillRoots,
@@ -24,16 +22,17 @@ const logger = createLogger('gateway-server', 'gateway.log');
 /**
  * 创建 Gateway Express 应用
  * @param {ProcessManager} pm - 进程管理器实例
- * @param {ChatHistory} chatHistory - 聊天记录持久化实例
- * @param {object} [roomManager] - 群聊管理器实例（可选，注入 /rooms/* 路由）
+ * @param {object} [roomManager] - 群聊管理器实例（注入 /rooms/* 路由，含私聊 chat-<id>）
+ * @param {object} [opts] - { privateRoomHistory }
  * @returns {express.Application}
  */
-export function createGatewayApp(pm, chatHistory, roomManager = null) {
+export function createGatewayApp(pm, roomManager = null, opts = {}) {
   const app = express();
   app.use(express.json({ limit: '5mb' }));
 
-  // 追踪正在进行的 SSE 流数量（agentId → 计数）
-  const activeStreams = new Map();
+  const privateRoomHistory = opts.privateRoomHistory || null; // v3 私聊房历史（room 模式 ChatHistory）
+  // 私聊房需要调 agent /observe——pm 经 roomManager 持有，或直接 pm 引用。
+  if (roomManager && !roomManager.pm) roomManager.pm = pm;
 
 
   // 辅助：检查 Agent 是否存在
@@ -47,15 +46,10 @@ export function createGatewayApp(pm, chatHistory, roomManager = null) {
 
   // GET /agents — 列出所有 Agent
   app.get('/agents', (req, res) => {
-    const list = pm.listAgents();
-    // 附加 streaming 状态
-    for (const agent of list) {
-      agent.streaming = (activeStreams.get(agent.agentId) || 0) > 0;
-    }
-    res.json(list);
+    res.json(pm.listAgents());
   });
 
-  // GET /available-tools — 列出所有可用工具名（来自 shared/agent/tools/index.js 的 re-export）
+  // GET /available-tools — 列出所有可用工具名（来自 engine/tools/index.js 的 re-export）
   app.get('/available-tools', async (req, res) => {
     try {
       const tools = await getAvailableTools();
@@ -75,9 +69,6 @@ export function createGatewayApp(pm, chatHistory, roomManager = null) {
         await pm.probeAgent(id);
       }
       const list = pm.listAgents();
-      for (const agent of list) {
-        agent.streaming = (activeStreams.get(agent.agentId) || 0) > 0;
-      }
       res.json({
         agents: list,
         discovery: result
@@ -90,9 +81,7 @@ export function createGatewayApp(pm, chatHistory, roomManager = null) {
 
   // GET /agents/:id — 获取单个 Agent 详情
   app.get('/agents/:id', checkAgentExists, (req, res) => {
-    const id = req.params.id;
-    const info = pm.getAgent(id);
-    info.streaming = (activeStreams.get(id) || 0) > 0;
+    const info = pm.getAgent(req.params.id);
     res.json(info);
   });
 
@@ -116,193 +105,8 @@ export function createGatewayApp(pm, chatHistory, roomManager = null) {
     }
   });
 
-  // POST /agents/:id/abort — 中断 Agent 当前请求
-  app.post('/agents/:id/abort', checkAgentExists, async (req, res) => {
-    const id = req.params.id;
-    const status = pm.getAgentStatus(id);
-    const port = pm.getAgentPort(id);
-
-    if (status !== 'running') {
-      return res.status(503).json({ error: 'Agent not running' });
-    }
-
-    try {
-      const abortRes = await fetch(`http://127.0.0.1:${port}/abort`, { method: 'POST' });
-      const data = await abortRes.json();
-      res.json(data);
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // GET /agents/:id/checkpoints — 列出可回退的快照包
-  app.get('/agents/:id/checkpoints', checkAgentExists, (req, res) => {
-    const id = req.params.id;
-    try {
-      const checkpoints = listCheckpoints(pm.agentsDir, id);
-      logger.info(`[GET /checkpoints ${id}] 返回 ${checkpoints.length} 个: ${checkpoints.map((c, i) => `[${i}]${c.id}@${c.createdAt}`).join(' ')}`);
-      res.json({ checkpoints });
-    } catch (err) {
-      logger.error(`列出 checkpoint 失败 (${id}): ${err.message}`);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // POST /agents/:id/rewind — 回退到指定快照包（整文件替换）
-  // body: { checkpointId? } 省略 = 最近一个
-  app.post('/agents/:id/rewind', checkAgentExists, (req, res) => {
-    const id = req.params.id;
-
-    // 0. streaming 守卫：正在回复中拒绝，要求先中断
-    if ((activeStreams.get(id) || 0) > 0) {
-      return res.status(409).json({ error: 'Agent 正在回复中，请先中断（abort）再回退' });
-    }
-
-    const checkpointId = req.body?.checkpointId ?? null;
-    logger.info(`[POST /rewind ${id}] 收到请求 checkpointId=${checkpointId || '(latest)'} activeStreams=${activeStreams.get(id) || 0}`);
-    const result = rewindTo(pm.agentsDir, id, checkpointId);
-    if (!result.ok) {
-      logger.warn(`[POST /rewind ${id}] 失败: ${result.error}`);
-      return res.status(400).json({ error: result.error });
-    }
-
-    // agent 运行中 → 转发 /reload 同步内存；未运行 → 跳过（文件已就绪）
-    const status = pm.getAgentStatus(id);
-    if (status === 'running') {
-      const port = pm.getAgentPort(id);
-      fetch(`http://127.0.0.1:${port}/reload`, { method: 'POST' })
-        .then(r => r.json())
-        .then(() => {
-          logger.info(`rewind 后 reload 成功 (${id})`);
-        })
-        .catch(err => {
-          logger.warn(`rewind 后 reload 失败 (${id}): ${err.message}`);
-        });
-    }
-
-    const remaining = listCheckpoints(pm.agentsDir, id);
-    logger.info(`[POST /rewind ${id}] 返回成功，发往前端的 checkpoints 剩余 ${remaining.length} 个: ${remaining.map((c, i) => `[${i}]${c.id}@${c.createdAt}`).join(' ')}`);
-    res.json({ status: 'ok', restoredPrompt: result.restoredPrompt, checkpoints: remaining });
-  });
-
-  // POST /agents/:id/chat — 与 Agent 对话
-  // Agent 正在回复中时拒绝新消息（同一 agent 不允许并发对话）
-  app.post('/agents/:id/chat', checkAgentExists, (req, res) => {
-    const id = req.params.id;
-    const status = pm.getAgentStatus(id);
-    const port = pm.getAgentPort(id);
-
-    if (status !== 'running') {
-      return res.status(503).json({ error: 'Agent unavailable' });
-    }
-
-    if (!req.body || typeof req.body.message !== 'string') {
-      return res.status(400).json({ error: 'Request body must include "message" field' });
-    }
-
-    // ★ Agent 正在回复中，拒绝新消息
-    if ((activeStreams.get(id) || 0) > 0) {
-      return res.status(422).json({ error: 'Agent 正在回复中，请稍后再试' });
-    }
-
-    // ★ rewind 快照：在写 user 进 jsonl 之前，打一个「说话前」状态快照包
-    try {
-      snapshotBeforeSend(pm.agentsDir, id, req.body.message);
-    } catch (e) {
-      logger.warn(`打 rewind 快照失败 (${id}): ${e.message}`);
-      // 快照失败不阻塞对话
-    }
-
-    // 写 user 消息到 jsonl
-    const msgRecord = chatHistory ? chatHistory.addMessage(id, 'user', req.body.message) : null;
-
-    // 设置 SSE 响应头
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    });
-    res.flushHeaders();
-    if (res.socket) res.socket.setNoDelay(true);
-
-    // 直接代理到 Agent（不经过队列）
-    proxyChat({
-      agentId: id,
-      port,
-      message: req.body.message,
-      res,
-      chatHistory,
-      activeStreams,
-      userMessageRecord: msgRecord,
-    });
-  });
-
-  // GET /agents/:id/subscribe — 重新连接 SSE 流（页面刷新后恢复流式输出）
-  app.get('/agents/:id/subscribe', checkAgentExists, (req, res) => {
-    const id = req.params.id;
-    subscribeToStream(id, res, chatHistory);
-  });
-
-  // GET /agents/:id/history — 获取聊天记录
-  app.get('/agents/:id/history', checkAgentExists, (req, res) => {
-    const id = req.params.id;
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
-    const beforeId = req.query.before || null;
-    const afterId = req.query.afterId || null;
-
-    if (!chatHistory) {
-      return res.json({ messages: [], hasMore: false });
-    }
-
-    try {
-      const result = chatHistory.getRecent(id, limit, beforeId, afterId);
-      res.json(result);
-    } catch (err) {
-      res.status(500).json({ error: `Failed to read history: ${err.message}` });
-    }
-  });
-
-  // DELETE /agents/:id/history — 清空聊天记录
-  app.delete('/agents/:id/history', checkAgentExists, (req, res) => {
-    const id = req.params.id;
-    try {
-      if (chatHistory) {
-        chatHistory.clear(id);
-      }
-      res.json({ status: 'ok' });
-    } catch (err) {
-      res.status(500).json({ error: `Failed to clear history: ${err.message}` });
-    }
-  });
-
-  // DELETE /agents/:id/memory — 清空 Agent 记忆（context.json + 内存）
-  app.delete('/agents/:id/memory', checkAgentExists, async (req, res) => {
-    const id = req.params.id;
-
-    // 通知运行中的 Agent 清空内存中的 messages
-    const status = pm.getAgentStatus(id);
-    if (status === 'running') {
-      const port = pm.getAgentPort(id);
-      try {
-        await fetch(`http://127.0.0.1:${port}/clear`, { method: 'POST' });
-      } catch (err) {
-        logger.warn(`通知 Agent ${id} 清空内存失败（可能尚未就绪）: ${err.message}`);
-      }
-    } else {
-      // Agent 未运行时，直接清空文件即可
-      const contextPath = path.join(pm.agentsDir, id, 'data', 'context.json');
-      try {
-        if (fs.existsSync(contextPath)) {
-          fs.writeFileSync(contextPath, '[]', 'utf-8');
-        }
-      } catch (err) {
-        return res.status(500).json({ error: `Failed to clear memory file: ${err.message}` });
-      }
-    }
-
-    res.json({ status: 'ok' });
-  });
+  // v3：废弃旧私聊 HTTP 路由（/agents/:id/chat|subscribe|abort|rewind|checkpoints|history|sync-history|memory）。
+  //   私聊统一为 Room，全走 /rooms/chat-<id>/*（见 gateway/room_routes.js）。下面仅保留进程管理与配置路由。
 
   // GET /agents/:id/config — 获取 Agent 配置
   app.get('/agents/:id/config', checkAgentExists, (req, res) => {
@@ -446,7 +250,7 @@ export function createGatewayApp(pm, chatHistory, roomManager = null) {
 
   // 群聊路由（/rooms/*，可选注入）
   if (roomManager) {
-    registerRoomRoutes(app, roomManager);
+    registerRoomRoutes(app, roomManager, { pm, privateRoomHistory });
   }
 
   // 全局设置（用户名、用户头像等）
@@ -539,13 +343,14 @@ export function createGatewayApp(pm, chatHistory, roomManager = null) {
 }
 
 /**
- * 获取所有可用工具名（来自 shared/agent/tools/index.js 的 re-export）
+ * 获取所有可用工具名（来自 engine/tools/index.js 的 re-export）
  * 缓存结果，tools/index.js 改动需重启服务
  */
 let _availableToolsCache = null;
 async function getAvailableTools() {
   if (_availableToolsCache) return _availableToolsCache;
-  const toolsPath = path.join(process.cwd(), 'shared', 'agent', 'tools', 'index.js');
+  const toolsPath = path.join(process.cwd(), 'engine', 'tools', 'index.js');
+  if (!fs.existsSync(toolsPath)) return [];
   const mod = await import(pathToFileURL(toolsPath).href);
   _availableToolsCache = Object.keys(mod).sort();
   return _availableToolsCache;

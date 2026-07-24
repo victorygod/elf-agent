@@ -10,16 +10,16 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { LLMModel } from '../shared/agent/llm_model.js';
-import { MockModel } from '../shared/agent/mock_model.js';
+import { LLMModel } from '../engine/llm_model.js';
+import { MockModel } from '../engine/mock_model.js';
 import { createLogger } from '../shared/logger.js';
-import { Config } from '../shared/agent/config_loader.js';
-import { MessageManager } from '../shared/agent/message_manager.js';
-import { Agent } from '../shared/agent/default_agent.js';
-import { ToolRegistry } from '../shared/agent/tools/registry.js';
-import { Read, Write, Edit, Bash, Glob, Grep } from '../shared/agent/tools/index.js';
-import { reset as resetReadState } from '../shared/agent/tools/read_state.js';
-import { __setForceFallback } from '../shared/agent/tools/Grep.js';
+import { Config } from '../engine/config_loader.js';
+import { MessageManager } from '../engine/message_manager.js';
+import { Agent } from '../engine/default_agent.js';
+import { ToolManager } from '../engine/tools/tool_manager.js';
+import { Read, Write, Edit, Bash, Glob, Grep } from '../engine/tools/index.js';
+import { reset as resetReadState } from '../engine/tools/read_state.js';
+import { __setForceFallback } from '../engine/tools/Grep.js';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -119,6 +119,52 @@ describe('LLMModel', () => {
     const body = model._body([], true, null, { temperature: 1.0 });
     assert.equal(body.temperature, 1.0);
   });
+
+  // ===== 重试 3 次（建连/首响应阶段）：5xx 重试、4xx 不重试、AbortError 不重试 =====
+  // mock fetch 返回 SSE 流（模拟一次成功的流式响应）
+  function sseResponse() {
+    const enc = new TextEncoder();
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(enc.encode('data: {"choices":[{"delta":{"content":"嗨"}}]}\n\n'));
+        c.enqueue(enc.encode('data: [DONE]\n\n'));
+        c.close();
+      }
+    });
+    return { ok: true, status: 200, body: stream, text: async () => '', json: async () => ({ choices: [{ message: { content: '嗨' } }] }) };
+  }
+
+  it('chatStream 建连 5xx 应重试，第3次成功后返回聚合 content', async () => {
+    const model = new LLMModel({ base_url: 'https://x.example.com', model: 't' });
+    let calls = 0;
+    const orig = globalThis.fetch;
+    globalThis.fetch = async () => {
+      calls++;
+      if (calls < 3) { const e = new Error('LLM API error: 503 temp'); throw e; }   // 5xx 可重试
+      return sseResponse();
+    };
+    const origSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = (fn) => fn();   // 退避即时（不实际等待）
+    try {
+      const res = await model.chatStream([{ role: 'user', content: 'hi' }], [], { onChunk: () => {} });
+      assert.equal(calls, 3, '前两次 503 应重试，第3次成功 → fetch 共调 3 次');
+      assert.equal(res.content, '嗨', '重试成功后应拿到聚合 content');
+    } finally { globalThis.fetch = orig; globalThis.setTimeout = origSetTimeout; }
+  });
+
+  it('chatStream 4xx 不应重试，立即抛', async () => {
+    const model = new LLMModel({ base_url: 'https://x.example.com', model: 't' });
+    let calls = 0;
+    const orig = globalThis.fetch;
+    // 真实 4xx 形态：fetch 成功返回 {ok:false, status:404}（非 throw）
+    globalThis.fetch = async () => { calls++; return { ok: false, status: 404, text: async () => 'not found' }; };
+    const origSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = (fn) => fn();   // 退避即时（虽然 4xx 不会走到退避）
+    try {
+      await assert.rejects(() => model.chatStream([{ role: 'user', content: 'hi' }], [], { onChunk: () => {} }), /LLM API error: 404/);
+      assert.equal(calls, 1, '4xx 不应重试，fetch 只调 1 次');
+    } finally { globalThis.fetch = orig; globalThis.setTimeout = origSetTimeout; }
+  });
 });
 
 // ========================
@@ -129,20 +175,20 @@ describe('MockModel', () => {
     const model = new MockModel();
     const messages = [{ role: 'user', content: '你好' }];
     let fullContent = '';
-    for await (const chunk of model.chatStream(messages, [])) {
-      if (chunk.type === 'token') {
-        fullContent += chunk.content;
+    await model.chatStream(messages, [], { onChunk: c => {
+      if (c.type === 'token') {
+        fullContent += c.content;
       }
-    }
+    }});
     assert.equal(fullContent, '这是一个模拟回复。');
   });
 
   it('应该支持自定义默认回复', async () => {
     const model = new MockModel({ defaultResponse: '自定义默认' });
     let fullContent = '';
-    for await (const chunk of model.chatStream([], [])) {
-      if (chunk.type === 'token') fullContent += chunk.content;
-    }
+    await model.chatStream([], [], { onChunk: c => {
+      if (c.type === 'token') fullContent += c.content;
+    }});
     assert.equal(fullContent, '自定义默认');
   });
 
@@ -155,22 +201,22 @@ describe('MockModel', () => {
     });
 
     let content1 = '';
-    for await (const chunk of model.chatStream([], [])) {
-      if (chunk.type === 'token') content1 += chunk.content;
-    }
+    await model.chatStream([], [], { onChunk: c => {
+      if (c.type === 'token') content1 += c.content;
+    }});
     assert.equal(content1, '第一条');
 
     let content2 = '';
-    for await (const chunk of model.chatStream([], [])) {
-      if (chunk.type === 'token') content2 += chunk.content;
-    }
+    await model.chatStream([], [], { onChunk: c => {
+      if (c.type === 'token') content2 += c.content;
+    }});
     assert.equal(content2, '第二条');
 
     // 超出 responses 回退到 defaultResponse
     let content3 = '';
-    for await (const chunk of model.chatStream([], [])) {
-      if (chunk.type === 'token') content3 += chunk.content;
-    }
+    await model.chatStream([], [], { onChunk: c => {
+      if (c.type === 'token') content3 += c.content;
+    }});
     assert.equal(content3, '这是一个模拟回复。');
   });
 
@@ -186,12 +232,12 @@ describe('MockModel', () => {
     });
 
     let hasToolCalls = false;
-    for await (const chunk of model.chatStream([], [])) {
-      if (chunk.type === 'tool_calls') {
+    await model.chatStream([], [], { onChunk: c => {
+      if (c.type === 'tool_calls') {
         hasToolCalls = true;
-        assert.equal(chunk.tool_calls[0].function.name, 'Read');
+        assert.equal(c.tool_calls[0].function.name, 'Read');
       }
-    }
+    }});
     assert.ok(hasToolCalls);
   });
 
@@ -208,9 +254,9 @@ describe('MockModel', () => {
     });
 
     const events = [];
-    for await (const chunk of model.chatStream([], [])) {
-      events.push(chunk);
-    }
+    await model.chatStream([], [], { onChunk: c => {
+      events.push(c);
+    }});
     // 应该先有 token 事件，再有 tool_calls 事件
     const tokenEvents = events.filter(e => e.type === 'token');
     const toolCallEvents = events.filter(e => e.type === 'tool_calls');
@@ -238,17 +284,17 @@ describe('MockModel', () => {
   it('reset 应重置调用计数', async () => {
     const model = new MockModel({ responses: [{ content: 'A' }, { content: 'B' }] });
     let c1 = '';
-    for await (const chunk of model.chatStream([], [])) {
-      if (chunk.type === 'token') c1 += chunk.content;
-    }
+    await model.chatStream([], [], { onChunk: c => {
+      if (c.type === 'token') c1 += c.content;
+    }});
     assert.equal(c1, 'A');
 
     model.reset();
 
     let c2 = '';
-    for await (const chunk of model.chatStream([], [])) {
-      if (chunk.type === 'token') c2 += chunk.content;
-    }
+    await model.chatStream([], [], { onChunk: c => {
+      if (c.type === 'token') c2 += c.content;
+    }});
     assert.equal(c2, 'A'); // reset 后应重新从第一条开始
   });
 
@@ -256,9 +302,9 @@ describe('MockModel', () => {
     const model = new MockModel({ defaultResponse: 'AB', delayMs: 20 });
     const start = Date.now();
     const tokens = [];
-    for await (const chunk of model.chatStream([], [])) {
-      if (chunk.type === 'token') tokens.push(chunk.content);
-    }
+    await model.chatStream([], [], { onChunk: c => {
+      if (c.type === 'token') tokens.push(c.content);
+    }});
     const elapsed = Date.now() - start;
     assert.ok(tokens.length >= 2, '应至少有 2 个 token');
     // 2 个 token 之间至少有 1 次延迟 (20ms)
@@ -270,17 +316,13 @@ describe('MockModel', () => {
     const controller = new AbortController();
     const tokens = [];
     try {
-      const iter = model.chatStream([], [], { signal: controller.signal });
-      // 消费第一个 token 后中断
-      for await (const chunk of iter) {
-        tokens.push(chunk);
-        controller.abort();
-        break;
-      }
-      // 继续消费应该抛出 AbortError
-      for await (const chunk of iter) {
-        tokens.push(chunk);
-      }
+      await model.chatStream([], [], {
+        signal: controller.signal,
+        onChunk: c => {
+          tokens.push(c);
+          controller.abort();
+        }
+      });
       // 如果到这里说明没抛出错误，但有可能是正常结束
     } catch (err) {
       assert.equal(err.name, 'AbortError');
@@ -527,19 +569,25 @@ describe('MessageManager', () => {
   });
 
 
-  it('compactIfNeeded (generator) 在超阈值时应该压缩', async () => {
+  it('compactIfNeeded (callback) 在超阈值时应该压缩', async () => {
     const model = new MockModel({
       responses: [{ content: '这是压缩后的摘要。' }]
     });
     // limit 设为「原文超、但短摘要产物(preamble+summary)不超」的值，避免下轮再触发
     const mm = new MessageManager({ systemPrompt: 'test', memoryTokenLimit: 45 });
-    mm.addUserMessage('这是一段很长的文本用于触发记忆压缩功能测试，需要使token超过阈值才能触发压缩逻辑的执行，反复填充使其超过设阈值以便确实触发压缩逻辑执行而不误判不触发情况发生，继续填充更多文本以确保整体token数量稳定超过四十五的阈值。');
-    mm.addAssistantMessage('好的，我明白了。这段对话内容需要被压缩以节省token空间，确保后续对话可以继续进行而不丢失关键信息，继续填充文本使整体tokens超过上述设定阈值从而稳定触发压缩逻辑的执行。');
+    // 多轮对话，老区（保留最近 group 之前的）token > COMPACT_MIN_SAVINGS(500) 才触发压缩
+    const long = '这是一段很长的文本用于触发记忆压缩功能测试，需要使token超过阈值才能触发压缩逻辑的执行，反复填充使其超过设阈值以便确实触发压缩逻辑执行而不误判不触发情况发生，继续填充更多文本以确保整体token数量稳定超过四十五的阈值。';
+    mm.addUserMessage(long);
+    mm.addAssistantMessage(long);
+    mm.addUserMessage(long);
+    mm.addAssistantMessage(long);
+    mm.addUserMessage(long);
+    mm.addAssistantMessage(long);
+    mm.addUserMessage(long);
+    mm.addAssistantMessage('近期保留组的助手回复');
 
     const events = [];
-    for await (const event of mm.compactIfNeeded(model)) {
-      events.push(event);
-    }
+    await mm.compactIfNeeded(model, { onEvent: e => events.push(e) });
 
     // 应该有 compact_start 和 compact 事件
     assert.ok(events.find(e => e.event === 'compact_start'), '应有 compact_start 事件');
@@ -556,15 +604,13 @@ describe('MessageManager', () => {
     assert.ok(compactMsg.content.includes('这是压缩后的摘要。'), '摘要内容应为 LLM 回复加 SUMMARY_PREAMBLE 前缀');
   });
 
-  it('compactIfNeeded (generator) 在未超阈值时不应压缩', async () => {
+  it('compactIfNeeded (callback) 在未超阈值时不应压缩', async () => {
     const model = new MockModel();
     const mm = new MessageManager({ systemPrompt: 'test', memoryTokenLimit: 99999 });
     mm.addUserMessage('短消息');
 
     const events = [];
-    for await (const event of mm.compactIfNeeded(model)) {
-      events.push(event);
-    }
+    await mm.compactIfNeeded(model, { onEvent: e => events.push(e) });
 
     assert.equal(events.length, 0, '未超阈值不应有压缩事件');
   });
@@ -574,7 +620,7 @@ describe('MessageManager', () => {
 // Agent (DefaultAgent) 测试
 // ========================
 describe('Agent', () => {
-  let agent, model, messageManager, toolRegistry, config;
+  let agent, model, messageManager, toolManager, config;
 
   beforeEach(() => {
     // 使用临时目录创建 Config
@@ -593,22 +639,20 @@ describe('Agent', () => {
       responses: [{ content: '你好！很高兴见到你。' }]
     });
 
-    toolRegistry = new ToolRegistry();
-    toolRegistry.register(Read);
+    toolManager = new ToolManager();
+    toolManager.register(Read);
 
     messageManager = new MessageManager({
       systemPrompt: config.get('systemPrompt') || '你是助手',
       memoryTokenLimit: 8000
     });
 
-    agent = new Agent({ config, model, toolRegistry, messageManager });
+    agent = new Agent({ config, model, toolManager, messageManager });
   });
 
   it('应该流式返回 token 事件', async () => {
     const events = [];
-    for await (const event of agent.receive('你好')) {
-      events.push(event);
-    }
+    await agent.receive('你好', { emit: e => events.push(e) });
     const tokenEvents = events.filter(e => e.event === 'token');
     const doneEvents = events.filter(e => e.event === 'done');
     assert.ok(tokenEvents.length > 0, '应有 token 事件');
@@ -630,9 +674,7 @@ describe('Agent', () => {
     });
     agent.updateModel(toolModel);
     const events = [];
-    for await (const event of agent.receive('帮我看看文件')) {
-      events.push(event);
-    }
+    await agent.receive('帮我看看文件', { emit: e => events.push(e) });
     const toolCallEvents = events.filter(e => e.event === 'tool_call');
     assert.ok(toolCallEvents.length > 0, '应有 tool_call 事件');
     assert.ok(toolCallEvents[0].data.tool_calls, 'tool_call 事件应有 tool_calls 数据');
@@ -656,9 +698,7 @@ describe('Agent', () => {
     });
     agent.updateModel(toolModel);
     const events = [];
-    for await (const event of agent.receive('读取文件')) {
-      events.push(event);
-    }
+    await agent.receive('读取文件', { emit: e => events.push(e) });
     const statusEvents = events.filter(e => e.event === 'status');
     // 应有 reading_file 状态（来自 Read 工具的 statusEvent）
     const readingStatus = statusEvents.find(e => e.data.state === 'reading_file');
@@ -677,22 +717,25 @@ describe('Agent', () => {
       systemPrompt: '你是一个有用的助手。',
       memoryTokenLimit: 10  // 低阈值触发压缩
     });
-    const compactAgent = new Agent({ config, model: compactModel, toolRegistry, messageManager: compactMM });
+    // 预先 seed 多组老区（>500 token），使本次 receive 时老区足够大通过压缩预判
+    const long = '这是一段足够长的历史对话内容用于触发记忆压缩功能测试，需要使可被压缩的老区 token 数量稳定超过最小可压缩阈值五百才能确实触发压缩逻辑执行，反复填充更多文本以确保整体可压缩 token 数量稳定超过五百的阈值而不误判不触发情况发生，继续填充更多历史文本内容确保老区足够大以便压缩预判通过从而稳定触发压缩逻辑的执行。';
+    compactMM.addUserMessage(long);
+    compactMM.addAssistantMessage(long);
+    compactMM.addUserMessage(long);
+    compactMM.addAssistantMessage(long);
+    compactMM.addUserMessage(long);
+    const compactAgent = new Agent({ config, model: compactModel, toolManager, messageManager: compactMM });
 
     const events = [];
-    // user 消息需本身超阈值(>10 tokens)，循环内 autocompact 在第1轮 getMessagesForLLM 前才会触发
-    for await (const event of compactAgent.receive('这是一段很长的用户消息用于触发记忆压缩功能测试，需要使token超过低阈值才能在第1轮循环顶部触发压缩逻辑的执行。')) {
-      events.push(event);
-    }
+    // seed 后老区已超 500；receive 的 user 消息再让总 token 超 memoryTokenLimit(10) → 触发压缩
+    await compactAgent.receive('继续触发压缩', { emit: e => events.push(e) });
     const compactStartEvent = events.find(e => e.event === 'compact_start');
     assert.ok(compactStartEvent, '应有 compact_start 事件');
   });
 
   it('done 事件应包含 usage 信息', async () => {
     const events = [];
-    for await (const event of agent.receive('你好')) {
-      events.push(event);
-    }
+    await agent.receive('你好', { emit: e => events.push(e) });
     const doneEvent = events.find(e => e.event === 'done');
     assert.ok(doneEvent);
     assert.ok(doneEvent.data.usage);
@@ -744,8 +787,8 @@ describe('Tool metadata', () => {
     assert.equal(Grep.callSummary({ pattern: 'foo' }), 'foo');
   });
 
-  it('ToolRegistry.get 应返回完整工具对象（含元数据）', () => {
-    const registry = new ToolRegistry();
+  it('ToolManager.get 应返回完整工具对象（含元数据）', () => {
+    const registry = new ToolManager();
     registry.register(Read);
     const tool = registry.get('Read');
     assert.ok(tool);
@@ -764,7 +807,7 @@ describe('Shared Tools', () => {
 
   beforeEach(() => {
     resetReadState();
-    registry = new ToolRegistry();
+    registry = new ToolManager();
     registry.register(Read);
     registry.register(Write);
     registry.register(Edit);
@@ -782,7 +825,7 @@ describe('Shared Tools', () => {
   describe('Read', () => {
     it('应返回 cat -n 格式内容', async () => {
       const result = await registry.execute('Read', {
-        file_path: 'shared/agent/tools/index.js'
+        file_path: 'engine/tools/index.js'
       });
       assert.match(result, /^\d+\t/);
     });
@@ -803,7 +846,7 @@ describe('Shared Tools', () => {
 
     it('支持 offset 和 limit', async () => {
       const result = await registry.execute('Read', {
-        file_path: 'shared/agent/tools/index.js',
+        file_path: 'engine/tools/index.js',
         offset: 1,
         limit: 1
       });
@@ -947,7 +990,7 @@ describe('Shared Tools', () => {
   describe('Glob', () => {
     it('应匹配文件名', async () => {
       const result = await registry.execute('Glob', {
-        pattern: 'shared/agent/tools/Read.js'
+        pattern: 'engine/tools/Read.js'
       });
       assert.match(result, /Read\.js/);
       assert.match(result, /\(file/);
@@ -955,7 +998,7 @@ describe('Shared Tools', () => {
 
     it('** 应递归匹配', async () => {
       const result = await registry.execute('Glob', {
-        pattern: 'shared/**/Read.js'
+        pattern: 'engine/**/Read.js'
       });
       assert.match(result, /Read\.js/);
     });
@@ -969,7 +1012,7 @@ describe('Shared Tools', () => {
 
     it('[A-Z] 字符类应生效', async () => {
       const result = await registry.execute('Glob', {
-        pattern: 'shared/agent/tools/[A-Z]*.js'
+        pattern: 'engine/tools/[A-Z]*.js'
       });
       assert.match(result, /Read\.js/);
     });
@@ -1268,19 +1311,17 @@ describe('Shared Tools', () => {
         }]
       });
       const mm = new MessageManager({ systemPrompt: 's', memoryTokenLimit: 8000 });
-      const agentRegistry = new ToolRegistry();
+      const agentRegistry = new ToolManager();
       agentRegistry.register(Bash);
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-tool-result-'));
       fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify({ agentId: 'test' }), 'utf-8');
       fs.writeFileSync(path.join(tmpDir, 'api_key.json'), JSON.stringify({ base_url: '', auth_token: '', model: '' }), 'utf-8');
       const cfg = new Config(tmpDir);
       cfg.load();
-      const ag = new Agent({ config: cfg, model, toolRegistry: agentRegistry, messageManager: mm });
+      const ag = new Agent({ config: cfg, model, toolManager: agentRegistry, messageManager: mm });
 
       const events = [];
-      for await (const event of ag.receive('test')) {
-        events.push(event);
-      }
+      await ag.receive('test', { emit: e => events.push(e) });
       const results = events.filter(e => e.event === 'tool_result');
       assert.ok(results.length > 0, '应有 tool_result 事件');
       assert.equal(results[0].data.status, 'success');
@@ -1296,19 +1337,17 @@ describe('Shared Tools', () => {
         }]
       });
       const mm = new MessageManager({ systemPrompt: 's', memoryTokenLimit: 8000 });
-      const agentRegistry = new ToolRegistry();
+      const agentRegistry = new ToolManager();
       agentRegistry.register(Read);
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-tool-result2-'));
       fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify({ agentId: 'test' }), 'utf-8');
       fs.writeFileSync(path.join(tmpDir, 'api_key.json'), JSON.stringify({ base_url: '', auth_token: '', model: '' }), 'utf-8');
       const cfg = new Config(tmpDir);
       cfg.load();
-      const ag = new Agent({ config: cfg, model, toolRegistry: agentRegistry, messageManager: mm });
+      const ag = new Agent({ config: cfg, model, toolManager: agentRegistry, messageManager: mm });
 
       const events = [];
-      for await (const event of ag.receive('test')) {
-        events.push(event);
-      }
+      await ag.receive('test', { emit: e => events.push(e) });
       const results = events.filter(e => e.event === 'tool_result');
       assert.ok(results.length > 0, '应有 tool_result 事件');
       assert.equal(results[0].data.status, 'error');

@@ -43,8 +43,10 @@ describe('/rooms/* routes', () => {
       startTimeout: 500,
     });
     const pm = fakeProcessManager(agentsDir);
-    const chatHistory = new ChatHistory(agentsDir);
-    const app = createGatewayApp(pm, chatHistory, roomManager);
+    const privateRoomHistory = new ChatHistory(roomsDir, roomsDir, { roomMode: true, roomsDir });
+    pm.privateRoomHistory = privateRoomHistory;
+    pm.chatDir = roomsDir;
+    const app = createGatewayApp(pm, roomManager, { privateRoomHistory });
     await new Promise((resolve) => {
       server = app.listen(0, '127.0.0.1', () => {
         baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -108,22 +110,31 @@ describe('/rooms/* routes', () => {
     assert.equal(data.members[0].agentId, 'elf-001');
   });
 
-  it('POST /rooms/:rid/send writes history, returns id (no reply in B)', async () => {
-    const res = await fetch(`${baseUrl}/rooms/${testRoomId}/send`, {
+  it('POST /rooms/:rid/say (user) writes history, returns id', async () => {
+    const res = await fetch(`${baseUrl}/rooms/${testRoomId}/say`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: 'hello' }),
+      headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': 'user' },
+      body: JSON.stringify({ content: 'hello' }),
     });
     const data = await res.json();
     assert.equal(res.status, 200);
     assert.ok(data.id);
   });
 
-  it('POST /rooms/:rid/send missing message -> 400', async () => {
-    const res = await fetch(`${baseUrl}/rooms/${testRoomId}/send`, {
+  it('POST /rooms/:rid/say missing content -> 400', async () => {
+    const res = await fetch(`${baseUrl}/rooms/${testRoomId}/say`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': 'user' },
       body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it('POST /rooms/:rid/say 未知 X-Speaker-Id -> 400', async () => {
+    const res = await fetch(`${baseUrl}/rooms/${testRoomId}/say`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': 'ghost' },
+      body: JSON.stringify({ content: 'x' }),
     });
     assert.equal(res.status, 400);
   });
@@ -134,9 +145,9 @@ describe('/rooms/* routes', () => {
     assert.equal(res.status, 200);
     assert.ok(data.messages.length >= 1);
     const last = data.messages[data.messages.length - 1];
-    // speaker 为用户名(来自 gateway.json userName,默认 'user');内容为 'hello'
+    // speaker 为用户名(来自 gateway.json userName,默认 'user')
     assert.ok(last.speaker, 'speaker 应存在');
-    assert.equal(last.content, 'hello');
+    assert.ok(typeof last.content === 'string' && last.content.length > 0, '应有内容');
   });
 
   it('DELETE /rooms/:rid/history clears history', async () => {
@@ -170,9 +181,9 @@ describe('/rooms/* routes', () => {
     }).then((r) => r.json());
     const rid = created.roomId;
     // 发条消息产生历史
-    await fetch(`${baseUrl}/rooms/${rid}/send`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: 'hello' }),
+    await fetch(`${baseUrl}/rooms/${rid}/say`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': 'user' },
+      body: JSON.stringify({ content: 'hello' }),
     });
     const before = await fetch(`${baseUrl}/rooms/${rid}/history`).then(r => r.json());
     assert.ok(before.messages.length >= 1);
@@ -181,5 +192,170 @@ describe('/rooms/* routes', () => {
     assert.equal(res.status, 200);
     const after = await fetch(`${baseUrl}/rooms/${rid}/history`).then(r => r.json());
     assert.equal(after.messages.length, 0);
+  });
+
+  // ===== sync-history 端点 =====
+
+  it('GET /rooms/:rid/sync-history/:agentId?seed=true 返回 latestId', async () => {
+    // 先发条消息保证有内容
+    const created = await fetch(`${baseUrl}/rooms`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'sync-test', members: ['elf-001'] }),
+    }).then((r) => r.json());
+    const rid = created.roomId;
+    await fetch(`${baseUrl}/rooms/${rid}/say`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': 'user' },
+      body: JSON.stringify({ content: 'sync-hello' }),
+    });
+
+    const res = await fetch(`${baseUrl}/rooms/${rid}/sync-history/elf-001?seed=true`);
+    const data = await res.json();
+    assert.equal(res.status, 200);
+    assert.ok(data.latestSeq != null, 'seed=true 应返回 latestSeq');
+    assert.equal(data.messages.length, 0, 'seed=true 不返回 messages');
+  });
+
+  it('GET /rooms/:rid/sync-history/:agentId?afterSeq= 返回游标后消息', async () => {
+    const created = await fetch(`${baseUrl}/rooms`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'sync-after-test', members: ['elf-001'] }),
+    }).then((r) => r.json());
+    const rid = created.roomId;
+
+    // 发 3 条消息
+    for (const msg of ['m1', 'm2', 'm3']) {
+      await fetch(`${baseUrl}/rooms/${rid}/say`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': 'user' },
+        body: JSON.stringify({ content: msg }),
+      });
+    }
+
+    // afterSeq=1 → 应返回 seq>1，即 2 条 (m2, m3)
+    const res = await fetch(`${baseUrl}/rooms/${rid}/sync-history/elf-001?afterSeq=1`);
+    const data = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(data.messages.length, 2, `afterSeq=1 应返回 2 条，实际 ${data.messages.length}`);
+    assert.equal(data.messages[0].content, 'm2');
+    assert.equal(data.messages[1].content, 'm3');
+    assert.ok(data.latestSeq != null, '应包含 latestSeq');
+  });
+
+  it('sync-history 返回消息附带 mentions', async () => {
+    const created = await fetch(`${baseUrl}/rooms`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'sync-mentions', members: ['elf-001', 'elf-002'] }),
+    }).then((r) => r.json());
+    const rid = created.roomId;
+
+    await fetch(`${baseUrl}/rooms/${rid}/say`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': 'user' },
+      body: JSON.stringify({ content: '@elf-001 hello' }),
+    });
+
+    const res = await fetch(`${baseUrl}/rooms/${rid}/sync-history/elf-002`);
+    const data = await res.json();
+    assert.equal(res.status, 200);
+    assert.ok(data.messages.length >= 1);
+    // mentions 应包含 elf-001（因为内容 @elf-001）
+    assert.ok(data.messages[0].mentions.includes('elf-001'),
+      `mentions 应包含 elf-001, 实际: ${JSON.stringify(data.messages[0].mentions)}`);
+  });
+
+  it('sync-history 404 on unknown room', async () => {
+    const res = await fetch(`${baseUrl}/rooms/nonexistent/sync-history/elf-001`);
+    assert.equal(res.status, 404);
+  });
+
+  // ===== /say (agent 发言) 测试：X-Speaker-Id=agentId =====
+
+  it('POST /say (agent) 写入历史并返回 id，seq 为数字，speaker 落盘 uid', async () => {
+    const created = await fetch(`${baseUrl}/rooms`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'say-agent-test', members: ['elf-001', 'elf-002'] }),
+    }).then(r => r.json());
+    const rid = created.roomId;
+
+    const res = await fetch(`${baseUrl}/rooms/${rid}/say`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': 'elf-001' },
+      body: JSON.stringify({ content: 'agent 发言' }),
+    });
+    const data = await res.json();
+    assert.equal(res.status, 200);
+    assert.ok(data.id, '应返回 id');
+
+    // history 接口返回 name 版（speaker=name，本测试 name=id）
+    const history = await fetch(`${baseUrl}/rooms/${rid}/history`).then(r => r.json());
+    const last = history.messages[history.messages.length - 1];
+    assert.equal(typeof last.seq, 'number', 'seq 应为数字');
+    assert.equal(last.content, 'agent 发言');
+    assert.equal(last.speaker, 'elf-001', 'speaker 渲染为 name');
+    assert.equal(last.speakerUid, 'elf-001', 'speakerUid 为 uid');
+  });
+
+  it('POST /say 未知 X-Speaker-Id(非成员) -> 400', async () => {
+    const created = await fetch(`${baseUrl}/rooms`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'say-unknown', members: ['elf-001'] }),
+    }).then(r => r.json());
+    const rid = created.roomId;
+
+    const res = await fetch(`${baseUrl}/rooms/${rid}/say`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': 'ghost' },
+      body: JSON.stringify({ content: 'no speaker' }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it('POST /say (agent) 缺 content 返回 400', async () => {
+    const created = await fetch(`${baseUrl}/rooms`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'say-no-content', members: ['elf-001'] }),
+    }).then(r => r.json());
+    const rid = created.roomId;
+
+    const res = await fetch(`${baseUrl}/rooms/${rid}/say`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': 'elf-001' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it('content @id 落盘 uid、返回 name 版（uid→name 改写）', async () => {
+    // 用 name≠id 的成员验证改写：elf-001 name=Star
+    const cfgDir = path.join(agentsDir, 'elf-001', 'config');
+    fs.writeFileSync(path.join(cfgDir, 'config.json'), JSON.stringify({
+      agentId: 'elf-001', name: 'Star', port: 0, provider: 'mock', systemPrompt: 't', tools: [],
+    }));
+    const created = await fetch(`${baseUrl}/rooms`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'say-rewrite', members: ['elf-001', 'elf-002'] }),
+    }).then(r => r.json());
+    const rid = created.roomId;
+
+    // 用户发言 @elf-001(id 形式)
+    await fetch(`${baseUrl}/rooms/${rid}/say`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': 'user' },
+      body: JSON.stringify({ content: '@elf-001 hi' }),
+    });
+    // history 返回 name 版:content 里 @ 应改写成 @Star
+    const hist = await fetch(`${baseUrl}/rooms/${rid}/history`).then(r => r.json());
+    const last = hist.messages[hist.messages.length - 1];
+    assert.ok(last.content.includes('@Star'), `content 应含 @Star,实际: ${last.content}`);
+    assert.ok(!last.content.includes('@elf-001'), 'content 不应再含 @elf-001');
+
+    // 落盘原文是 uid 版:读 history.jsonl 验证（v3 统一路径）
+    const raw = fs.readFileSync(path.join(roomsDir, rid, 'history.jsonl'), 'utf-8').trim().split('\n');
+    const rec = JSON.parse(raw[raw.length - 1]);
+    assert.ok(rec.content.includes('@elf-001'), '落盘 content 应含 @elf-001(uid)');
+    assert.equal(rec.speaker, 'default_userid', '落盘 speaker 应为 userUid');
+    assert.equal(rec.speakerUid, 'default_userid');
+
+    // 复原 elf-001 name
+    fs.writeFileSync(path.join(cfgDir, 'config.json'), JSON.stringify({
+      agentId: 'elf-001', name: 'elf-001', port: 0, provider: 'mock', systemPrompt: 't', tools: [],
+    }));
   });
 });

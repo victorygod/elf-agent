@@ -7,14 +7,14 @@
  *
  * 所有路径操作都限定在这两个固定根下，禁止逃逸（白名单校验）。
  *
- * 列 skill 复用 shared/agent/skills/registry.js 的 SkillRegistry；
+ * 列 skill 复用 engine/skills/registry.js 的 SkillRegistry；
  * 删除用 fs.rmSync，安装用 fs.cpSync（Node 18+）。
  */
 
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { SkillRegistry } from '../shared/agent/skills/registry.js';
+import { SkillRegistry } from '../engine/skills/registry.js';
 
 // skill 名合法字符（防路径逃逸）
 const NAME_RE = /^[A-Za-z0-9._-]+$/;

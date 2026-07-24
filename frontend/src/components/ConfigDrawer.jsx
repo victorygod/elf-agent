@@ -4,6 +4,7 @@ import useConfig from '../hooks/useConfig';
 import * as api from '../api/index.js';
 import ConfigField from './ConfigField';
 import SkillManager from './SkillManager';
+import ConfirmModal from './ConfirmModal';
 import styles from './ConfigDrawer.module.css';
 
 export default function ConfigDrawer({ onClose }) {
@@ -23,6 +24,9 @@ export default function ConfigDrawer({ onClose }) {
   useEffect(() => {
     api.getAvailableTools().then(setAvailableTools).catch(() => setAvailableTools([]));
   }, []);
+
+  // 「清空聊天与记忆」确认弹窗（替代原生 confirm()，避免被浏览器屏蔽导致按钮无响应）
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
 
   if (!configAgentId) return null;
 
@@ -100,13 +104,23 @@ export default function ConfigDrawer({ onClose }) {
       </div>
 
       <div className={styles.footer}>
-        <button className={`${styles.btn} ${styles.btnWarning} ${styles.btnSm}`} onClick={handleClearAll}>清空聊天与记忆</button>
+        <button className={`${styles.btn} ${styles.btnWarning} ${styles.btnSm}`} onClick={() => setClearConfirmOpen(true)}>清空聊天与记忆</button>
         <span style={{ flex: 1 }} />
         <button className={styles.btn} onClick={onClose}>取消</button>
         <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleSave} disabled={isSaving}>
           {isSaving ? '保存中...' : '保存'}
         </button>
       </div>
+
+      <ConfirmModal
+        open={clearConfirmOpen}
+        title="清空聊天与记忆"
+        message="确定要清空聊天记录和 Agent 记忆吗？此操作不可恢复，Agent 将忘记之前的对话内容。"
+        confirmText="清空"
+        tone="danger"
+        onCancel={() => setClearConfirmOpen(false)}
+        onConfirm={() => { setClearConfirmOpen(false); handleClearAll(); }}
+      />
     </div>
   );
 }

@@ -9,7 +9,7 @@ Agent thinks, Gateway connects. Each Agent runs as an independent Node.js proces
 [中文文档](README_CN.md) · [MIT License](LICENSE)
 
 </div>
-
+ 
 ## Features
 
 - **Multi-Agent** — Each Agent is an independent detached process, directory-self-contained (config + data); plug in a new one by copying a config folder

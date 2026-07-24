@@ -63,9 +63,11 @@ function _rmDir(dir) {
  * @param {string} agentsDir
  * @param {string} agentId
  * @param {string} prompt - 本轮用户消息全文（菜单标题 + 回填输入框）
+ * @param {string} [roomHistoryPath] - v3 私聊房 history 路径（rooms/chat-<id>/history.jsonl），
+ *        传入则一并快照（与 memory 三件套同进同出），rewind 时同步恢复。
  * @returns {string|null} checkpointId，失败返回 null
  */
-export function snapshotBeforeSend(agentsDir, agentId, prompt) {
+export function snapshotBeforeSend(agentsDir, agentId, prompt, roomHistoryPath) {
   const dataDir = _dataDir(agentsDir, agentId);
   const contextFile = path.join(dataDir, 'context.json');
   const jsonlFile = path.join(dataDir, 'history.jsonl');
@@ -90,6 +92,10 @@ export function snapshotBeforeSend(agentsDir, agentId, prompt) {
     if (hasJsonl) fs.copyFileSync(jsonlFile, path.join(cpDir, 'history.jsonl'));
     if (fs.existsSync(toolResultsDir) && fs.statSync(toolResultsDir).isDirectory()) {
       _copyDir(toolResultsDir, path.join(cpDir, 'tool-results'));
+    }
+    // v3 私聊房 history（rooms/chat-<id>/history.jsonl）一并快照（单独命名 room-history.jsonl 与 memory history 区分）
+    if (roomHistoryPath && fs.existsSync(roomHistoryPath)) {
+      fs.copyFileSync(roomHistoryPath, path.join(cpDir, 'room-history.jsonl'));
     }
     fs.writeFileSync(
       path.join(cpDir, 'meta.json'),
@@ -187,7 +193,7 @@ export function latestCheckpointId(agentsDir, agentId) {
  * @param {string} [checkpointId] - 省略 = 最近一个
  * @returns {{ ok: boolean, restoredPrompt: string|null, error?: string }}
  */
-export function rewindTo(agentsDir, agentId, checkpointId) {
+export function rewindTo(agentsDir, agentId, checkpointId, roomHistoryPathOpt) {
   const list = listCheckpoints(agentsDir, agentId);
   logger.info(`[rewindTo 入口 ${agentId}] checkpointId=${checkpointId || '(latest)'} 删除前现有 ${list.length} 个快照包: ${_fmtList(list)}`);
   if (list.length === 0) return { ok: false, restoredPrompt: null, error: 'no checkpoint' };
@@ -208,6 +214,7 @@ export function rewindTo(agentsDir, agentId, checkpointId) {
   if (!meta) return { ok: false, restoredPrompt: null, error: 'checkpoint meta missing' };
 
   const dataDir = _dataDir(agentsDir, agentId);
+  const roomHistoryPath = roomHistoryPathOpt || null;
   try {
     // 1. 整份覆盖 context.json
     const cpContext = path.join(targetCpDir, 'context.json');
@@ -228,6 +235,15 @@ export function rewindTo(agentsDir, agentId, checkpointId) {
     const liveToolResults = path.join(dataDir, 'tool-results');
     if (fs.existsSync(liveToolResults)) _rmDir(liveToolResults);
     if (fs.existsSync(cpToolResults)) _copyDir(cpToolResults, liveToolResults);
+    // 4. 整份覆盖 v3 私聊房 room-history.jsonl（快照里无则清空）
+    const cpRoomHistory = path.join(targetCpDir, 'room-history.jsonl');
+    if (roomHistoryPath) {
+      if (fs.existsSync(cpRoomHistory)) {
+        fs.copyFileSync(cpRoomHistory, roomHistoryPath);
+      } else if (fs.existsSync(roomHistoryPath)) {
+        fs.writeFileSync(roomHistoryPath, '', 'utf-8');
+      }
+    }
 
     // 4. 删掉该点及其之后的快照包（被回退项也删，回到「发这条消息之前」）
     //    target 关注的是「回到该点之前」，故该点本身（含 prompt 回填用的那份）一并删除；

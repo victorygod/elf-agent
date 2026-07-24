@@ -22,8 +22,9 @@ async function main() {
   // 2. 初始化进程管理器
   const pm = new ProcessManager();
 
-  // 3. 初始化聊天记录管理器
-  const chatHistory = new ChatHistory(pm.agentsDir);
+  // v3：私聊统一为 Room，history 落 rooms/<rid>/history.jsonl；记忆数据（context/tool-results）落 chat/<id>/data。
+  //   旧 agentId-keyed ChatHistory（chat/<id>/data/history.jsonl）已废，不再实例化注入。
+  pm.chatDir = path.join(process.cwd(), 'chat');   // 私聊记忆 data 根（snapshot/rewind/context 用）
 
   // 3. 扫描 agents/ 目录
   await pm.discoverAgents();
@@ -41,13 +42,27 @@ async function main() {
       : '无运行中的 Agent，等待用户手动启动');
   }
 
-  // 5. 初始化群聊管理器
+  // 5. 初始化群聊管理器 + 私聊 room 历史管理器（v3：私聊也是 Room，history 写 rooms/<rid>/history.jsonl）
   const roomsDir = path.join(process.cwd(), 'rooms');
   try { fs.mkdirSync(roomsDir, { recursive: true }); } catch (e) { /* ignore */ }
-  const roomManager = new RoomManager(roomsDir, config.port);
+  const roomManager = new RoomManager(roomsDir, config.port, { pm, gatewayUrl: `http://127.0.0.1:${config.port}` });
+  // 私聊房历史（room 模式 ChatHistory：写 rooms/chat-<id>/history.jsonl，schema 与私聊同）。
+  const privateRoomHistory = new ChatHistory(roomsDir, roomsDir, { roomMode: true, roomsDir });
+  pm.privateRoomHistory = privateRoomHistory;
+
+  // 6. 恢复已有房间的成员副本（gateway 重启后，探活并拉起之前注册在 run.json 中的 agent）
+  //    这一步让 B 阶段的真实 spawn 进程在 gateway 重启后自动恢复
+  const roomList = roomManager.listRooms();
+  for (const room of roomList) {
+    await roomManager.ensureReplicasAlive(room.roomId);
+    logger.info(`房间 ${room.roomId} 已恢复 ${room.members.filter(m => m.status === 'running').length}/${room.members.length} 个成员`);
+  }
+
+  // 设置 gateway URL 供私聊 agent 同步回查
+  pm._gatewayUrl = `http://127.0.0.1:${config.port}`;
 
   // 7. 启动 HTTP 服务
-  const app = createGatewayApp(pm, chatHistory, roomManager);
+  const app = createGatewayApp(pm, roomManager, { privateRoomHistory });
   app.listen(config.port, () => {
     logger.info(`Gateway 监听端口: ${config.port}`);
     logger.info(`可用 Agent: ${pm.listAgents().map(a => `${a.agentId} (${a.status})`).join(', ')}`);

@@ -451,7 +451,7 @@ elf-002 当前代码**0 处注入** `<system-reminder>`,也**0 处使用 isMeta*
 | Todo/Task 提醒 | 推荐 | 同上 | |
 | Read 工具告警(内联) | **不必** | 它在 tool_result 内联，不是独立消息 | CC 也没加 isMeta |
 | MCP 指令/工具变更 | **是** | 同上 | |
-| 文件变更通知 | 推荐 | 同上 | |
+| 文件变更通知 | 推荐 | 同上 | 详见 [cc-file-staleness-detection](./cc-file-staleness-detection-2.1.209.md) |
 | 团队上下文 | **是** | 同上 | |
 | 输出 token 限制提醒 | 推荐 | 同上 | |
 | 侧问 agent prompt | 不必 | 独立的子 agent 调用，不走主对话 | |

@@ -4,3 +4,7 @@ logs/
 **/api_key.json
 support_model_list.md
 agents/*/data/
+# 运行时数据（v3：无视,不入库）
+chat/
+rooms/
+rooms-test-*/

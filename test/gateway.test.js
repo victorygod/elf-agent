@@ -106,6 +106,8 @@ describe('Gateway HTTP Server', () => {
   const testPort = 9877;
 
   before(async () => {
+    // 强制子进程用 mock model：不连真实 LLM、秒回、无网络依赖。
+    process.env.ELF_FORCE_MOCK_MODEL = '1';
     pm = new ProcessManager();
     pm.discoverAgents();
     // 杀掉所有可能占用端口的残留 Agent 进程
@@ -115,7 +117,17 @@ describe('Gateway HTTP Server', () => {
       agent.status = 'stopped';
       agent.pid = null;
     }
-    const app = createGatewayApp(pm);
+    // v3：注入 roomManager + 私聊房历史，挂 /rooms/chat-<id>/* 路由。
+    const { RoomManager } = await import('../gateway/room_bus.js');
+    const { ChatHistory } = await import('../gateway/chat_history.js');
+    const roomsDir = path.join(process.cwd(), 'rooms');
+    try { fs.mkdirSync(roomsDir, { recursive: true }); } catch (e) {}
+    const roomManager = new RoomManager(roomsDir, testPort, { pm, gatewayUrl: `http://127.0.0.1:${testPort}` });
+    const privateRoomHistory = new ChatHistory(roomsDir, roomsDir, { roomMode: true, roomsDir });
+    pm.privateRoomHistory = privateRoomHistory;
+    pm.chatDir = path.join(process.cwd(), 'chat');
+    pm._gatewayUrl = `http://127.0.0.1:${testPort}`;
+    const app = createGatewayApp(pm, roomManager, { privateRoomHistory });
     await new Promise((resolve) => {
       server = app.listen(testPort, resolve);
     });
@@ -135,9 +147,14 @@ describe('Gateway HTTP Server', () => {
     for (const [id, agent] of pm.agents) {
       killPort(agent.port);
     }
+    // 探活刷新内存态 + 断 /events 重连器，防 gateway 卡在重连链、node --test 不退出。
+    for (const [id] of pm.agents) {
+      try { await pm.probeAgent(id); } catch (e) { /* 忽略 */ }
+    }
     if (server) {
       await new Promise((resolve) => server.close(resolve));
     }
+    delete process.env.ELF_FORCE_MOCK_MODEL;
   });
 
   it('GET /agents 应返回 Agent 列表', async () => {
@@ -162,6 +179,15 @@ describe('Gateway HTTP Server', () => {
   it('GET /agents/:id 不存在的 Agent 应返回 404', async () => {
     const res = await fetch(`http://127.0.0.1:${testPort}/agents/nonexistent`);
     assert.equal(res.status, 404);
+  });
+
+  it('GET /available-tools 应返回工具名列表（读 engine/tools/index.js）', async () => {
+    const res = await fetch(`http://127.0.0.1:${testPort}/available-tools`);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.ok(Array.isArray(data.tools), '应返回 tools 数组');
+    assert.ok(data.tools.includes('Bash'), '应包含 Bash');
+    assert.ok(data.tools.includes('Read'), '应包含 Read');
   });
 
   it('POST /agents/:id/start 应启动 Agent', async () => {
@@ -191,21 +217,49 @@ describe('Gateway HTTP Server', () => {
     assert.equal(res2.status, 409);
   });
 
-  it('POST /agents/:id/chat 应返回 SSE 流', async () => {
-    const res = await fetch(`http://127.0.0.1:${testPort}/agents/elf-001/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: '你好' })
+  it('v3 /rooms/chat-<id>/say + subscribe 应经 SSE 收到 token/done', async () => {
+    // 确保 elf-001 运行
+    await fetch(`http://127.0.0.1:${testPort}/agents/elf-001/start`, { method: 'POST' });
+    await new Promise(r => setTimeout(r, 2500));
+    // 先建常驻 subscribe SSE
+    const sseRes = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-elf-001/subscribe`);
+    assert.equal(sseRes.status, 200);
+    const reader = sseRes.body.getReader();
+    const decoder = new TextDecoder();
+    const events = [];
+    let buf = '', curEvent = '';
+    const readNext = async () => {
+      const { done, value } = await reader.read();
+      if (done) return false;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n'); buf = lines.pop() || '';
+      for (const line of lines) {
+        const t = line.trim();
+        if (t.startsWith('event: ')) curEvent = t.slice(7).trim();
+        else if (t.startsWith('data: ')) { try { events.push({ event: curEvent, data: JSON.parse(t.slice(6)) }); } catch (e) {} }
+        else if (t === '') curEvent = '';
+      }
+      return true;
+    };
+    await readNext(); // snapshot
+    // 发消息（fire-and-forget ack）
+    const sayRes = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-elf-001/say`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: '你好' }),
     });
-    assert.equal(res.status, 200);
-    const text = await res.text();
-    assert.ok(text.includes('event: token') || text.includes('event: done') || text.includes('event: status'));
-    // 验证 SSE 事件格式完整：应有 done 事件
-    assert.ok(text.includes('event: done'), '应包含 done 事件');
+    assert.equal(sayRes.status, 200);
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline && !events.some(e => e.event === 'done')) {
+      await Promise.race([readNext(), new Promise(r => setTimeout(r, 50))]);
+    }
+    try { reader.cancel(); } catch (e) {}
+    const names = events.map(e => e.event);
+    assert.ok(names.includes('snapshot') || names.length > 0, `应收到事件，实际 ${names.join(',')}`);
+    assert.ok(names.includes('done'), `应收到 done，实际 ${names.join(',')}`);
   });
 
-  it('POST /agents/:id/chat 缺少 message 应返回 400', async () => {
-    const res = await fetch(`http://127.0.0.1:${testPort}/agents/elf-001/chat`, {
+  it('v3 /rooms/chat-<id>/say 缺少 content 应返回 400', async () => {
+    const res = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-elf-001/say`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({})
@@ -270,11 +324,11 @@ describe('Gateway HTTP Server', () => {
     // 等待 Agent 启动完成
     await new Promise(r => setTimeout(r, 1500));
 
-    // 重新启动后应仍能对话
-    const chatRes = await fetch(`http://127.0.0.1:${testPort}/agents/elf-001/chat`, {
+    // 重新启动后应仍能经 v3 私聊房发言
+    const chatRes = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-elf-001/say`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: '重启后你好' })
+      body: JSON.stringify({ content: '重启后你好' })
     });
     assert.equal(chatRes.status, 200);
   });
@@ -294,12 +348,13 @@ describe('Gateway HTTP Server', () => {
     assert.equal(res2.status, 409);
   });
 
-  it('POST /agents/:id/chat 未运行的 Agent 应返回 503', async () => {
-    const res = await fetch(`http://127.0.0.1:${testPort}/agents/elf-001/chat`, {
+  it('v3 /rooms/chat-<id>/say 未运行的 Agent 应返回 503', async () => {
+    const res = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-elf-001/say`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: '你好' })
+      body: JSON.stringify({ content: '你好' })
     });
+    // v3：agent 未运行时私聊房 /say 直接拒绝（503），不再离线排队
     assert.equal(res.status, 503);
   });
 });

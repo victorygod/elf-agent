@@ -56,7 +56,7 @@ function AssistantBubble({ bubble, isStreaming, isLastInTurn, onToggleTime, show
       )}
       {bubble.toolCalls?.map((tc, i) => <ToolCallBadge key={i} toolCall={tc} />)}
       {bubble.compactLoading && bubble.compactSummary == null && !bubble.compactError && (
-        <CompactBadge type="loading" />
+        <CompactBadge type="loading" attempt={bubble.compactAttempt} />
       )}
       {bubble.compactSummary != null && (
         <CompactBadge type="success" tokenEstimate={bubble.compactSummary} />
@@ -149,7 +149,7 @@ export default function ChatPanel({ agentId }) {
   const loadHistory = useAgentStore(s => s.loadHistory);
   const userAvatar = useRoomStore(s => s.userAvatar);
 
-  const { send, abort, rewind, listCheckpoints, startPolling, cleanup } = useChat(agentId);
+  const { send, abort, rewind, listCheckpoints } = useChat(agentId);
 
   const messagesElRef = useRef(null);
   const inputRef = useRef(null);
@@ -206,22 +206,8 @@ export default function ChatPanel({ agentId }) {
     initDoneRef.current = true;
   }, [isActive, agent, historyLoaded, _savedScrollTop, draft, loadHistory, activeTurn]);
 
-  // 页面刷新后重连流式 SSE
-  // ★ 用 ref guard 确保只 connect 一次，不因 deps 变化重复 abort + reconnect
-  const reconnectedRef = useRef(false);
-  useEffect(() => {
-    if (!isActive || !agent) return;
-    if (reconnectedRef.current) return;
-    if (!agent.streaming) return;
-
-    reconnectedRef.current = true;
-    startPolling();
-
-    return () => {
-      cleanup();
-      reconnectedRef.current = false;
-    };
-  }, [isActive, agent?.streaming, startPolling, cleanup]);
+  // ★ SSE 订阅已上移到 app 级 useAgentSubscriptions（常驻、切 tab 不断），
+  //    ChatPanel 不再管理 subscribe 生命周期。本组件只消费 agentStore 里的 turns/activeTurn。
 
   // 保存草稿和滚动位置（卸载或切换 agent 时）
   // ★ 用 useLayoutEffect：卸载时其 cleanup 在 DOM 移除/ ref 置 null 之前同步执行，
@@ -585,8 +571,9 @@ export default function ChatPanel({ agentId }) {
               checkpoints={rewindCheckpoints}
               selectedIndex={rewindSelected}
               onSelect={setRewindSelected}
-              onConfirm={() => {
-                const id = rewindCheckpoints[rewindSelected]?.id;
+              onConfirm={(idx) => {
+                const i = (typeof idx === 'number') ? idx : rewindSelected;
+                const id = rewindCheckpoints[i]?.id;
                 if (id) handleRewind(id);
               }}
               onClose={() => setRewindOpen(false)}

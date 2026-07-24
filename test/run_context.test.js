@@ -15,13 +15,13 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { buildRunContext, buildPrivateRunContext } from '../shared/agent/run_context.js';
-import { Config } from '../shared/agent/config_loader.js';
-import { MockModel } from '../shared/agent/mock_model.js';
-import { ToolRegistry } from '../shared/agent/tools/registry.js';
-import { MessageManager } from '../shared/agent/message_manager.js';
-import { Agent } from '../shared/agent/default_agent.js';
-import { createAgentServer } from '../shared/agent/server.js';
+import { buildRunContext, buildPrivateRunContext } from '../engine/run_context.js';
+import { Config } from '../engine/config_loader.js';
+import { MockModel } from '../engine/mock_model.js';
+import { ToolManager } from '../engine/tools/tool_manager.js';
+import { MessageManager } from '../engine/message_manager.js';
+import { Agent } from '../engine/default_agent.js';
+import { createAgentServer } from '../engine/server.js';
 
 /** 造临时 config 目录（仿 agent.test.js 风格） */
 function makeConfigDir(agentId, port) {
@@ -115,7 +115,7 @@ describe('Agent 构造器 runContext 向后兼容', () => {
     const agent = new Agent({
       config,
       model: new MockModel({ responses: [{ content: 'ok' }] }),
-      toolRegistry: new ToolRegistry(),
+      toolManager: new ToolManager(),
       messageManager: new MessageManager({ systemPrompt: 't', memoryTokenLimit: 8000 }),
     });
     assert.equal(agent.runContext, null);
@@ -129,7 +129,7 @@ describe('Agent 构造器 runContext 向后兼容', () => {
     const agent = new Agent({
       config,
       model: new MockModel({ responses: [{ content: 'ok' }] }),
-      toolRegistry: new ToolRegistry(),
+      toolManager: new ToolManager(),
       messageManager: new MessageManager({ systemPrompt: 't', memoryTokenLimit: 8000 }),
       runContext: rc,
     });
@@ -150,7 +150,7 @@ describe('/status 返回 runKey/mode（保留 agentId/pid 兼容）', () => {
     const agent = new Agent({
       config,
       model: new MockModel({ responses: [{ content: 'ok' }] }),
-      toolRegistry: new ToolRegistry(),
+      toolManager: new ToolManager(),
       messageManager: new MessageManager({ systemPrompt: 't', memoryTokenLimit: 8000 }),
       runContext: rc,
     });
@@ -183,7 +183,7 @@ describe('/status 无 runContext 时回退（直构造，无 startAgent 注入�
     const agent = new Agent({
       config,
       model: new MockModel({ responses: [{ content: 'ok' }] }),
-      toolRegistry: new ToolRegistry(),
+      toolManager: new ToolManager(),
       messageManager: new MessageManager({ systemPrompt: 't', memoryTokenLimit: 8000 }),
     });
     const app = createAgentServer(agent, config);

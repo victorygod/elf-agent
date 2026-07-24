@@ -9,7 +9,7 @@
  * 通过 config.json 的 messageManagerClass 字段激活
  */
 
-import { MessageManager as BaseMessageManager } from '../../shared/agent/message_manager.js';
+import { MessageManager as BaseMessageManager } from '../../engine/message_manager.js';
 
 export class MessageManager extends BaseMessageManager {
   constructor(params) {
@@ -17,7 +17,7 @@ export class MessageManager extends BaseMessageManager {
     this._config = params.config || null;
     this.prefixPrompt = this._config?.get('prefix_prompt') || '';
     this.suffixPrompt = this._config?.get('suffix_prompt') || '';
-    // 群聊动态 roster prefix（RoomAgent._refreshRoster 写入,发往 LLM 时拼到最近一条 user 开头）。
+    // 群聊动态 roster prefix（RoomMiddleware._refreshRoster 写入,发往 LLM 时拼到最近一条 user 开头）。
     this.roomRosterPrefix = '';
   }
 

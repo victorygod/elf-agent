@@ -1,11 +1,11 @@
 /**
  * elf-002 启动入口
- * 委托给 shared/agent/start.js
+ * 委托给 engine/start.js
  */
 
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { startAgent } from '../../shared/agent/start.js';
+import { startAgent } from '../../engine/start.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const configDir = path.join(__dirname, 'config');

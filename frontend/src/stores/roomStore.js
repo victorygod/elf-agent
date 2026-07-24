@@ -17,6 +17,7 @@ export const useRoomStore = create((set, get) => ({
   roomChats: new Map(), // roomId → {messages:[], members:[], loadingHistory:false}
   userName: 'user',   // 全局用户名(gateway.json)
   userAvatar: null,   // 全局用户头像文件名 (gateway.json)
+  userUid: 'default_userid',  // 全局用户稳定身份 uid(gateway.json)
   // 侧栏手动排序：{ rooms: [roomId...], agents: [agentId...] }，区段内各自排序
   sidebarOrder: { rooms: [], agents: [] },
 
@@ -38,10 +39,10 @@ export const useRoomStore = create((set, get) => ({
 
   clearActiveRoom: () => set({ activeRoomId: null }),
 
-  /** 加载全局用户名 + 用户头像 + 侧栏排序 */
+  /** 加载全局用户名 + 用户头像 + uid + 侧栏排序 */
   loadUserName: async () => {
-    const { userName, userAvatar, sidebarOrder } = await api.getSettings();
-    const next = { userName, userAvatar };
+    const { userName, userAvatar, userUid, sidebarOrder } = await api.getSettings();
+    const next = { userName, userAvatar, userUid };
     if (sidebarOrder) next.sidebarOrder = sidebarOrder;
     set(next);
   },

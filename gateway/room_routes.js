@@ -4,19 +4,45 @@
  * 挂载到 createGatewayApp，与 /agents/* 平行。依赖 RoomManager（gateway/room_bus.js）。
  * 见 docs/chat-room-design.md §7（协议）、§8（目录）。
  *
- * 注意：B 阶段 send 转发的 /observe 端点副本尚无（C 阶段加），
- *       故 send 后副本不会真正回应；本路由本身 + 群管理 + 历史 + subscribe 可用。
+ * 发言统一走 POST /rooms/:rid/say,header X-Speaker-Id 决定身份(user/agentId)。
+ * 副本需以 --mode room 启动以注册 /observe 路由（接收 gateway 推送）。
  */
 
 import fs from 'fs';
+import path from 'path';
 import { loadGatewayConfig } from './config.js';
+import { RoomManager } from './room_bus.js';
+import { subscribePrivateRoom, startPrivateTurn } from './private_room_stream.js';
+import { rewindTo, listCheckpoints, snapshotBeforeSend } from './snapshot.js';
 
-export function registerRoomRoutes(app, roomManager) {
+export function registerRoomRoutes(app, roomManager, opts = {}) {
   const logger = console; // 简化，路由层错误直接 res.json
+  const pm = opts.pm || roomManager.pm || null;
+  const privateRoomHistory = opts.privateRoomHistory || null;
+  // 私聊房 history 文件路径（v3：rewind 三件套外的第四处重建目标）。
+  const privateRoomHistoryPath = (rid) =>
+    privateRoomHistory ? path.join(privateRoomHistory.roomsDir, rid, 'history.jsonl') : null;
 
-  // 校验群存在
+  /** 私聊房判定：roomId 以 chat- 开头。 */
+  const isPrivateRoom = (rid) => typeof rid === 'string' && rid.startsWith('chat-');
+  /** 私聊房 agentId = rid.slice('chat-'.length）。 */
+  const privateAgentId = (rid) => rid.slice('chat-'.length);
+
+  // 调 agent /observe（私聊/群聊统一入口），fire-and-forget。
+  async function postObserve(agentId, payload) {
+    const port = pm?.getAgentPort?.(agentId);
+    if (!port) throw new Error(`agent ${agentId} 端口未知（未启动？）`);
+    return fetch(`http://127.0.0.1:${port}/observe`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30_000),
+    });
+  }
+
+  // 校验群存在（私聊房 chat-<id> 不在 RoomManager，放行由各自路由处理）
   function checkRoomExists(req, res, next) {
     const rid = req.params.rid;
+    if (isPrivateRoom(rid)) return next(); // 私聊房不经 RoomManager
     const room = roomManager.getRoom(rid);
     if (!room) return res.status(404).json({ error: 'Room not found' });
     next();
@@ -84,18 +110,68 @@ export function registerRoomRoutes(app, roomManager) {
     }
   });
 
-  // GET /rooms/:rid/history — 群历史分页
+  // GET /rooms/:rid/history — 历史分页（私聊 schema 直返；群聊 name 版）
   app.get('/rooms/:rid/history', checkRoomExists, (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
     const beforeId = req.query.before || null;
     const afterId = req.query.afterId || null;
+    if (isPrivateRoom(req.params.rid)) {
+      const raw = privateRoomHistory ? privateRoomHistory.getRecent(req.params.rid, limit, beforeId, afterId) : { messages: [], hasMore: false };
+      return res.json(raw);
+    }
     const history = roomManager.getHistory(req.params.rid);
-    res.json(history.getRecent(limit, beforeId, afterId));
+    const raw = history.getRecent(limit, beforeId, afterId);
+    const { membersWithNames, user } = roomManager._rosterForRewrite(req.params.rid);
+    // 前端 history 不需要 mentions 字段
+    const messages = raw.messages.map(m => roomManager._renderMessageForSend(m, membersWithNames, user, false));
+    res.json({ messages, hasMore: raw.hasMore });
   });
 
-  // DELETE /rooms/:rid/history — 清空群历史
+  // GET /rooms/:rid/sync-history/:agentId — 副本消息同步（seq 游标分页）
+  // seed=true 仅返回 latestSeq（首次启动种子）；afterSeq=<n> 返回 seq>n 的消息。
+  // 返回 name 版（agent _parse 还会再 uid→name 拼前缀，content 已是 name 版）+ mentions。
+  app.get('/rooms/:rid/sync-history/:agentId', checkRoomExists, (req, res) => {
+    const rid = req.params.rid;
+    const agentId = req.params.agentId;
+    // 私聊房 sync-history（无 :agentId 语义，私聊单向 user 历史）
+    if (isPrivateRoom(rid)) {
+      const seed = req.query.seed === 'true';
+      const afterSeq = parseInt(req.query.afterSeq, 10) || 0;
+      if (!privateRoomHistory) return res.json({ messages: [], latestSeq: 0 });
+      if (seed) {
+        const last = privateRoomHistory._loadLastSeq(rid);
+        return res.json({ messages: [], latestSeq: last });
+      }
+      const result = privateRoomHistory.getAfterSeq(rid, afterSeq);
+      return res.json({ messages: result.messages, latestSeq: result.latestSeq });
+    }
+    const history = roomManager.getHistory(rid);
+    const seed = req.query.seed === 'true';
+    const afterSeq = parseInt(req.query.afterSeq, 10) || 0;
+
+    // 首次种子：只返回 latestSeq，不返回消息
+    if (seed) {
+      const all = history._readAll();
+      const last = all.length > 0 ? all[all.length - 1] : null;
+      return res.json({ messages: [], latestSeq: last?.seq ?? 0 });
+    }
+
+    const result = history.getAfterSeq(afterSeq);
+    const { membersWithNames, user } = roomManager._rosterForRewrite(req.params.rid);
+    // sync-history 带 mentions（agent 填充空洞后判被@用）
+    const messages = result.messages.map(m => roomManager._renderMessageForSend(m, membersWithNames, user, true));
+
+    res.json({ messages, latestSeq: result.latestSeq });
+  });
+
+  // DELETE /rooms/:rid/history — 清空历史（私聊走 privateRoomHistory，群聊走 RoomHistory）
   app.delete('/rooms/:rid/history', checkRoomExists, (req, res) => {
-    roomManager.getHistory(req.params.rid).clear();
+    const rid = req.params.rid;
+    if (isPrivateRoom(rid)) {
+      if (privateRoomHistory) privateRoomHistory.clear(rid);
+    } else {
+      roomManager.getHistory(rid).clear();
+    }
     res.json({ status: 'ok' });
   });
 
@@ -120,17 +196,26 @@ export function registerRoomRoutes(app, roomManager) {
     }
   });
 
-  // GET /rooms/:rid/subscribe — SSE 群聊流
-  // 必巡检（非阻塞）：先返回 snapshot，保活在后台跑（设计 §7.4）
+  // GET /rooms/:rid/subscribe — SSE 订阅（私聊 + 群聊统一）
   app.get('/rooms/:rid/subscribe', checkRoomExists, (req, res) => {
     const rid = req.params.rid;
+    if (isPrivateRoom(rid)) {
+      // 私聊房：常驻 SSE，token 经 agent /events → _onAgentEvent → private_room_stream 转发。
+      if (!privateRoomHistory) return res.status(500).json({ error: '私聊房历史未配置' });
+      subscribePrivateRoom(rid, res, privateRoomHistory);
+      return;
+    }
+    // 群聊（必巡检非阻塞）：先返回 snapshot，保活在后台跑
     const history = roomManager.getHistory(rid);
     const recent = history.getRecent(50);
     const room = roomManager.getRoom(rid);
+    const { membersWithNames, user } = roomManager._rosterForRewrite(rid);
+    // snapshot 消息渲染成 name 版（与 SSE speak 事件一致），前端可直接显示
+    const messages = recent.messages.map(m => roomManager._renderMessageForSend(m, membersWithNames, user, false));
     const snapshot = {
       roomId: rid,
       members: room.members,
-      messages: recent.messages,
+      messages,
     };
     const bc = roomManager.getBroadcaster(rid);
     bc.add(res, snapshot);
@@ -140,53 +225,146 @@ export function registerRoomRoutes(app, roomManager) {
     }).catch(() => { /* ignore */ });
   });
 
-  // POST /rooms/:rid/send — 用户发言（observe 转发）
-  app.post('/rooms/:rid/send', checkRoomExists, async (req, res) => {
+  // POST /rooms/:rid/say — 统一发言入口（用户 + agent）
+  //   header X-Speaker-Id 决定身份:
+  //     缺失 / 'user' → 用户发言,speakerUid = gateway.json userUid
+  //     成员 agentId   → agent 发言,speakerUid = agentId
+  //     其它           → 400 未知身份
+  //   body: { content }
+  //   落盘: speaker/speakerUid = uid,content @=uid
+  //   发送: SSE/observe 给消费方的 content @=name
+  app.post('/rooms/:rid/say', checkRoomExists, async (req, res) => {
     try {
-      const { message } = req.body || {};
-      if (typeof message !== 'string') return res.status(400).json({ error: 'message 必填' });
-      const rid = req.params.rid;
-      const gcfg = loadGatewayConfig();
-      const userName = gcfg.userName || 'user';
-      const userUid = gcfg.userUid || 'default_userid';
-      // 写群历史（用户发言：speaker=显示名，speakerUid=稳定身份）
-      const history = roomManager.getHistory(rid);
-      const rec = history.add(userName, message, 'speak', userUid);
-      // 广播给订阅者（用户发言回显）
-      const bc = roomManager.getBroadcaster(rid);
-      bc.broadcast('speak', { speaker: userName, content: message, ts: rec.ts, id: rec.id });
-      // observe 转发给所有成员副本（from 用用户名,agent 看到"用户名: 内容"）
-      if (typeof roomManager.broadcastObserve === 'function') {
-        roomManager.broadcastObserve(rid, message, userName).catch(() => { /* 副本无 /observe 时 B 阶段会 404，忽略 */ });
+      const { content } = req.body || {};
+      if (typeof content !== 'string') return res.status(400).json({ error: 'content 必填' });
+      // 私聊房：写 history + fire-and-forget /observe；token 经 /events 转发到 subscribe。
+      if (isPrivateRoom(req.params.rid)) {
+        const agentId = privateAgentId(req.params.rid);
+        if (!pm?.getAgentStatus?.(agentId) || pm.getAgentStatus(agentId) !== 'running') {
+          return res.status(503).json({ error: 'Agent 未运行' });
+        }
+        // rewind 快照：写 user 进 jsonl 前打一个"说话前"状态快照包（含 v3 私聊房 history）。
+        try { snapshotBeforeSend(pm?.chatDir, agentId, content, privateRoomHistoryPath(req.params.rid)); } catch (e) { /* 快照失败不阻塞 */ }
+        let rec = null;
+        if (privateRoomHistory) {
+          rec = privateRoomHistory.addMessage(req.params.rid, 'user', content);
+        }
+        startPrivateTurn(req.params.rid, rec || { content });
+        // seq 取 history 的；fire-and-forget
+        postObserve(agentId, { roomId: req.params.rid, content, role: 'chat', seq: rec?.seq ?? null })
+          .catch(err => logger.error && console.error?.(`/observe 失败 (${req.params.rid}): ${err.message}`));
+        return res.json({ status: 'ok', id: rec?.id || null });
       }
+      const speakerId = (req.headers['x-speaker-id'] || 'user').trim();
+      let speakerUid;
+      if (speakerId === 'user') {
+        const gcfg = loadGatewayConfig();
+        speakerUid = gcfg.userUid || 'default_userid';
+      } else {
+        const room = roomManager.getRoom(req.params.rid);
+        const isMember = room?.members?.some(m => m.agentId === speakerId);
+        if (!isMember) return res.status(400).json({ error: `未知身份: ${speakerId}` });
+        speakerUid = speakerId;
+      }
+      const rec = await roomManager.processRoomMessage(req.params.rid, speakerUid, content);
       res.json({ status: 'ok', id: rec.id });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  // POST /rooms/:rid/member-said — 副本发言回灌（Speak 工具调用此端点）
-  // 收 {member, content} → 写群历史(speaker=member) → 广播给订阅者 →
-  //   再 broadcastObserve 给所有成员(让其他成员感知此发言,链式触发,允许死循环 §5)。
-  app.post('/rooms/:rid/member-said', checkRoomExists, async (req, res) => {
+  // ===== 房间成员管理路由（B 阶段：控制副本生命周期） =====
+
+  // POST /rooms/:rid/start-all — 启动房间所有成员副本
+  app.post('/rooms/:rid/start-all', checkRoomExists, async (req, res) => {
     try {
-      const { member, content } = req.body || {};
-      if (!member || typeof content !== 'string') {
-        return res.status(400).json({ error: 'member 和 content 必填' });
-      }
-      const rid = req.params.rid;
-      const history = roomManager.getHistory(rid);
-      const rec = history.add(member, content, 'speak', member);   // 问题3：agent 以 agentId 为稳定身份,member 即 agentId
-      const bc = roomManager.getBroadcaster(rid);
-      bc.broadcast('speak', { speaker: member, content, ts: rec.ts, id: rec.id });
-      // 链式：把这条发言转发给所有成员副本(含发言者自己,RoomAgent 自消息过滤会丢弃)。
-      //   允许死循环(A→B→A),靠 LLM 语义收敛,唯一兜底自消息过滤。§5。
-      if (typeof roomManager.broadcastObserve === 'function') {
-        roomManager.broadcastObserve(rid, content, member).catch(() => { /* ignore */ });
-      }
-      res.json({ status: 'ok', id: rec.id });
+      const results = await roomManager.startRoomAgents(req.params.rid);
+      const running = results.filter(r => r && r.status === 'running');
+      res.json({ status: 'ok', started: running.length, total: results.length, details: results });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // POST /rooms/:rid/stop-all — 停止房间所有成员副本
+  app.post('/rooms/:rid/stop-all', checkRoomExists, async (req, res) => {
+    try {
+      await roomManager.stopRoomAgents(req.params.rid);
+      res.json({ status: 'ok' });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ===== v3 私聊房控制（按 roomId 路由到 agent 进程）=====
+  // POST /rooms/:rid/abort — 中断私聊房推理
+  app.post('/rooms/:rid/abort', checkRoomExists, async (req, res) => {
+    const rid = req.params.rid;
+    if (!isPrivateRoom(rid)) return res.status(400).json({ error: '仅私聊房支持此端点' });
+    const agentId = privateAgentId(rid);
+    const port = pm?.getAgentPort?.(agentId);
+    if (!port) return res.status(503).json({ error: 'Agent 未运行' });
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/abort/${rid}`, { method: 'POST', signal: AbortSignal.timeout(5000) });
+      const data = await r.json().catch(() => ({}));
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /rooms/:rid/checkpoints — 私聊房可回退的快照包
+  app.get('/rooms/:rid/checkpoints', checkRoomExists, (req, res) => {
+    const rid = req.params.rid;
+    if (!isPrivateRoom(rid)) return res.status(400).json({ error: '仅私聊房支持此端点' });
+    const agentId = privateAgentId(rid);
+    try {
+      const checkpoints = listCheckpoints(pm?.chatDir, agentId);
+      res.json({ checkpoints });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /rooms/:rid/rewind — 私聊房三处重建（history.jsonl + context.json + tool-results）+ /reload/:roomId
+  app.post('/rooms/:rid/rewind', checkRoomExists, (req, res) => {
+    const rid = req.params.rid;
+    if (!isPrivateRoom(rid)) return res.status(400).json({ error: '仅私聊房支持此端点' });
+    const agentId = privateAgentId(rid);
+    const checkpointId = req.body?.checkpointId ?? null;
+    const result = rewindTo(pm?.chatDir, agentId, checkpointId, privateRoomHistoryPath(rid));
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    const port = pm?.getAgentPort?.(agentId);
+    if (port) {
+      fetch(`http://127.0.0.1:${port}/reload/${rid}`, { method: 'POST' })
+        .then(r => r.json().catch(() => ({})))
+        .then(() => {})
+        .catch(err => { /* reload 失败不语义阻塞，下条消息自然重载 */ });
+    }
+    const remaining = listCheckpoints(pm?.chatDir, agentId);
+    res.json({ status: 'ok', restoredPrompt: result.restoredPrompt, checkpoints: remaining });
+  });
+
+  // DELETE /rooms/:rid/memory — 清空私聊房记忆（context.json + 内存 + tool-results）+ 私聊房 history
+  //   v3 经 agent /clear/:roomId 清内存（engine 已按房清 buffer/cursor/tool-results），未运行则清盘。
+  app.delete('/rooms/:rid/memory', checkRoomExists, async (req, res) => {
+    const rid = req.params.rid;
+    if (!isPrivateRoom(rid)) return res.status(400).json({ error: '仅私聊房支持此端点' });
+    const agentId = privateAgentId(rid);
+    const status = pm?.getAgentStatus?.(agentId);
+    if (status === 'running') {
+      const port = pm?.getAgentPort?.(agentId);
+      try { await fetch(`http://127.0.0.1:${port}/clear/${rid}`, { method: 'POST', signal: AbortSignal.timeout(5000) }); }
+      catch (err) { /* 清内存失败不阻塞，盘上兜底 */ }
+    } else {
+      const dataDir = path.join(pm?.chatDir || '', agentId, 'data');
+      try {
+        const ctx = path.join(dataDir, 'context.json');
+        if (fs.existsSync(ctx)) fs.writeFileSync(ctx, '[]', 'utf-8');
+      } catch (e) { /* ignore */ }
+    }
+    // 同时清私聊房 history
+    if (privateRoomHistory) privateRoomHistory.clear(rid);
+    res.json({ status: 'ok' });
   });
 }

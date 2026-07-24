@@ -51,14 +51,14 @@ export async function stopAgent(id) {
 
 /** 中断当前生成 */
 export async function abortAgent(id) {
-  await fetch(`${API_BASE}/agents/${id}/abort`, { method: 'POST' });
+  await fetch(`${API_BASE}/rooms/chat-${id}/abort`, { method: 'POST' });
 }
 
 // ===== Rewind（双击 Esc 回退）=====
 
 /** 列出可回退的快照包 */
 export async function listCheckpoints(agentId) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/checkpoints`);
+  const res = await fetch(`${API_BASE}/rooms/chat-${agentId}/checkpoints`);
   return res.json();
 }
 
@@ -67,7 +67,7 @@ export async function listCheckpoints(agentId) {
  * @returns {Promise<{ status, restoredPrompt, checkpoints }>}
  */
 export async function rewindAgent(agentId, checkpointId = null) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/rewind`, {
+  const res = await fetch(`${API_BASE}/rooms/chat-${agentId}/rewind`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ checkpointId }),
@@ -88,10 +88,12 @@ export async function rewindAgent(agentId, checkpointId = null) {
  * @returns {Promise<void>}
  */
 export async function chat(agentId, message, { onEvent, signal } = {}) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/chat`, {
+  // v3：私聊统一入口 /rooms/chat-<id>/say（fire-and-forget ack）。流式 token 经常驻
+  //   subscribe（useAgentSubscriptions）接收，不在本请求内读流。onEvent 保留签名兼容旧行为但不在此推事件。
+  const res = await fetch(`${API_BASE}/rooms/chat-${agentId}/say`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ content: message }),
     signal
   });
 
@@ -99,32 +101,8 @@ export async function chat(agentId, message, { onEvent, signal } = {}) {
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
     throw Object.assign(new Error(err.error || res.statusText), { status: res.status, data: err });
   }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let currentEvent = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('event: ')) {
-        currentEvent = trimmed.slice(7).trim();
-      } else if (trimmed.startsWith('data: ')) {
-        try {
-          onEvent?.(currentEvent, JSON.parse(trimmed.slice(6)));
-        } catch (e) { /* ignore parse errors */ }
-        currentEvent = '';
-      } else if (trimmed === '') {
-        currentEvent = '';
-      }
-    }
-  }
+  // ack 即返回；token/done 由常驻 subscribe SSE 推送
+  return res.json().catch(() => ({}));
 }
 
 /**
@@ -137,7 +115,7 @@ export async function chat(agentId, message, { onEvent, signal } = {}) {
  * @returns {Promise<void>}
  */
 export async function subscribe(agentId, { onEvent, signal } = {}) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/subscribe`, { signal });
+  const res = await fetch(`${API_BASE}/rooms/chat-${agentId}/subscribe`, { signal });
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
@@ -177,9 +155,9 @@ export async function subscribe(agentId, { onEvent, signal } = {}) {
 
 // ===== 聊天历史 =====
 
-/** 获取聊天历史（分页 + 增量） */
+/** 获取聊天历史（分页 + 增量）— v3 私聊走 /rooms/chat-<id>/history */
 export async function getHistory(agentId, { limit = HISTORY_PAGE_SIZE, before, afterId } = {}) {
-  let url = `${API_BASE}/agents/${agentId}/history?limit=${limit}`;
+  let url = `${API_BASE}/rooms/chat-${agentId}/history?limit=${limit}`;
   if (before) url += `&before=${before}`;
   if (afterId) url += `&afterId=${afterId}`;
   const res = await fetch(url);
@@ -187,15 +165,15 @@ export async function getHistory(agentId, { limit = HISTORY_PAGE_SIZE, before, a
   return await res.json();
 }
 
-/** 清空聊天历史 */
+/** 清空聊天历史 — v3 私聊走 /rooms/chat-<id>/history */
 export async function deleteHistory(agentId) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/history`, { method: 'DELETE' });
+  const res = await fetch(`${API_BASE}/rooms/chat-${agentId}/history`, { method: 'DELETE' });
   return res.ok;
 }
 
-/** 清空 agent 记忆 */
+/** 清空 agent 记忆 — v3 私聊走 /rooms/chat-<id>/memory */
 export async function deleteMemory(agentId) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/memory`, { method: 'DELETE' });
+  const res = await fetch(`${API_BASE}/rooms/chat-${agentId}/memory`, { method: 'DELETE' });
   return res.ok;
 }
 
@@ -215,7 +193,7 @@ export async function getConfigUI(agentId) {
   return await res.json();
 }
 
-/** 获取所有可用工具名（来自 shared/agent/tools/index.js） */
+/** 获取所有可用工具名（来自 engine/tools/index.js） */
 export async function getAvailableTools() {
   const res = await fetch(`${API_BASE}/available-tools`);
   if (!res.ok) return [];
@@ -386,12 +364,12 @@ export async function getRoomHistory(roomId, limit = ROOM_HISTORY_PAGE_SIZE, bef
   return await res.json();
 }
 
-/** 用户发言 */
+/** 用户发言（统一入口 /say，X-Speaker-Id: user 标记用户身份） */
 export async function sendRoomMessage(roomId, message) {
-  const res = await fetch(`${API_BASE}/rooms/${roomId}/send`, {
+  const res = await fetch(`${API_BASE}/rooms/${roomId}/say`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': 'user' },
+    body: JSON.stringify({ content: message }),
   });
   if (!res.ok) throw new Error(`发送失败: ${res.status}`);
   return await res.json();

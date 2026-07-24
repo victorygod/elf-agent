@@ -7,6 +7,7 @@
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import * as api from '../api/index.js';
+import ConfirmModal from './ConfirmModal';
 import styles from './SkillManager.module.css';
 
 const SOURCES = [
@@ -20,6 +21,8 @@ export default function SkillManager() {
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState(null);          // { type: 'ok'|'error', text }
   const [browser, setBrowser] = useState(null);   // 目录浏览弹窗状态：null | { current, entries, selected, loading }
+  // 待确认删除的 skill：null | { source, name }（替代原生 confirm，避免被浏览器屏蔽）
+  const [pendingDelete, setPendingDelete] = useState(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -37,7 +40,6 @@ export default function SkillManager() {
   useEffect(() => { refresh(); }, [refresh]);
 
   const handleDelete = async (source, name) => {
-    if (!window.confirm(`确定删除 skill「${name}」？此操作不可恢复。`)) return;
     try {
       await api.deleteSkill(source, name);
       setMsg({ type: 'ok', text: `已删除 ${name}` });
@@ -128,7 +130,7 @@ export default function SkillManager() {
                     <span className={styles.itemDesc}>{s.description}</span>
                     <button
                       className={`${styles.btn} ${styles.btnDanger} ${styles.btnSm}`}
-                      onClick={() => handleDelete(s.source, s.name)}
+                      onClick={() => setPendingDelete({ source: s.source, name: s.name })}
                     >删除</button>
                   </li>
                 ))}
@@ -202,6 +204,20 @@ export default function SkillManager() {
           </div>
         </div>
       )}
+
+      <ConfirmModal
+        open={!!pendingDelete}
+        title="删除 skill"
+        message={`确定删除 skill「${pendingDelete?.name}」？此操作不可恢复。`}
+        confirmText="删除"
+        tone="danger"
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => {
+          const p = pendingDelete;
+          setPendingDelete(null);
+          if (p) handleDelete(p.source, p.name);
+        }}
+      />
     </div>
   );
 }

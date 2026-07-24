@@ -128,7 +128,7 @@ export default function useConfig() {
   }, [configAgentId, refreshAgents]);
 
   const handleClearAll = useCallback(async () => {
-    if (!configAgentId || !confirm('确定要清空聊天记录和 Agent 记忆吗？此操作不可恢复，Agent 将忘记之前的对话内容。')) return;
+    if (!configAgentId) return;
     const store = useAgentStore.getState();
     try {
       // 先清空聊天记录

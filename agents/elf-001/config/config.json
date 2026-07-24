@@ -19,9 +19,9 @@
   },
   "compactPrompt": "总结至今的对话内容",
   "compactSystemPrompt": "你是说话者的记忆系统，使用高度凝练的话语生成摘要。",
-  "memoryTokenLimit": 500,
-  "maxIterations": 0,
   "compactMode": "async",
+  "memoryTokenLimit": 40000,
+  "maxIterations": 0,
   "messageManagerClass": "message_manager",
   "tools": [
     "Read",

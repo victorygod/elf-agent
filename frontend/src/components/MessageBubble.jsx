@@ -47,7 +47,7 @@ const MessageBubble = React.memo(function MessageBubble({ msg, agentId, agentAva
             <MarkdownContent content={msg.content} />
           )}
           {/* compactLoading 与 compactSummary/compactError 互斥：完成状态优先 */}
-          {msg.compactLoading && msg.compactSummary == null && !msg.compactError && <CompactBadge type="loading" />}
+          {msg.compactLoading && msg.compactSummary == null && !msg.compactError && <CompactBadge type="loading" attempt={msg.compactAttempt} />}
           {msg.compactSummary != null && <CompactBadge type="success" tokenEstimate={msg.compactSummary} />}
           {msg.compactError && <CompactBadge type="error" error={msg.compactError} />}
           {isStreaming && <span className={styles.cursor}>▍</span>}

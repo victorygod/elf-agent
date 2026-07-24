@@ -37,7 +37,12 @@ export function useRoomChat(roomId) {
     es.addEventListener('speak', (ev) => {
       try {
         const data = JSON.parse(ev.data);
-        appendMessage(roomId, { speaker: data.speaker, content: data.content, ts: data.ts, id: data.id });
+        appendMessage(roomId, {
+          speaker: data.speaker,          // name 版（显示用）
+          speakerUid: data.speakerUid,     // uid（查 avatar/agentId 用）
+          content: data.content,           // name 版（@ 已改写）
+          ts: data.ts, id: data.id,
+        });
       } catch (e) { /* ignore */ }
     });
 

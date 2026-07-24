@@ -113,6 +113,9 @@ const useAgentStore = create((set, get) => ({
         _savedScrollTop: 0,
       });
     } else {
+      // 重新激活已存在的 chat：常驻 subscribe（useAgentSubscriptions）在场期间持续更新 store，
+      // 切 tab 不丢异步事件，切回无需从磁盘 loadHistory 重建（否则会用磁盘快照覆盖实时 store 抖动）。
+      // 故只标 _isActive，不动 historyLoaded（首次未 load 的仍由 ChatPanel init effect 触发一次 load）。
       newChats.set(agentId, { ...newChats.get(agentId), _isActive: true });
     }
 

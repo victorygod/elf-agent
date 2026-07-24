@@ -6,7 +6,9 @@
       "Bash(npm run *)",
       "Bash(npx vite *)",
       "mcp__codefusesearchmcp__webSearch",
-      "Skill(code-review)"
+      "Skill(code-review)",
+      "Bash(npm test *)",
+      "mcp__codefusesearchmcp__webFetch"
     ]
   }
 }
