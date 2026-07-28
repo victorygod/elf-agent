@@ -1,0 +1,55 @@
+/**
+ * profiles/ 路径解析模块 —— engine + gateway 共用的单一路径来源
+ *
+ * 收口 v3 之前散落在 start.js / process_manager.js / room_bus.js / snapshot.js /
+ * room_routes.js / gateway/index.js 的 path.join，按"所有权原则"统一布局：
+ *   - agent 拥有自己的记忆（memory + rooms/<rid>）
+ *   - room 拥有房历史与配置（room.json + history.jsonl + run/<id>.json）
+ *
+ * 布局（详见 docs/temp-analysis-conclusions.md §5）：
+ *   profiles/
+ *   ├── agents/<id>/memory/        私聊记忆（context/tool-results/checkpoints/sync_cursor）
+ *   ├── agents/<id>/rooms/<rid>/   该 agent 在各群的私有记忆（context/sync_cursor/tool-results）
+ *   ├── rooms/<rid>/               room.json + history.jsonl + run/<id>.json
+ *   ├── rooms/chat-<id>/           私聊房（仅 history.jsonl，无 room.json）
+ *   └── logs/
+ *
+ * 根可由 env ELF_PROFILES_ROOT 覆盖（默认 <cwd>/profiles），供测试隔离。
+ *
+ * 旧布局（chat//rooms//logs//agents/<id>/data）不兼容、不自动迁移；老数据需手动搬移。
+ */
+import path from 'path';
+
+let _root = null;
+
+/** profiles 根目录（绝对路径）。ELF_PROFILES_ROOT 可覆盖，默认 <cwd>/profiles。 */
+export function profilesRoot() {
+  if (_root) return _root;
+  _root = process.env.ELF_PROFILES_ROOT
+    ? path.resolve(process.env.ELF_PROFILES_ROOT)
+    : path.join(process.cwd(), 'profiles');
+  return _root;
+}
+
+/** 供测试重置缓存（改 env 后调一次）。 */
+export function _resetProfilesRoot() { _root = null; }
+
+/** agent 私聊记忆目录：profiles/agents/<id>/memory。 */
+export function agentMemory(agentId) {
+  return path.join(profilesRoot(), 'agents', agentId, 'memory');
+}
+
+/** agent 在某群的私有记忆目录：profiles/agents/<id>/rooms/<rid>。 */
+export function agentRoomState(agentId, roomId) {
+  return path.join(profilesRoot(), 'agents', agentId, 'rooms', roomId);
+}
+
+/** rooms 根目录：profiles/rooms。供 RoomManager/RoomConfig 等作 fileRoot。 */
+export function roomsRoot() {
+  return path.join(profilesRoot(), 'rooms');
+}
+
+/** 日志目录：profiles/logs。 */
+export function logsDir() {
+  return path.join(profilesRoot(), 'logs');
+}

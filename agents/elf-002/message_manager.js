@@ -72,8 +72,7 @@ export class MessageManager extends BaseMessageManager {
     this._compactFailCount = 0;
     this._compactDisabled = false;
 
-    // 群聊动态 roster prefix（RoomMiddleware._refreshRoster 写入,发往 LLM 时拼到最近一条 user 开头）。
-    this.roomRosterPrefix = '';
+    // roster 注入已迁移至 PromptAssembler（RoomPlugin 注册 useWrapLastUser 注入器），本类不再持 roomRosterPrefix。
   }
 
   /**
@@ -125,41 +124,16 @@ export class MessageManager extends BaseMessageManager {
   // ============ 第 2 层：跨消息预算窗口 ============
 
   /**
-   * override：先跑 budget 强制（按 turn group 淘汰最大 fresh），再返回拼好的消息
+   * override：先跑 budget 强制（按 turn group 淘汰最大 fresh），再返回 base（系统提示词 + stripped 消息）。
+   * 提示词拼装（roster/skill listing）已迁移至 agent 的 PromptAssembler，本类不再拼。
    */
   getMessagesForLLM() {
-    this._enforceBudgetWindow();
-    const systemMsg = { role: 'system', content: this.systemPrompt };
-    // skill_listing 改为临注入：旧持久化清单不再送 LLM（对齐 CC 每轮重算 attachment）。
-    const msgs = this.messages
-      .filter(m => m.metaTag !== 'skill_listing')
-      .map(m => {
-        // strip id、isMeta、metaTag — LLM API 不接受额外字段（对齐基类 getMessagesForLLM）
-        const { id, isMeta, metaTag, ...rest } = m;
-        return rest;
-      });
-    // 群聊动态 roster prefix：拼到最近一条 user 开头（不发写入记忆）。私聊 roomRosterPrefix 空串不影响。
-    const roster = this.roomRosterPrefix || '';
-    if (roster) {
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === 'user') {
-          msgs[i].content = roster + msgs[i].content;
-          break;
-        }
-      }
-    }
-    // skill 清单临注入到最近一条 user 之前（与基类 getMessagesForLLM 一致）。
-    const out = this._injectTransientListing(msgs);
-    return [systemMsg, ...out];
+    return this.getBaseForLLM();
   }
 
-  /**
-   * override：纯计算，不调 getMessagesForLLM()，无 budget/roster 副作用
-   * 直接对 this.messages + systemPrompt 做全量 JSON 序列化计数，
-   * 确保 role、tool_call_id、JSON 结构开销等全部参与 token 估算。
-   * 与 getMessagesForLLM 口径对齐：过滤旧 skill_listing 持久化消息 + 临注入本轮 listing。
-   */
-  estimateTokens() {
+  /** base 给 assembler：先跑 budget 副作用（持久化改写超限 tool content），再产 base。 */
+  getBaseForLLM() {
+    this._enforceBudgetWindow();
     const systemMsg = { role: 'system', content: this.systemPrompt };
     const msgs = this.messages
       .filter(m => m.metaTag !== 'skill_listing')
@@ -167,10 +141,11 @@ export class MessageManager extends BaseMessageManager {
         const { id, isMeta, metaTag, ...rest } = m;
         return rest;
       });
-    const out = this._injectTransientListing(msgs);
-    const allMessages = [systemMsg, ...out];
-    return countMessageTokens(allMessages);
+    return [systemMsg, ...msgs];
   }
+
+  // estimateTokens 不再 override：基类 estimateTokens 已含 PromptAssembler 注入内容计数（经 _setPromptAssembler 回填）。
+  //   elf-002 的 budget 副作用只在 getBaseForLLM 请求时跑，token 估算无需触发 budget。
 
   /**
    * 预算强制：按 assistant turn 分 group，group 内 fresh（未持久化）tool 结果
@@ -326,7 +301,12 @@ export class MessageManager extends BaseMessageManager {
       }
       return;
     }
-    if (this.estimateTokens() <= this.memoryTokenLimit) return;
+    const _est = this.estimateTokens();
+    if (_est <= this.memoryTokenLimit) {
+      const _lg = createLogger('message_manager', logFileName);
+      _lg.info(`[compact] tokens=${_est} <= memoryTokenLimit=${this.memoryTokenLimit}，未触发压缩`);
+      return;
+    }
 
     // 预判：保留最近 1 个 group 后老区 token 是否达到最小可压缩阈值。
     // 基类 _countCompactableTokens 调用本类的 _groupByAssistantTurn（按 tool_calls 切），

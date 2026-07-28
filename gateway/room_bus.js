@@ -20,6 +20,7 @@ import { spawn } from 'child_process';
 import { createLogger } from '../shared/logger.js';
 import { probePort, waitForReady, httpShutdown } from '../shared/agent_probe.js';
 import { loadGatewayConfig } from './config.js';
+import { agentRoomState } from '../shared/profiles_paths.js';
 
 const logger = createLogger('room-bus', 'gateway.log');
 
@@ -152,6 +153,7 @@ export class RoomBroadcaster {
       mentions: Array.isArray(data.mentions) ? data.mentions : [],
       role: 'chat',
       seq: data.seq ?? null,
+      ts: data.ts ?? null,          // 发言时间（ISO），供 agent 格式化为 [本地时间 MMDD hh:mm]
       // v3：懒建群 RoomState 时 buildRunContext 需 roomBusUrl，否则 Speak 报"缺 roomBusUrl,无法发言"。
       roomBusUrl: this._gatewayPort ? `http://127.0.0.1:${this._gatewayPort}/rooms/${this.roomId}` : null,
     };
@@ -388,8 +390,7 @@ export function allocPort() {
 // ============================================================
 
 /**
- * 管理 rooms/<rid>/data/<agentId>/run.json。re-discover / cleanup.sh 用。
- * 路径用 roomId+agentId 拼（不把 runKey 整体当文件名，避免 / 当路径分隔符的坑）。
+ * 管理 profiles/rooms/<rid>/run/<agentId>.json 进程登记。re-discover / cleanup.sh 用。
  */
 export class RoomRegistry {
   /**
@@ -399,9 +400,9 @@ export class RoomRegistry {
     this.roomsDir = roomsDir;
   }
 
-  /** 某副本的 run.json 路径 */
+  /** 某副本的 run.json 路径：<roomsDir>/<rid>/run/<id>.json（schema 从旧 data/<id>/run.json 改为 run/<id>.json） */
   _path(roomId, agentId) {
-    return path.join(this.roomsDir, roomId, 'data', agentId, 'run.json');
+    return path.join(this.roomsDir, roomId, 'run', `${agentId}.json`);
   }
 
   /**
@@ -443,18 +444,19 @@ export class RoomRegistry {
    * @returns {Array<object>}
    */
   list(roomId) {
-    const dataDir = path.join(this.roomsDir, roomId, 'data');
-    if (!fs.existsSync(dataDir)) return [];
+    const runDir = path.join(this.roomsDir, roomId, 'run');
+    if (!fs.existsSync(runDir)) return [];
     let entries;
     try {
-      entries = fs.readdirSync(dataDir, { withFileTypes: true });
+      entries = fs.readdirSync(runDir, { withFileTypes: true });
     } catch (err) {
       return [];
     }
     const result = [];
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const rec = this.read(roomId, entry.name);
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const agentId = entry.name.slice(0, -5); // 去 .json
+      const rec = this.read(roomId, agentId);
       if (rec) result.push(rec);
     }
     return result;
@@ -593,7 +595,6 @@ export class RoomManager {
    * @param {object} [opts]
    * @param {Function} [opts.spawnFn] - 注入 fake spawn（测试用）
    * @param {Function} [opts.agentConfigDir] - 纯函数 (agentId)=>configDir，默认 agents/<id>/config
-   * @param {string} [opts.chatRoot] - 成员 agent 记忆根（chat/），默认 cwd/chat；解散/移除成员清 chat/<id>/<rid>/ 用
    */
   constructor(roomsDir, gatewayPort, opts = {}) {
     this.roomsDir = roomsDir;
@@ -607,7 +608,7 @@ export class RoomManager {
      *   无 pm 时（旧测试注入 spawnFn）回退 spawnReplica。 */
     this.pm = opts.pm || null;
     this.gatewayUrl = opts.gatewayUrl || null;
-    this.chatRoot = opts.chatRoot || path.join(process.cwd(), 'chat');   // 成员记忆根
+    // 成员群记忆路径统一走 profiles_paths 的 agentRoomState(id, rid)，不再持 chatRoot 字段。
     /** roomId → { config: RoomConfig, broadcaster: RoomBroadcaster, history: RoomHistory, members: Map<agentId, {port,pid,status}> } */
     this.rooms = new Map();
   }
@@ -636,8 +637,8 @@ export class RoomManager {
     const pid = this.pm.getAgent?.(agentId)?.pid ?? null;
     room.members.set(agentId, { port, pid, status: MEMBER_STATUS.RUNNING });
     room.broadcaster.subscribeAgent(agentId, port);
-    // 落盘 run.json 仍供 cleanup.sh 兼容（v3 不再 spawn，但保留记录）。
-    const dataDir = path.join(this.roomsDir, roomId, 'data', agentId);
+    // 落盘 run.json 仍供 cleanup.sh 兼容（v3 不再 spawn，但保留记录）。dataDir 记 agent 在此群的记忆路径。
+    const dataDir = agentRoomState(agentId, roomId);
     const roomBusUrl = `http://127.0.0.1:${this.gatewayPort}/rooms/${roomId}`;
     this.registry.write(roomId, agentId, { port, pid, memberName: agentId, dataDir, roomBusUrl });
     logger.info(`ensureAgentPresent ${roomId}/${agentId} 复用进程 (port ${port})`);
@@ -695,7 +696,7 @@ export class RoomManager {
       throw new Error(`agent 不存在: ${agentId}`);
     }
     const port = await allocPort();
-    const dataDir = path.join(this.roomsDir, roomId, 'data', agentId);
+    const dataDir = agentRoomState(agentId, roomId);
     const roomBusUrl = `http://127.0.0.1:${this.gatewayPort}/rooms/${roomId}`;
     room.members.set(agentId, { port, pid: null, status: MEMBER_STATUS.STARTING });
     try {
@@ -754,20 +755,19 @@ export class RoomManager {
     return this.getRoom(roomId);
   }
 
-  /** 移除成员：停副本 + 改 config + 删 data */
+  /** 移除成员：停副本 + 改 config + 删该成员对本群的记忆 */
   async removeMember(roomId, agentId) {
     const room = this._ensureRoom(roomId);
     await this.stopReplica(roomId, agentId);
     room.config.removeMember(agentId);
-    // v3：清该成员对本群的记忆目录 chat/<agentId>/<rid>/（旧 rooms/<rid>/data/<agentId>/ 已不用）
-    const chatRoot = this.chatRoot;
-    const memberRoomDir = path.join(chatRoot, agentId, roomId);
+    // 清该成员对本群的记忆目录 profiles/agents/<id>/rooms/<rid>/（context/tool-results）
+    const memberRoomDir = agentRoomState(agentId, roomId);
     try { fs.rmSync(memberRoomDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
     return this.getRoom(roomId);
   }
 
   /**
-   * 解散群：停所有成员副本 + 关广播订阅 + 删 rooms/<rid>/ 整目录 + 清内存态。
+   * 解散群：停所有成员副本 + 关广播订阅 + 删 profiles/rooms/<rid>/ 整目录 + 清各成员群记忆 + 清内存态。
    * @param {string} roomId
    */
   async deleteRoom(roomId) {
@@ -780,19 +780,17 @@ export class RoomManager {
     }
     // 关订阅者
     room.broadcaster.removeAll();
-    // 删 rooms/<rid>/ 整目录（含 room.json / history.jsonl）
-    const roomDir = path.join(this.roomsDir, roomId);
-    try { fs.rmSync(roomDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
-    // v3：各成员 agent 对该群的 RoomState 记忆目录 chat/<agentId>/<rid>/（context/tool-results）一并清，
-    //   否则解散后成员对该群的记忆残留。路径来源 pm.chatDir（gateway/index.js 设 chat/）。
-    const chatRoot = this.chatRoot;
+    // 删 <roomsDir>/<rid>/ 整目录（含 room.json / history.jsonl / run/<id>.json）
+    try { fs.rmSync(path.join(this.roomsDir, roomId), { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    // 各成员 agent 对该群的记忆目录 profiles/agents/<id>/rooms/<rid>/（context/tool-results）一并清，
+    //   私聊记忆 profiles/agents/<id>/memory/ 不动（成员保留私聊历史）。
     for (const agentId of cfg.members) {
-      const memberRoomDir = path.join(chatRoot, agentId, roomId);
+      const memberRoomDir = agentRoomState(agentId, roomId);
       try { fs.rmSync(memberRoomDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
     }
     // 清内存态
     this.rooms.delete(roomId);
-    logger.info(`群 ${roomId} 已解散（ rooms/<rid>/ + 各成员 chat/<id>/<rid>/ 已清）`);
+    logger.info(`群 ${roomId} 已解散（ profiles/rooms/<rid>/ + 各成员 profiles/agents/<id>/rooms/<rid>/ 已清）`);
   }
 
   /** 读取某 agent config.json 的 name（失败/无则回退 agentId，容错不抛） */
@@ -1157,10 +1155,10 @@ export class RoomManager {
         const rec = this.registry.read(roomId, agentId);
         port = rec?.port || null;
       }
-      // 2) 有 port → 调副本 /clear；不可达/非 200 走删盘兜底
+      // 2) 有 port → 调副本 /clear/:roomId（v3 共享进程按房清，旧 /clear 只清默认私聊房）；不可达/非 200 走删盘兜底
       if (port) {
         try {
-          const resp = await fetch(`http://127.0.0.1:${port}/clear`, { method: 'POST', signal: AbortSignal.timeout(5000) });
+          const resp = await fetch(`http://127.0.0.1:${port}/clear/${encodeURIComponent(roomId)}`, { method: 'POST', signal: AbortSignal.timeout(5000) });
           if (resp.ok) {
             ok = true;
             logger.info(`清理记忆成功 ${roomId}/${agentId} (副本 /clear)`);
@@ -1175,29 +1173,29 @@ export class RoomManager {
       } else {
         reason = 'no-port';
       }
-      // 3) 兜底：副本未确认清理 → 直接清记忆本体。v3 记忆目录 = chat/<agentId>/<rid>/（context+tool-results）。
-      //    旧 rooms/<rid>/data/<agentId>/ 已废；此处整目录删（context/tool-results 一起）。
+      // 3) 兜底：副本未确认清理 → 直接清记忆本体。记忆目录 = profiles/agents/<id>/rooms/<rid>/（context+tool-results）。
+      //    兼容旧布局 profiles/agents/<id>/<rid>/（无 rooms/ 层，server.js 旧 getOrCreateRoom 拼法），一并清。
       if (!ok) {
-        const chatRoot = this.chatRoot;
-        const dataDir = path.join(chatRoot, agentId, roomId);
-        const ctxFile = path.join(dataDir, 'context.json');
-        try {
-          if (fs.existsSync(ctxFile)) {
-            fs.writeFileSync(ctxFile, '[]', 'utf-8');
-            ok = true;
-            logger.info(`清理记忆成功 ${roomId}/${agentId} (删盘兜底 context.json)`);
-          } else if (port) {
-            // 端口活着但无 context.json(to-string 新副本) → 视为已清
-            ok = true;
-          }
-        } catch (err) {
-          reason = `del-context:${err.message}`;
-          logger.error(`删 context.json 失败 ${roomId}/${agentId}: ${err.message}`);
+        const dataDir = agentRoomState(agentId, roomId);
+        const legacyDataDir = path.join(path.dirname(path.dirname(dataDir)), path.basename(dataDir)); // profiles/agents/<id>/<rid>
+        const dirs = [dataDir, legacyDataDir];
+        let clearedAny = false;
+        for (const d of dirs) {
+          const ctxFile = path.join(d, 'context.json');
+          try {
+            if (fs.existsSync(ctxFile)) { fs.writeFileSync(ctxFile, '[]', 'utf-8'); clearedAny = true; }
+          } catch (err) { logger.error(`删 context.json 失败 ${roomId}/${agentId} (${d}): ${err.message}`); }
+          const trDir = path.join(d, 'tool-results');
+          try { if (fs.existsSync(trDir)) fs.rmSync(trDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
         }
-        // tool-results 目录一并清(对齐副本 /clear 的 _cleanupToolResults)
-        const trDir = path.join(dataDir, 'tool-results');
-        try { if (fs.existsSync(trDir)) fs.rmSync(trDir, { recursive: true, force: true }); }
-        catch (e) { /* ignore */ }
+        if (clearedAny) {
+          ok = true;
+          logger.info(`清理记忆成功 ${roomId}/${agentId} (删盘兜底 context.json)`);
+        } else if (port) {
+          // 端口活着但无 context.json(新副本) → 视为已清
+          ok = true;
+        }
+        if (!ok) reason = reason || 'no-context-file';
       }
       return ok ? { agentId, ok: true } : { agentId, ok: false, reason: reason || 'unknown' };
     }));

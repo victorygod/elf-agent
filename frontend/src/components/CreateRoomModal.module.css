@@ -61,7 +61,10 @@
 }
 .checked { background: #e3f2fd; border-color: #4a90d9; }
 
-.idHint { font-size: 12px; color: #999; }
+.agentName { font-weight: 600; color: #333; font-size: 14px; }
+.idHint { font-size: 12px; color: #aaa; font-weight: 400; }
+.checked .agentName { color: #1a5276; }
+.checked .idHint { color: #5dade2; }
 
 .err { color: #e53935; padding: 0 20px; font-size: 13px; }
 

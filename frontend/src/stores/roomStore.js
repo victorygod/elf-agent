@@ -21,6 +21,19 @@ export const useRoomStore = create((set, get) => ({
   // 侧栏手动排序：{ rooms: [roomId...], agents: [agentId...] }，区段内各自排序
   sidebarOrder: { rooms: [], agents: [] },
 
+  // ===== 群聊居中通知（多条竖排，与 agentStore.toastList 对称，复用共享 Toast 组件） =====
+  roomToastList: [],
+  _roomToastKey: 0,
+
+  showRoomToast: (fields) => set(s => {
+    const id = s._roomToastKey + 1;
+    return { roomToastList: [...s.roomToastList, { id, fields }], _roomToastKey: id };
+  }),
+
+  removeRoomToast: (id) => set(s => ({ roomToastList: s.roomToastList.filter(t => t.id !== id) })),
+
+  clearRoomToast: () => set({ roomToastList: [] }),
+
   /** 加载群列表 */
   loadRooms: async () => {
     const rooms = await api.loadRooms();
@@ -164,8 +177,14 @@ export const useRoomStore = create((set, get) => ({
   },
 
   _updateRoomInList: (roomId, room) => {
+    // rooms 列表里 members 一律存 agentId 字符串数组（与 loadRooms/createRoom 一致）。
+    // addMember/removeMember 后端返回的是 getRoom() → 成员对象数组 {agentId,name,avatar,status}，
+    // 若不规整，RoomConfigDrawer 的 room.members.map(id => ...) 会把对象当 React 子节点渲染 → 白屏。
+    const members = (room?.members || [])
+      .map(m => (typeof m === 'string' ? m : m?.agentId))
+      .filter(Boolean);
     set((s) => ({
-      rooms: s.rooms.map(r => r.roomId === roomId ? { ...r, members: room.members } : r),
+      rooms: s.rooms.map(r => r.roomId === roomId ? { ...r, members } : r),
     }));
   },
 }));

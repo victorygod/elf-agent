@@ -7,6 +7,7 @@ import { createGatewayApp } from '../gateway/server.js';
 import { ProcessManager } from '../gateway/process_manager.js';
 import { ChatHistory } from '../gateway/chat_history.js';
 import { RoomManager } from '../gateway/room_bus.js';
+import { _resetProfilesRoot } from '../shared/profiles_paths.js';
 
 function fakeProcessManager(tmpAgentsDir) {
   return {
@@ -26,6 +27,9 @@ describe('/rooms/* routes', () => {
 
   before(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-rrt-'));
+    // profiles 根隔离到 tmpDir（snapshot/agentMemory 落盘全在 tmpDir 下，避免污染真实 cwd/profiles）。
+    process.env.ELF_PROFILES_ROOT = tmpDir + '/profiles';
+    _resetProfilesRoot();
     roomsDir = path.join(tmpDir, 'rooms');
     agentsDir = path.join(tmpDir, 'agents');
     fs.mkdirSync(agentsDir, { recursive: true });
@@ -45,7 +49,6 @@ describe('/rooms/* routes', () => {
     const pm = fakeProcessManager(agentsDir);
     const privateRoomHistory = new ChatHistory(roomsDir, roomsDir, { roomMode: true, roomsDir });
     pm.privateRoomHistory = privateRoomHistory;
-    pm.chatDir = roomsDir;
     const app = createGatewayApp(pm, roomManager, { privateRoomHistory });
     await new Promise((resolve) => {
       server = app.listen(0, '127.0.0.1', () => {
@@ -58,6 +61,8 @@ describe('/rooms/* routes', () => {
   after(async () => {
     if (server) await new Promise((r) => server.close(r));
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    delete process.env.ELF_PROFILES_ROOT;
+    _resetProfilesRoot();
   });
 
   it('POST /rooms creates room', async () => {

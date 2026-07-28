@@ -1,0 +1,72 @@
+{
+  "agentId": "elf-016",
+  "name": "星期日",
+  "port": 8096,
+  "avatar": "avatar.webp",
+  "userAvatar": "user_avatar.webp",
+  "provider": "llm",
+  "systemPrompt": {
+    "type": "path",
+    "content": "system_prompt.md"
+  },
+  "prefix_prompt": {
+    "type": "path",
+    "content": "prefix_prompt.md"
+  },
+  "suffix_prompt": {
+    "type": "path",
+    "content": "suffix_prompt.md"
+  },
+  "compactPrompt": "总结至今的对话内容",
+  "compactSystemPrompt": "",
+  "compactMode": "async",
+  "memoryTokenLimit": 40000,
+  "maxIterations": 0,
+  "messageManagerClass": "message_manager",
+  "interaction": {
+    "strategy": "observe",
+    "observe": {
+      "observationWindowSec": 60
+    }
+  },
+  "tools": [
+    "Read",
+    "Bash",
+    "Grep",
+    "Glob"
+  ],
+  "_ui": {
+    "name": {
+      "label": "Agent 名称",
+      "hint": "显示在前端界面的可读名称"
+    },
+    "systemPrompt": {
+      "label": "系统提示词",
+      "hint": "定义 Agent 的角色和行为方式"
+    },
+    "prefix_prompt": {
+      "label": "前缀提示词",
+      "hint": "附加在用户最新输入之前，仅发送给 LLM 时拼接，不写入记忆"
+    },
+    "suffix_prompt": {
+      "label": "后缀提示词",
+      "hint": "附加在用户最新输入之后，仅发送给 LLM 时拼接，不写入记忆"
+    },
+    "compactPrompt": {
+      "label": "压缩提示词",
+      "hint": "记忆压缩时附加在历史末尾的 user 指令（触发自动压缩的摘要请求）"
+    },
+    "compactSystemPrompt": {
+      "label": "压缩系统提示词",
+      "hint": "记忆压缩请求的 system 消息（留空则不带 system）"
+    },
+    "memoryTokenLimit": {
+      "label": "记忆压缩 Token 上限",
+      "hint": "超过此阈值时触发记忆压缩（建议 4000-16000）"
+    },
+    "maxIterations": {
+      "label": "最大迭代轮数",
+      "hint": "Agent Loop 最大循环次数（设为 0 表示无限迭代）"
+    }
+  }
+}

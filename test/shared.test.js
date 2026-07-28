@@ -9,13 +9,14 @@ import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
+import { logsDir } from '../shared/profiles_paths.js';
 import os from 'os';
-import { LLMModel } from '../engine/llm_model.js';
-import { MockModel } from '../engine/mock_model.js';
+import { LLMModel } from '../engine/models/index.js';
+import { MockModel } from '../engine/models/index.js';
 import { createLogger } from '../shared/logger.js';
 import { Config } from '../engine/config_loader.js';
 import { MessageManager } from '../engine/message_manager.js';
-import { Agent } from '../engine/default_agent.js';
+import { Agent } from '../engine/agent.js';
 import { ToolManager } from '../engine/tools/tool_manager.js';
 import { Read, Write, Edit, Bash, Glob, Grep } from '../engine/tools/index.js';
 import { reset as resetReadState } from '../engine/tools/read_state.js';
@@ -369,7 +370,7 @@ describe('Logger', () => {
     const logFileName = `test-shared-${Date.now()}.log`;
     const logger = createLogger('test-module', logFileName);
     logger.info('test log line');
-    const logPath = path.join(process.cwd(), 'logs', logFileName);
+    const logPath = path.join(logsDir(), logFileName);
     try {
       const content = fs.readFileSync(logPath, 'utf-8');
       assert.ok(content.includes('[INFO]'), '日志应包含 [INFO]');
@@ -672,7 +673,7 @@ describe('Agent', () => {
         { content: '文件内容已读取完毕。' }
       ]
     });
-    agent.updateModel(toolModel);
+    agent.model = toolModel;
     const events = [];
     await agent.receive('帮我看看文件', { emit: e => events.push(e) });
     const toolCallEvents = events.filter(e => e.event === 'tool_call');
@@ -696,7 +697,7 @@ describe('Agent', () => {
         { content: '好了。' }
       ]
     });
-    agent.updateModel(toolModel);
+    agent.model = toolModel;
     const events = [];
     await agent.receive('读取文件', { emit: e => events.push(e) });
     const statusEvents = events.filter(e => e.event === 'status');

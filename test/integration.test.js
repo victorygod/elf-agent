@@ -7,7 +7,14 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { execSync } from 'child_process';
+
+// profiles 根隔离到 tmpDir：logger.js 顶层在 import 阶段就求值 logsDir()→profilesRoot() 并缓存，
+//   必须在 import gateway 模块（触发 logger）之前设 env，否则 _root 锁死成真实 cwd/profiles。
+//   agent 子进程 spawn 时继承此 env，data 同样落 tmpDir/profiles，端到端不污染真实项目目录。
+const __profilesRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-int-profiles-'));
+process.env.ELF_PROFILES_ROOT = __profilesRoot;
 
 // 集成测试需要实际的 Agent 进程运行，检查 gateway 模块是否存在
 let ProcessManager, createGatewayApp;
@@ -43,14 +50,16 @@ describe('Agent + Gateway 集成测试', () => {
     }
     await new Promise(r => setTimeout(r, 200));
     // v3：注入 roomManager + 私聊房历史，供 /rooms/* 路由（含私聊 chat-<id>）。
+    //   roomsDir 走 profilesRoot 下的 roomsRoot()，与 agent data（ELF_DATA_DIR=agentMemory）同根，snapshot 跨两根一致。
     const { RoomManager } = await import('../gateway/room_bus.js');
     const { ChatHistory } = await import('../gateway/chat_history.js');
-    const roomsDir = path.join(process.cwd(), 'rooms');
+    const { roomsRoot, _resetProfilesRoot } = await import('../shared/profiles_paths.js');
+    _resetProfilesRoot();   // 确保读已有 env
+    const roomsDir = roomsRoot();
     try { fs.mkdirSync(roomsDir, { recursive: true }); } catch (e) {}
     const roomManager = new RoomManager(roomsDir, GATEWAY_PORT, { pm, gatewayUrl: `http://127.0.0.1:${GATEWAY_PORT}` });
     const privateRoomHistory = new ChatHistory(roomsDir, roomsDir, { roomMode: true, roomsDir });
     pm.privateRoomHistory = privateRoomHistory;
-    pm.chatDir = path.join(process.cwd(), 'chat');   // snapshot/rewind 用
     pm._gatewayUrl = `http://127.0.0.1:${GATEWAY_PORT}`;
     const app = createGatewayApp(pm, roomManager, { privateRoomHistory });
     await new Promise((resolve) => {
@@ -97,6 +106,9 @@ describe('Agent + Gateway 集成测试', () => {
       await new Promise(resolve => gatewayServer.close(resolve));
     }
 
+    // ⑤ 清理隔离的 profiles 临时目录
+    try { fs.rmSync(__profilesRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+    delete process.env.ELF_PROFILES_ROOT;
     delete process.env.ELF_FORCE_MOCK_MODEL;
   });
 

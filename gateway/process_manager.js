@@ -13,6 +13,7 @@ import { createLogger } from '../shared/logger.js';
 import { probePort, findPidFromPort as probe_findPidFromPort, waitForReady as probe_waitForReady, httpShutdown as probe_httpShutdown, waitForPortFree as probe_waitForPortFree, PROBE_INTERVAL, STOP_PROBE_INTERVAL } from '../shared/agent_probe.js';
 import { connectAgentEvents, disconnectAgentEvents } from './agent_events.js';
 import { handlePrivateAgentEvent } from './private_room_stream.js';
+import { agentMemory } from '../shared/profiles_paths.js';
 
 const logger = createLogger('process-manager', 'gateway.log');
 
@@ -30,7 +31,6 @@ export class ProcessManager {
     this.agentsDir = path.join(process.cwd(), 'agents');
     // v3：privateRoomHistory 由 gateway/index.js 注入，供 _onAgentEvent 路由私聊房事件落 history。
     this.privateRoomHistory = null;
-    this.chatDir = null;
   }
 
   /**
@@ -216,9 +216,9 @@ export class ProcessManager {
     }
 
     const entryFile = path.join(this.agentsDir, id, 'index.js');
-    // 私聊 chat 实例 data 目录：根级 chat/<agentId>/data（与 rooms/<roomId>/ 对称）。
-    //   agent 进程经 ELF_DATA_DIR env 读用；阶段二一进程一实例。老 agents/<id>/data 由 start.js 首启迁移。
-    const chatDataDir = path.join(process.cwd(), 'chat', id, 'data');
+    // 私聊实例记忆目录：profiles/agents/<agentId>/memory（agent 拥有自己的记忆）。
+    //   agent 进程经 ELF_DATA_DIR env 读用；一进程一实例。老 chat/<id>/data、agents/<id>/data 由 start.js 首启迁移。
+    const chatDataDir = agentMemory(id);
 
     try {
       const child = spawn(process.execPath, [entryFile], {
@@ -393,7 +393,10 @@ export class ProcessManager {
       handlePrivateAgentEvent(event, data, this.privateRoomHistory || null);
       return;
     }
-    // 群聊异步事件（compact 等）：内部压缩不外露，前端无订阅者，忽略。
+    // 群聊异步事件（compact 等）：内部压缩不外露，前端无订阅者，忽略。compact 类事件明记一行，便于排查"压了但看不到"。
+    if (typeof event === 'string' && event.startsWith('compact')) {
+      logger.info(`[compact] 群聊 ${agentId} event=${event} 内部已处理，前端无订阅者，不外露`);
+    }
   }
 
   // ─── 私有方法 ───────────────────────────────────────────

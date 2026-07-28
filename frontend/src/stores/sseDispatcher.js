@@ -10,6 +10,7 @@
 
 import * as api from '../api/index.js';
 import useAgentStore from './agentStore.js';
+import { rebuildFromSnapshot, applyToken, applyToolCall, applyToolResult } from '../lib/turn-stream-client-core.js';
 
 // ===== 压缩气泡 compactId 锚定辅助（纯函数，跨 turn 定位气泡）=====
 
@@ -95,22 +96,16 @@ function _flushRaf(agentId) {
     cancelAnimationFrame(st.rafId);
     st.rafId = null;
   }
-  const update = st.pendingUpdate;
-  const at = update?.activeTurn;
-  if (!at) {
-    st.pendingContent = '';
-    st.pendingUpdate = null;
-    return;
-  }
-  const newBubbles = at.assistantBubbles.map((b, i) => {
-    if (i === at.assistantBubbles.length - 1 && st.pendingContent) {
-      return { ...b, content: b.content + st.pendingContent };
-    }
-    return { ...b };
-  });
-  _patchChat(agentId, { activeTurn: { ...at, assistantBubbles: newBubbles } });
+  const at = st.pendingUpdate?.activeTurn;
+  const delta = st.pendingContent;
   st.pendingContent = '';
   st.pendingUpdate = null;
+  if (!at || !delta) return;
+  // content 续接走 client-core（sealed 契约决定续接/新建）
+  const newAt = applyToken(at, delta, {
+    newBubbleId: () => `local_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+  });
+  _patchChat(agentId, { activeTurn: newAt });
 }
 
 /** activeTurn 收入 turns（done/aborted/error/发消息失败时调） */
@@ -151,44 +146,40 @@ export function handleSSEEvent(agentId, event, data) {
           snapCompactBubbles.push(`activeTurn id=${b.id} loading=${b.compactLoading} summary=${b.compactSummary} error=${b.compactError}`);
         }
       }
-      api.log('INFO', `[compact-bubble][DIAG] snapshot arrive: streaming=${data.streaming} turns=${(turns||[]).length} activeTurn=${!!activeTurn} compactBubbles=[${snapCompactBubbles.join(' | ')}]`);
+      // 日志：snapshot 到达时的关键数据（tool 气泡数 + 各 turn bubble 数）
+      const toolBubblesInTurn = [];
+      for (const t of (turns || [])) {
+        for (const b of (t.assistantBubbles || [])) {
+          if (b.toolCalls?.length) toolBubblesInTurn.push(`${t.id}(${b.id}):${b.toolCalls.length}tc`);
+        }
+      }
+      const toolBubblesInActive = [];
+      for (const b of (activeTurn?.assistantBubbles || [])) {
+        if (b.toolCalls?.length) toolBubblesInActive.push(`${b.id}:${b.toolCalls.length}tc`);
+      }
+      api.log('INFO', `[snapshot] agent=${agentId} streaming=${data.streaming} turns=${(turns||[]).length} active=${!!activeTurn} toolBubbles=[turn:${toolBubblesInTurn.join(',')}|active:${toolBubblesInActive.join(',')}] compact=[${snapCompactBubbles.join('|')}]`);
 
-      const bubbles = (activeTurn?.assistantBubbles || []).map((b, i) => ({
-        ...b,
-        id: b.id || `snap_bubble_${Date.now()}_${i}`,
-      }));
-      const patchedActiveTurn = activeTurn ? { ...activeTurn, assistantBubbles: bubbles } : null;
-
+      // 状态构建走 client-core 纯函数（sealed 契约 + bubble 补 id；输出形状与旧逻辑逐行等价）
+      const rebuilt = rebuildFromSnapshot(data);
       _patchChat(agentId, {
-        turns: turns || [],
-        activeTurn: patchedActiveTurn,
-        historyLoaded: true,
-        hasMore: data.hasMore !== undefined ? data.hasMore : false,
+        turns: rebuilt.turns,
+        activeTurn: rebuilt.activeTurn,
+        historyLoaded: rebuilt.historyLoaded,
+        hasMore: rebuilt.hasMore,
       });
       break;
     }
 
     case 'token': {
       if (!chat) return;
-      let at = chat.activeTurn;
+      const at = chat.activeTurn;
       if (!at) return;
-      let lastBubble = at.assistantBubbles[at.assistantBubbles.length - 1];
-      let needNewBubble = !lastBubble || lastBubble.sealed;
-      if (needNewBubble) {
-        lastBubble = {
-          id: `local_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-          content: '', toolCalls: [], ts: new Date().toISOString(), sealed: false,
-        };
-      }
-      const cleanedBubble = lastBubble.typing ? { ...lastBubble, typing: undefined } : lastBubble;
-      const newBubbles = needNewBubble
-        ? [...at.assistantBubbles, cleanedBubble]
-        : at.assistantBubbles.map((b, i) => i === at.assistantBubbles.length - 1 ? cleanedBubble : b);
-
+      // raf 批处理：pendingContent 累加 delta；flush 时调 applyToken 一次应用（写 store）。
+      //   applyToken 内部按 shouldStartNewBubble（sealed 契约）决定续接尾 bubble / 新建。
       let st = _rafState.get(agentId);
       if (!st) { st = { rafId: null, pendingContent: '', pendingUpdate: null }; _rafState.set(agentId, st); }
       st.pendingContent += data.content;
-      st.pendingUpdate = { activeTurn: { ...at, assistantBubbles: newBubbles } };
+      st.pendingUpdate = { activeTurn: at };
       if (!st.rafId) {
         st.rafId = requestAnimationFrame(() => _flushRaf(agentId));
       }
@@ -197,24 +188,12 @@ export function handleSSEEvent(agentId, event, data) {
 
     case 'tool_call': {
       const chat2 = getState().chats.get(agentId);
-      let at = chat2?.activeTurn;
+      const at = chat2?.activeTurn;
       if (!at) return;
-      let lastBubble = at.assistantBubbles[at.assistantBubbles.length - 1];
-      let needNewBubble = !lastBubble || lastBubble.sealed;
-      if (needNewBubble) {
-        lastBubble = {
-          id: `local_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-          content: '', toolCalls: [], ts: new Date().toISOString(), sealed: false,
-        };
-      }
-      const cleanedBubble = lastBubble.typing ? { ...lastBubble, typing: undefined } : lastBubble;
-      const existingToolCalls = cleanedBubble.toolCalls || [];
-      const newToolCalls = [...existingToolCalls, ...(data.tool_calls || []).map(tc => ({ ...tc, status: 'executing' }))];
-      const updatedBubble = { ...cleanedBubble, toolCalls: newToolCalls };
-      const newBubbles = needNewBubble
-        ? [...at.assistantBubbles, updatedBubble]
-        : at.assistantBubbles.map((b, i) => i === at.assistantBubbles.length - 1 ? updatedBubble : b);
-      _patchChat(agentId, { activeTurn: { ...at, assistantBubbles: newBubbles } });
+      const newAt = applyToolCall(at, data.tool_calls, {
+        newBubbleId: () => `local_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      });
+      _patchChat(agentId, { activeTurn: newAt });
       break;
     }
 
@@ -222,26 +201,8 @@ export function handleSSEEvent(agentId, event, data) {
       const chat3 = getState().chats.get(agentId);
       const at = chat3?.activeTurn;
       if (!at) return;
-      const lastBubble = at.assistantBubbles[at.assistantBubbles.length - 1];
-      if (!lastBubble || !lastBubble.toolCalls) return;
-      // 按工具调用 id 匹配 executeBatch 的逐个完成即推（tool_result.data.id = tool_call.id）。
-      // 无 id 时回退到"第一个 executing"（兼容旧事件）。
-      const idx = data.id != null
-        ? lastBubble.toolCalls.findIndex(tc => tc.id === data.id)
-        : lastBubble.toolCalls.findIndex(tc => tc.status === 'executing');
-      if (idx < 0) break;
-      const newToolCalls = lastBubble.toolCalls.map((tc, i) => {
-        if (i === idx) {
-          const updated = { ...tc, status: data.status };
-          if (data.message) updated.message = data.message;
-          return updated;
-        }
-        return { ...tc };
-      });
-      const allDone = !newToolCalls.some(tc => tc.status === 'executing');
-      const updatedBubble = { ...lastBubble, toolCalls: newToolCalls, sealed: allDone && newToolCalls.length > 0 ? true : lastBubble.sealed };
-      const newBubbles = at.assistantBubbles.map((b, i) => i === at.assistantBubbles.length - 1 ? updatedBubble : b);
-      _patchChat(agentId, { activeTurn: { ...at, assistantBubbles: newBubbles } });
+      const newAt = applyToolResult(at, data);
+      if (newAt !== at) _patchChat(agentId, { activeTurn: newAt });
       break;
     }
 
@@ -319,11 +280,6 @@ export function handleSSEEvent(agentId, event, data) {
       break;
     }
 
-    case 'idle': {
-      getState().loadHistory(agentId);
-      break;
-    }
-
     case 'compact_abort': {
       _applyCompactResult(agentId, data.compactId,
         { compactError: '记忆压缩已终止' },
@@ -364,8 +320,15 @@ export function handleSSEEvent(agentId, event, data) {
     }
 
     case 'error': {
+      // 最终失败的居中提示统一由 notice(kind:'error') 驱动（私聊 emitError / 也会发 notice）。
+      // error 这里只收尾 activeTurn，不再单独弹 toast，避免与 notice 重复。
       finalizeActiveTurn(agentId);
-      getState().showToast(`错误: ${data.message}`);
+      break;
+    }
+
+    case 'notice': {
+      // LLM 重试/最终失败的居中瞬态气泡（含 agent 名/重试次数）。toast 内部管 3s 计时淡出。
+      getState().showToast(data);
       break;
     }
   }

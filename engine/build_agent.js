@@ -11,36 +11,32 @@
  */
 import path from 'path';
 import { createLogger } from '../shared/logger.js';
-import { Config } from './config_loader.js';
-import { LLMModel } from './llm_model.js';
-import { MockModel } from './mock_model.js';
+import { LLMModel, MockModel } from './models/index.js';
 import { ToolManager } from './tools/tool_manager.js';
 import * as allTools from './tools/index.js';
 import { SkillLister } from './skills/lister.js';
-import { Agent } from './default_agent.js';   // 阶段二 default_agent.js → agent.js 重命名后改此 import
+import { Agent } from './agent.js';
 
 let logFileName = null;
 export function setBuildAgentLogFileName(name) { logFileName = name; }
 
 /**
  * @param {object} opts
- * @param {string} opts.configDir - agent 配置目录（config/ 所在）
+ * @param {object} opts.config - 已实例化+load 的 Config（create_agent.js new 好传入，全链路单实例）
  * @param {object} opts.messageManager - 已实例化的 mm（create_agent.js 显式 new 好传入）
  * @param {object} [opts.runContext] - 运行时身份（mode/dataDir 等）
  * @param {object} [opts.model] - 自定义 model（测试用），缺省按 config.provider 建
  * @param {object} [opts.toolManager] - 自定义 toolManager（测试用），缺省按 config.tools 建
  * @param {Array} [opts.extraMiddleware] - 额外 agent-level middleware（create_agent.js 显式加）
- * @param {string} [opts.dataDir] - 数据目录，缺省 configDir/..（阶段二迁实例级）
+ * @param {string} [opts.dataDir] - 数据目录，缺省 config.configDir/..
  * @returns {Promise<Agent>}
  */
-export async function buildAgentFromConfig({ configDir, messageManager, runContext = null, model, toolManager, extraMiddleware = [], dataDir } = {}) {
+export async function buildAgentFromConfig({ messageManager, runContext = null, model, toolManager, extraMiddleware = [], dataDir, config } = {}) {
   const logger = createLogger('agent-init', logFileName);
   if (!messageManager) throw new Error('buildAgentFromConfig: messageManager 必填（create_agent.js 显式 new 后传入）');
+  if (!config) throw new Error('buildAgentFromConfig: config 必填（由 create_agent.js new 后传入，全链路单实例）');
 
-  // 1. config
-  const config = new Config(configDir);
-  config.load();
-  const mmDataDir = dataDir || path.join(configDir, '..', 'data');
+  const mmDataDir = dataDir || path.join(config.configDir, '..', 'data');
 
   // 2. model（按 provider；mock 用 MockModel）
   if (!model) {
@@ -72,7 +68,7 @@ export async function buildAgentFromConfig({ configDir, messageManager, runConte
 
   // 5. agent-level 固有定制（非场景）：skillLister（skills=true）+ detectChangedFiles middleware
   if (config.get('skills') === true) {
-    agent.skillLister = new SkillLister({ messageManager, toolManager, cwd: process.cwd() });
+    agent.skillLister = new SkillLister({ messageManager, toolManager, agent });
     agent.skillLister.enable();
     logger.info('已启用 skill 支持');
   }

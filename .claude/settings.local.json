@@ -8,7 +8,8 @@
       "mcp__codefusesearchmcp__webSearch",
       "Skill(code-review)",
       "Bash(npm test *)",
-      "mcp__codefusesearchmcp__webFetch"
+      "mcp__codefusesearchmcp__webFetch",
+      "Bash(git -C /Users/wolf/Desktop/elf status --short)"
     ]
   }
 }

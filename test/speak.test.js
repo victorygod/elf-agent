@@ -40,7 +40,7 @@ describe('Speak 工具', () => {
     mock.received.length = 0;
     const ctx = { agent: { runContext: { mode: 'room', roomBusUrl: mock.url, memberName: 'elf-001' } } };
     const r = await Speak.execute({ message: '你好' }, undefined, ctx);
-    assert.equal(r, '已发言');
+    assert.match(r, /^\[\d{4} \d{2}:\d{2}\] 已发言$/);
     assert.equal(mock.received.length, 1);
     assert.equal(mock.received[0]._speakerId, 'elf-001');
     assert.equal(mock.received[0].content, '你好');

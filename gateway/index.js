@@ -11,6 +11,7 @@ import { ChatHistory } from './chat_history.js';
 import { createGatewayApp } from './server.js';
 import { RoomManager } from './room_bus.js';
 import { createLogger } from '../shared/logger.js';
+import { profilesRoot, roomsRoot } from '../shared/profiles_paths.js';
 
 const logger = createLogger('gateway-main', 'gateway.log');
 
@@ -22,9 +23,9 @@ async function main() {
   // 2. 初始化进程管理器
   const pm = new ProcessManager();
 
-  // v3：私聊统一为 Room，history 落 rooms/<rid>/history.jsonl；记忆数据（context/tool-results）落 chat/<id>/data。
-  //   旧 agentId-keyed ChatHistory（chat/<id>/data/history.jsonl）已废，不再实例化注入。
-  pm.chatDir = path.join(process.cwd(), 'chat');   // 私聊记忆 data 根（snapshot/rewind/context 用）
+  // profiles 布局：agent 记忆落 profiles/agents/<id>/memory，房间数据落 profiles/rooms/<rid>。
+  //   snapshot/rewind 直接用 profiles_paths 的 agentMemory(id)，无需借 pm 字段拼路径。
+  try { fs.mkdirSync(profilesRoot(), { recursive: true }); } catch (e) { /* ignore */ }
 
   // 3. 扫描 agents/ 目录
   await pm.discoverAgents();
@@ -42,12 +43,12 @@ async function main() {
       : '无运行中的 Agent，等待用户手动启动');
   }
 
-  // 5. 初始化群聊管理器 + 私聊 room 历史管理器（v3：私聊也是 Room，history 写 rooms/<rid>/history.jsonl）
-  const roomsDir = path.join(process.cwd(), 'rooms');
-  try { fs.mkdirSync(roomsDir, { recursive: true }); } catch (e) { /* ignore */ }
-  const roomManager = new RoomManager(roomsDir, config.port, { pm, gatewayUrl: `http://127.0.0.1:${config.port}` });
-  // 私聊房历史（room 模式 ChatHistory：写 rooms/chat-<id>/history.jsonl，schema 与私聊同）。
-  const privateRoomHistory = new ChatHistory(roomsDir, roomsDir, { roomMode: true, roomsDir });
+  // 5. 初始化群聊管理器 + 私聊 room 历史管理器（房间数据落 profiles/rooms/<rid>）
+  const roomsRootDir = roomsRoot();
+  try { fs.mkdirSync(roomsRootDir, { recursive: true }); } catch (e) { /* ignore */ }
+  const roomManager = new RoomManager(roomsRootDir, config.port, { pm, gatewayUrl: `http://127.0.0.1:${config.port}` });
+  // 私聊房历史（room 模式 ChatHistory：写 profiles/rooms/chat-<id>/history.jsonl，schema 与私聊同）。
+  const privateRoomHistory = new ChatHistory(roomsRootDir, roomsRootDir, { roomMode: true, roomsDir: roomsRootDir });
   pm.privateRoomHistory = privateRoomHistory;
 
   // 6. 恢复已有房间的成员副本（gateway 重启后，探活并拉起之前注册在 run.json 中的 agent）

@@ -53,6 +53,14 @@ export function useRoomChat(roomId) {
       } catch (e) { /* ignore */ }
     });
 
+    es.addEventListener('notice', (ev) => {
+      // LLM 重试/最终失败等居中瞬态通知（agent 经 roomBusUrl 直推 → broadcast）
+      try {
+        const data = JSON.parse(ev.data);
+        useRoomStore.getState().showRoomToast(data);
+      } catch (e) { /* ignore */ }
+    });
+
     es.onerror = () => {
       // EventSource 自动重连；这里仅记录，不手动处理
     };

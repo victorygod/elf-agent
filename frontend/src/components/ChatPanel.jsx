@@ -5,34 +5,19 @@ import CompactBadge from './CompactBadge';
 import MarkdownContent from './MarkdownContent';
 import EmptyState from './EmptyState';
 import RewindMenu from './RewindMenu';
+import ToastStack from './Toast';
 import useChat from '../hooks/useChat';
 import useAgentStore from '../stores/agentStore';
 import { useRoomStore } from '../stores/roomStore';
 import styles from './ChatPanel.module.css';
 
 /**
- * Toast 通知：顶部居中，1s 后淡出
+ * Toast 通知：顶部居中竖排（共享组件，多条各 3s 显示 + 0.4s 淡出，互不干扰）
  */
-function Toast() {
-  const message = useAgentStore(s => s.toastMessage);
-  const toastKey = useAgentStore(s => s._toastKey);
-  const [fading, setFading] = useState(false);
-
-  useEffect(() => {
-    if (!message) { setFading(false); return; }
-    setFading(false);
-    const t1 = setTimeout(() => setFading(true), 700);
-    return () => clearTimeout(t1);
-  }, [message, toastKey]);
-
-  useEffect(() => {
-    if (!fading) return;
-    const t = setTimeout(() => useAgentStore.getState().showToast(null), 300);
-    return () => clearTimeout(t);
-  }, [fading]);
-
-  if (!message) return null;
-  return <div className={`${styles.toast} ${fading ? styles.toastFade : ''}`}>{message}</div>;
+function PrivateToast() {
+  const toasts = useAgentStore(s => s.toastList);
+  const removeToast = useAgentStore(s => s.removeToast);
+  return <ToastStack toasts={toasts} remove={removeToast} styles={styles} />;
 }
 
 /**
@@ -180,16 +165,17 @@ export default function ChatPanel({ agentId }) {
   const userScrolledAwayRef = useRef(false);
 
   // 首次加载历史 + 恢复草稿/滚动（仅当 isActive 变为 true 时执行一次）
-  // ★ activeTurn 在途时不 loadHistory —— 发消息瞬间 user 已落盘 jsonl，
-  //   此时 loadHistory 会把这条 user 读进 turns，与 activeTurn 同框渲染导致对话翻倍。
-  //   用前端实时维护的 activeTurn 判据，而非陈旧的后端 agent.streaming。
+  // ★ 历史加载 single source：agent running 时由常驻 SSE snapshot 提供（snapshot 设 historyLoaded=true），
+  //   本组件不再调 loadHistory——避免 REST 路径与 SSE snapshot 竞态覆盖导致的 user 翻倍/历史错乱。
+  //   仅 agent 未运行（无 SSE）时 force 拉一次磁盘历史兜底。
   const initDoneRef = useRef(false);
   useEffect(() => {
     if (!isActive || !agent) return;
     if (initDoneRef.current) return;
 
-    if (!historyLoaded && !activeTurn) {
-      loadHistory(agentId);
+    const stopped = agent.status !== 'running';
+    if (!historyLoaded && stopped) {
+      loadHistory(agentId, { force: true });
     }
 
     requestAnimationFrame(() => {
@@ -204,7 +190,7 @@ export default function ChatPanel({ agentId }) {
     }
 
     initDoneRef.current = true;
-  }, [isActive, agent, historyLoaded, _savedScrollTop, draft, loadHistory, activeTurn]);
+  }, [isActive, agent, historyLoaded, _savedScrollTop, draft, loadHistory]);
 
   // ★ SSE 订阅已上移到 app 级 useAgentSubscriptions（常驻、切 tab 不断），
   //    ChatPanel 不再管理 subscribe 生命周期。本组件只消费 agentStore 里的 turns/activeTurn。
@@ -530,7 +516,7 @@ export default function ChatPanel({ agentId }) {
 
   return (
     <div className={styles.panel} style={{ display: isActive ? 'flex' : 'none' }}>
-      <Toast />
+      <PrivateToast />
       <div className={styles.messages} ref={messagesElRef} onScroll={handleScroll}>
         {!hasContent && !isStreaming ? (
           <EmptyState agentName={agent.name || agentId} />

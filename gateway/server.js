@@ -13,8 +13,9 @@ import { readAgentConfig, writeAgentConfig } from './config_store.js';
 import { loadGatewayConfig, saveGatewayConfig } from './config.js';
 import { handleAvatarUpload } from './avatar.js';
 import { registerRoomRoutes } from './room_routes.js';
+import { createAgentFromTemplate } from './agent_scaffold.js';
 import {
-  listSkills, getSkillDetail, deleteSkill, installSkill, browseDirs, skillRoots,
+  listSkills, getSkillDetail, deleteSkill, installSkill, browseDirs, skillRoot,
 } from './skill_store.js';
 
 const logger = createLogger('gateway-server', 'gateway.log');
@@ -47,6 +48,21 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
   // GET /agents — 列出所有 Agent
   app.get('/agents', (req, res) => {
     res.json(pm.listAgents());
+  });
+
+  // POST /agents — 从独立模板创建一个白板 Agent（body: { name }，不读写 elf-001）
+  app.post('/agents', async (req, res) => {
+    try {
+      const { name } = req.body || {};
+      const created = await createAgentFromTemplate({ agentsDir: pm.agentsDir, name });
+      // 增量扫描，把新目录发现进 ProcessManager 内存
+      await pm.rediscoverAgents();
+      await pm.probeAgent(created.agentId).catch(() => {});
+      res.json(created);
+    } catch (err) {
+      logger.error(`创建 Agent 失败: ${err.message}`);
+      res.status(err.statusCode || 500).json({ error: err.message });
+    }
   });
 
   // GET /available-tools — 列出所有可用工具名（来自 engine/tools/index.js 的 re-export）
@@ -157,30 +173,30 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
   // Skill 管理（平台级，不带 :id）
   // ========================
 
-  // GET /skills — 列出 user + project 两目录下所有 skill
+  // GET /skills — 列出 ~/.elf/skills 下所有 skill
   app.get('/skills', (req, res) => {
     try {
-      res.json({ skills: listSkills(), roots: skillRoots() });
+      res.json({ skills: listSkills(), root: skillRoot() });
     } catch (err) {
       logger.error(`列出 skill 失败: ${err.message}`);
       res.status(500).json({ error: `Failed to list skills: ${err.message}` });
     }
   });
 
-  // GET /skills/:source/:name — 读单个 skill 的 SKILL.md 全文
-  app.get('/skills/:source/:name', (req, res) => {
+  // GET /skills/:name — 读单个 skill 的 SKILL.md 全文
+  app.get('/skills/:name', (req, res) => {
     try {
-      const content = getSkillDetail(req.params.source, req.params.name);
+      const content = getSkillDetail(req.params.name);
       res.json({ content });
     } catch (err) {
       res.status(404).json({ error: err.message });
     }
   });
 
-  // DELETE /skills/:source/:name — 删除一个 skill 目录
-  app.delete('/skills/:source/:name', (req, res) => {
+  // DELETE /skills/:name — 删除一个 skill 目录
+  app.delete('/skills/:name', (req, res) => {
     try {
-      const result = deleteSkill(req.params.source, req.params.name);
+      const result = deleteSkill(req.params.name);
       res.json(result);
     } catch (err) {
       res.status(400).json({ error: err.message });

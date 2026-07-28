@@ -13,7 +13,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { setLogFileName as setConfigLogFileName } from './config_loader.js';
-import { setAgentLogFileName } from './default_agent.js';
+import { setAgentLogFileName } from './agent.js';
 import { createAgentServer, setServerLogFileName } from './server.js';
 import { setLogFileName as setMessageManagerLogFileName } from './message_manager.js';
 import { buildRunContext } from './run_context.js';
@@ -37,25 +37,6 @@ import { createLogger } from '../shared/logger.js';
  * 副本 spawn 调 startAgent(configDir, {mode:'room', port, dataDir, roomId, memberName, roomBusUrl})。
  */
 
-/**
- * 私聊 chat 实例 data 迁移：首次启动若 newDir 空但 oldDir（agents/<id>/data）存在，整体搬过去。
- *   一次性、幂等（newDir 已有内容则不搬）。搬后 mm/syncSource/ChatHistory 全用新路径，无散落回退。
- */
-function migrateDataDir(oldDir, newDir, logger) {
-  try {
-    if (!fs.existsSync(oldDir)) return;                 // 无老 data（全新实例）→ 不迁
-    const newExists = fs.existsSync(newDir) && fs.readdirSync(newDir).length > 0;
-    if (newExists) return;                              // 新路径已有内容 → 已迁过，不覆盖
-    fs.mkdirSync(newDir, { recursive: true });
-    for (const entry of fs.readdirSync(oldDir)) {
-      fs.renameSync(path.join(oldDir, entry), path.join(newDir, entry));
-    }
-    logger?.info?.(`迁移私聊 data: ${oldDir} → ${newDir}`);
-  } catch (err) {
-    logger?.warn?.(`私聊 data 迁移失败(非致命，回退读新路径空态): ${err.message}`);
-  }
-}
-
 export async function startAgent(configDir, runOpts = {}) {
   // 1. 预读 agentId（类身份）用于构造 runContext + 日志名
   const configPreview = JSON.parse(fs.readFileSync(path.join(configDir, 'config.json'), 'utf-8'));
@@ -70,15 +51,11 @@ export async function startAgent(configDir, runOpts = {}) {
   if (runOpts.mode === 'room' && (runOpts.port === undefined || runOpts.port === null)) {
     throw new Error('room 模式必须显式提供 port(否则回退私聊端口导致冲突)');
   }
-  // dataDir：room 由 room_bus 经 --data 显式传（副本路径）；私聊优先 ELF_DATA_DIR env（gateway spawn 时设 chat/<id>），回退 null（create_agent 再回退 agents/<id>/data，开发直跑 index.js 用）。
+  // dataDir：room 由 room_bus 经 --data 显式传（副本路径=profiles/agents/<id>/rooms/<rid>）；私聊优先 ELF_DATA_DIR env
+  //   （gateway spawn 时设 profiles/agents/<id>/memory），回退 null（create_agent 再回退 agentMemory(<id>)，开发直跑 index.js 用）。
   let dataDir = runOpts.dataDir ? path.resolve(runOpts.dataDir) : null;
   if (!dataDir && runOpts.mode !== 'room' && process.env.ELF_DATA_DIR) {
     dataDir = path.resolve(process.env.ELF_DATA_DIR);
-  }
-  // 私聊 chat 实例：首次启动若 chat/<id>/data 空但老 agents/<id>/data 存在，整体迁移过去（一次性，平滑）。
-  //   dataDir 已是含 context.json 的层（chat/<id>/data，与 room 副本 dataDir 同层）。
-  if (dataDir && runOpts.mode !== 'room') {
-    migrateDataDir(path.join(configDir, '..', 'data'), dataDir);   // logger 此时未建，函数内可选链容错
   }
   const runContext = buildRunContext({
     agentId,
@@ -115,7 +92,7 @@ export async function startAgent(configDir, runOpts = {}) {
   //   agent-level 横切定制）。实例复用（持状态：RoomPlugin 的 buffer/replying、PrivateChatPlugin 的 syncSource）。
   //   阶段三多实例时 _scene 升 per-instance（RoomState map）。
   if (runContext.mode === 'room') {
-    const { RoomPlugin } = await import('./room_plugin.js');
+    const { RoomPlugin } = await import('./plugins/room_plugin.js');
     const rm = new RoomPlugin(agent);
     agent._scene = rm;
     agent.toolManager.register(Speak);
@@ -129,7 +106,7 @@ export async function startAgent(configDir, runOpts = {}) {
     // 私聊模式：PrivateChatPlugin 持私聊消息接入（syncSource align）+ 空闲即 flush 调度（v3 统一 buffer 模式）。
     const gwUrl = runOpts.gatewayUrl || process.env.ELF_GATEWAY_URL;
     if (gwUrl) agent._gatewayUrl = gwUrl;
-    const { PrivateChatPlugin, setPrivateChatLogFileName } = await import('./private_chat_plugin.js');
+    const { PrivateChatPlugin, setPrivateChatLogFileName } = await import('./plugins/private_chat_plugin.js');
     setPrivateChatLogFileName(logFileName);
     agent._scene = new PrivateChatPlugin(agent);
     logger.info(`私聊模式：注入 PrivateChatPlugin(run-level) (runKey=${runContext.runKey})`);
@@ -140,7 +117,8 @@ export async function startAgent(configDir, runOpts = {}) {
   //    （群聊 /observe 带 roomId → 懒建该群 RoomState，无需 spawn 副本）。
   const port = runContext.port ?? agent.config.get('port');
   const gwUrl = runOpts.gatewayUrl || process.env.ELF_GATEWAY_URL || null;
-  // 群聊 RoomState 懒建的数据根：复用本实例 dataDir 所在层的子目录（chat/<id>/<roomId>/），与私聊 data 隔离。
+  // 群聊 RoomState 懒建的数据根：profiles/agents/<id>（dataDir=memory，上一级即 agent 根）。
+  //   群聊 RoomState 经 server.js 落 profiles/agents/<id>/rooms/<rid>/，与私聊 memory 隔离。
   const dataRoot = runContext.dataDir ? path.join(runContext.dataDir, '..') : null;
   const agentConfigDirFn = (id) => path.join(process.cwd(), 'agents', id, 'config');
   const app = createAgentServer({

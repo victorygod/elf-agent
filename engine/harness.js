@@ -1,7 +1,7 @@
 /**
  * Harness —— 无状态机制调度器（agent 的"引擎室"）
  *
- * 收口原 default_agent 的 _runInjection / _dispatchGate / _emit / abort 四套机制。
+ * 收口原 default_agent 的 dispatchInjection / dispatchGate / emit / abort 四套机制（agent 直调，无私有转发方法）。
  * 设计为**无状态**：不持 middlewares / callbacks / agent，每次调用收参数跑。
  *   - agent-level middleware / callbacks 存 agent 自己（this.agentLevel / this.callbacks）；
  *   - run-level middleware 每次 invoke 传；合并 [agentLevel, runLevel] 后传进来。
@@ -96,5 +96,52 @@ export class Harness {
     if (agent.messageManager && typeof agent.messageManager.abortBackgroundCompact === 'function') {
       agent.messageManager.abortBackgroundCompact();
     }
+  }
+
+  // ---- run-level 作用域：三件覆盖的 setup/teardown（机制层控制面，无自有状态）----
+  //  无状态约定：tools/disabled 借 toolManager 入参操作（工具注册表归 ToolManager）；
+  //             middleware 借传入的数组操作（中间件归 agent，harness 只做 push/pop 机制）。
+  //  全部 run-level 逻辑收口于 withRunLevel，agent 不写 run-level 代码。
+  //  runScoped 包 try/finally 保证异常也还原。
+
+  /**
+   * 进入一次 run-level 请求作用域：注册临时工具、设请求级禁用集、并入临时 middleware，返回 restore。
+   *   机制层总入口：agent.receive 直接调本方法拿 restore，用 runScoped 包请求体。
+   *   无自有状态：toolManager / middlewares 数组均由调用方传入，harness 借它们做覆盖。
+   * @param {object} opts
+   * @param {object} opts.toolManager - 工具注册表（借入参操作）
+   * @param {Array} opts.middlewares - agent 的 this.middlewares（借入参 push/pop）
+   * @param {Array<object>} [opts.tools] - 临时工具（同名覆盖静态）
+   * @param {Iterable<string>} [opts.disableTools] - 本请求禁用工具名
+   * @param {Array} [opts.middleware] - 临时 middleware
+   * @param {(tools:Array)=>Array} [opts.filterTools] - 工具裁剪函数（场景插件 filterRunLevelTools，默认透传）
+   * @returns {() => void} restore（清理临时工具/disable/middleware）
+   */
+  withRunLevel({ toolManager, middlewares, tools, disableTools, middleware, filterTools } = {}) {
+    const restoreFns = [];
+    if (toolManager && Array.isArray(tools) && tools.length > 0) {
+      const filtered = typeof filterTools === 'function' ? filterTools(tools) : tools;
+      if (filtered.length > 0) restoreFns.push(toolManager.registerRunLevel(filtered));
+    }
+    if (toolManager && Array.isArray(disableTools) && disableTools.length > 0) {
+      restoreFns.push(toolManager.withDisabled(disableTools));
+    }
+    if (Array.isArray(middlewares) && Array.isArray(middleware) && middleware.length > 0) {
+      const startLen = middlewares.length;
+      for (const m of middleware) middlewares.push(m);
+      restoreFns.push(() => { middlewares.length = startLen; });
+    }
+    return () => { for (const fn of restoreFns) fn(); };
+  }
+
+  /**
+   * 执行一段 fn，保证 restore 在 fn 结束（含异常）后调用。run-level 作用域的 try/finally 括号。
+   * @param {() => void} restore - 还原函数
+   * @param {() => Promise<any>|any} fn - 请求体
+   * @returns {Promise<any>|any} fn 的返回值
+   */
+  async runScoped(restore, fn) {
+    try { return await fn(); }
+    finally { if (typeof restore === 'function') restore(); }
   }
 }

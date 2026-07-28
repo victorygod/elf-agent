@@ -14,11 +14,11 @@ import path from 'node:path';
 import fs from 'fs';
 import os from 'os';
 import { Config } from '../engine/config_loader.js';
-import { MockModel } from '../engine/mock_model.js';
+import { MockModel } from '../engine/models/index.js';
 import { ToolManager } from '../engine/tools/tool_manager.js';
 import { MessageManager } from '../engine/message_manager.js';
-import { Agent } from '../engine/default_agent.js';
-import { RoomMiddleware } from '../engine/room_plugin.js';
+import { Agent } from '../engine/agent.js';
+import { RoomMiddleware } from '../engine/plugins/room_plugin.js';
 import { buildRunContext } from '../engine/run_context.js';
 
 async function collect(fn) {
@@ -104,8 +104,10 @@ describe('run-level 工具注入', () => {
     const seenTools = [];
     const origAll = a.toolManager.getAll.bind(a.toolManager);
     // 不真的跑 reason 里的 getAll 注入，只验证 disableTools 设置态：用一次极简接收 + peek。
-    // 改用直接调用 _enterRunLevel 验证副作用（receive 的事务路径已被前两测覆盖）。
-    const restore = a._enterRunLevel({ disableTools: ['Bash'] });
+    // 改用直接调用 harness.withRunLevel 验证副作用（receive 的事务路径已被前两测覆盖）。
+    const restore = a.harness.withRunLevel({
+      toolManager: a.toolManager, middlewares: a.middlewares, disableTools: ['Bash'],
+    });
     const visible = a.toolManager.getAll().map(t => t.name);
     assert.ok(!visible.includes('Bash'), 'Bash 被本请求禁用');
     assert.ok(visible.includes('Read'), 'Read 仍可见');
@@ -119,7 +121,9 @@ describe('run-level 工具注入', () => {
     const before = a.middlewares.length;
     const tmpMw = { preReason() {} };
 
-    const restore = a._enterRunLevel({ middleware: [tmpMw] });
+    const restore = a.harness.withRunLevel({
+      toolManager: a.toolManager, middlewares: a.middlewares, middleware: [tmpMw],
+    });
     assert.equal(a.middlewares.length, before + 1, '临时 middleware 入栈');
     restore();
     assert.equal(a.middlewares.length, before, '结束弹栈，长度复原');
@@ -129,8 +133,10 @@ describe('run-level 工具注入', () => {
   it('请求异常也还原临时工具（finally 保证）', async () => {
     const a = makeRoomAgent({ responses: [{ content: '完' }] });
     const tmpTool = { name: 'Boom', parameters: { type: 'object' }, execute: async () => { throw new Error('boom'); } };
-    // 直接验证 finally：_enterRunLevel 后模拟异常路径，restore 必须仍执行。
-    const restore = a._enterRunLevel({ tools: [tmpTool] });
+    // 直接验证 finally：harness.withRunLevel 后模拟异常路径，restore 必须仍执行。
+    const restore = a.harness.withRunLevel({
+      toolManager: a.toolManager, middlewares: a.middlewares, tools: [tmpTool],
+    });
     assert.ok(a.toolManager.get('Boom'));
     try {
       // 模拟 reasoning 抛异常（实际 receive 的 try/finally 保证 restore）

@@ -23,6 +23,12 @@
   "memoryTokenLimit": 10000,
   "maxIterations": 0,
   "messageManagerClass": "message_manager",
+  "interaction": {
+    "strategy": "observe",
+    "observe": {
+      "observationWindowSec": 60
+    }
+  },
   "tools": [
     "Read",
     "Bash",

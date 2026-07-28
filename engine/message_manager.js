@@ -73,6 +73,8 @@ export class MessageManager {
     this._eventSink = typeof params.eventSink === 'function' ? params.eventSink : null;
 
     // —— 后台压缩状态 ——
+
+    // —— 后台压缩状态 ——
     this._bgRunning = false;   // 后台任务是否在运行
     this._bgDone = false;      // 后台任务是否已完成（结果待应用）
     this._bgResult = null;     // 后台任务的压缩结果 { summary, anchorId }
@@ -94,9 +96,8 @@ export class MessageManager {
     // compact 发生标记（兼容旧调用方，优先使用 event 消费）
     this._compactHappened = false;
 
-    // skill 清单临注入字段：由 agent._injectSkillListing() 每轮现算写入，
-    // getMessagesForLLM() 临注入到本轮 user 文本之前（不持久化，对齐 CC 每轮重算 attachment）。
-    this.skillListing = '';
+    // skill 清单注入已迁移至 PromptAssembler（engine/skills/lister.js 注册 useBeforeLastUser 注入器），
+    // 本类不再持 skillListing 字段，也不再临注入。
 
     // 确保目录存在
     if (this.dataDir) {
@@ -132,7 +133,8 @@ export class MessageManager {
     }
     this.messages.push({ id: this._genMsgId(), role: 'user', content, ...(isMeta ? { isMeta: true } : {}) });
     this._save();
-  }
+
+      }
 
   addMetaMessage(content, tag) {
     this.messages.push({ id: this._genMsgId(), role: 'user', content, isMeta: true, metaTag: tag });
@@ -157,44 +159,38 @@ export class MessageManager {
   // ============ LLM 交互 ============
 
   getMessagesForLLM() {
+    // 提示词拼装（prefix/suffix/roster/skill listing/群聊行为）由 agent 的 PromptAssembler 在 assemble() 负责。
+    // 本方法只产 base（系统提示词 + stripped 历史消息）。equals getBaseForLLM（保留两个名以兼容旧调用点）。
+    return this.getBaseForLLM();
+  }
+
+  /** 产 base 给 PromptAssembler.assemble 用：[systemMsg, ...stripped messages]（不做任何点位拼装）。 */
+  getBaseForLLM() {
     const systemMsg = { role: 'system', content: this.systemPrompt };
-    // skill_listing 改为临注入（见 _injectTransientListing）：旧持久化清单不再送 LLM，
-    // 由 messageManager.skillListing 每轮现拼一份新鲜的，对齐 CC「每轮重算 attachment」。
     const msgs = this.messages
       .filter(m => m.metaTag !== 'skill_listing')
       .map(m => {
-        // strip id、isMeta、metaTag — LLM API 不接受额外字段
         const { id, isMeta, metaTag, ...rest } = m;
         return rest;
       });
-    const out = this._injectTransientListing(msgs);
-    return [systemMsg, ...out];
+    return [systemMsg, ...msgs];
   }
 
   /**
-   * 临注入 skill 清单：不发写入记忆，仅在请求副本上插一条 user 消息（不 _save）。
-   * 位置：最近一条 user 之前（对齐 CC：isMeta 位于用户输入之前、历史之后）；无 user 则追加末尾。
-   * 由 agent._injectSkillListing() 写入 this.skillListing 字符串，每轮 reasoning 入口现算。
+   * 估算当前会话 token 数（含 PromptAssembler 注入的 prefix/suffix/roster/listing/群聊行为）。
+   * 注入拼装的 content 也算进 token——与实际发 LLM 的口径一致，compact 判定才准。
+   * agent 构造后经 _setPromptAssembler 回填 assembler 引用；未回填时退化为只算 base（兼容独立测试用 mm）。
    */
-  _injectTransientListing(msgs) {
-    const listing = typeof this.skillListing === 'string' ? this.skillListing : '';
-    if (!listing) return msgs;
-    const out = [...msgs];
-    let idx = -1;
-    for (let i = out.length - 1; i >= 0; i--) {
-      if (out[i].role === 'user') { idx = i; break; }
-    }
-    const msg = { role: 'user', content: listing };
-    if (idx >= 0) out.splice(idx, 0, msg);
-    else out.push(msg);
-    return out;
-  }
-
   estimateTokens() {
-    // 基于 getMessagesForLLM（已 strip id）计数，确保与 LLM 口径一致
-    const allMessages = this.getMessagesForLLM();
+    const base = this.getBaseForLLM();
+    const allMessages = this._promptAssembler
+      ? this._promptAssembler.assemble(base, { messageManager: this })
+      : base;
     return countMessageTokens(allMessages);
   }
+
+  /** agent 构造后回填 PromptAssembler 引用（供 estimateTokens 含注入内容计数）。 */
+  _setPromptAssembler(asm) { this._promptAssembler = asm; }
 
   // ============ 记忆压缩（双模式） ============
 
@@ -209,7 +205,12 @@ export class MessageManager {
    */
   async compactIfNeeded(llmModel, options = {}) {
     const emit = options.onEvent || (() => {});
-    if (this.estimateTokens() <= this.memoryTokenLimit) return;
+    const logger = createLogger('message_manager', logFileName);
+    const _est = this.estimateTokens();
+    if (_est <= this.memoryTokenLimit) {
+      logger.info(`[compact] tokens=${_est} <= memoryTokenLimit=${this.memoryTokenLimit}，未触发压缩`);
+      return;
+    }
 
     // 无 config 或未配 compactMode 时默认 blocking（兼容现有测试和同步行为）
     const async = this._config?.get('compactMode') === 'async';
@@ -222,7 +223,11 @@ export class MessageManager {
     }
 
     // 2. apply 后可能已低于阈值
-    if (this.estimateTokens() <= this.memoryTokenLimit) return;
+    const _est2 = this.estimateTokens();
+    if (_est2 <= this.memoryTokenLimit) {
+      logger.info(`[compact] bg apply 后 tokens=${_est2} <= memoryTokenLimit=${this.memoryTokenLimit}，本轮不再压`);
+      return;
+    }
 
     // 3. 后台失败待报 → emit compact_error（不阻断，继续往下）
     await this._reportBgFailure(emit);

@@ -10,6 +10,9 @@ export default defineConfig({
     proxy: {
       '/agents': 'http://localhost:8080',
       '/api': 'http://localhost:8080',
+      '/rooms': 'http://localhost:8080',
+      '/skills': 'http://localhost:8080',
+      '/settings': 'http://localhost:8080',
     },
   },
 });

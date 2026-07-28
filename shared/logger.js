@@ -1,9 +1,9 @@
 /**
  * 统一日志模块
  * 同时输出到控制台和日志文件
- * Gateway 日志: logs/gateway.log
- * Agent 日志: logs/agent-{agentId}.log
- * 前端日志: logs/frontend.log
+ * Gateway 日志: profiles/logs/gateway.log
+ * Agent 日志: profiles/logs/agent-{agentId}.log
+ * 前端日志: profiles/logs/frontend.log
  *
  * 日志滚动: 单文件达到 MAX_SIZE 后按 .1 .2 ... 滚动，最多保留 MAX_FILES 份历史。
  * 滚动检查在完整一行写入文件之后进行，保证每个文件中每一行都是完整日志。
@@ -11,8 +11,9 @@
 
 import fs from 'fs';
 import path from 'path';
+import { logsDir } from './profiles_paths.js';
 
-const LOG_DIR = path.join(process.cwd(), 'logs');
+const LOG_DIR = logsDir();
 
 // 单文件大小上限：10MB
 const MAX_SIZE = 10 * 1024 * 1024;

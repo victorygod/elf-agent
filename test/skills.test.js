@@ -1,7 +1,7 @@
 /**
  * Skill 支持测试
  *
- * 覆盖：parser / registry（project 覆盖 user、getVisible）/ _formatSkillListing 增量推送 /
+ * 覆盖：parser / registry（getVisible）/ _formatSkillListing 增量推送 /
  *   Skill 工具 execute 两段消息（① <command-*> 非-isMeta ② 正文裸 isMeta）/ _invokedSkills 记录 /
  *   compact 恢复 invoked_skills / 未启用 agent 零行为
  * 不依赖真实 LLM API
@@ -18,8 +18,8 @@ import { SkillLister } from '../engine/skills/lister.js';
 import { getPromptForCommand } from '../engine/skills/prompt.js';
 import { Skill } from '../engine/tools/Skill.js';
 import { MessageManager } from '../engine/message_manager.js';
-import { Agent } from '../engine/default_agent.js';
-import { MockModel } from '../engine/mock_model.js';
+import { Agent } from '../engine/agent.js';
+import { MockModel } from '../engine/models/index.js';
 import { ToolManager } from '../engine/tools/tool_manager.js';
 
 // 构造一个最小 config 对象（Agent 构造需要）
@@ -27,9 +27,9 @@ function minConfig() {
   return { get: () => undefined, getModelConfig: () => ({ provider: 'mock' }) };
 }
 
-// 创建一个临时 cwd，内含 .elf/skills/<name>/SKILL.md
-function makeSkillDir(cwd, name, frontmatter, body) {
-  const dir = path.join(cwd, '.elf', 'skills', name);
+// 创建一个 skill 目录在隔离 home 的 .elf/skills/<name>/SKILL.md
+function makeSkillDir(name, frontmatter, body) {
+  const dir = path.join(_isolatedHome, '.elf', 'skills', name);
   fs.mkdirSync(dir, { recursive: true });
   const content = frontmatter
     ? `---\n${frontmatter}\n---\n\n${body}`
@@ -50,7 +50,7 @@ after(() => {
 });
 
 // 构造一个启用了 skill 的 agent（不走 fromConfigDir，直接构造 + 挂 SkillLister）
-function makeSkillAgent(cwd) {
+function makeSkillAgent() {
   const config = minConfig();
   const model = new MockModel();
   const toolManager = new ToolManager();
@@ -59,7 +59,7 @@ function makeSkillAgent(cwd) {
     systemPrompt: '', memoryTokenLimit: 9999, dataDir: null, config
   });
   const agent = new Agent({ config, model, toolManager, messageManager });
-  agent.skillLister = new SkillLister({ messageManager, toolManager, cwd });
+  agent.skillLister = new SkillLister({ messageManager, toolManager, agent });
   agent.skillLister.enable();
   return agent;
 }
@@ -95,15 +95,14 @@ describe('parser', () => {
 // registry
 // ========================
 describe('SkillRegistry', () => {
-  let cwd;
   beforeEach(() => {
-    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-skill-'));
+    fs.rmSync(path.join(_isolatedHome, '.elf', 'skills'), { recursive: true, force: true });
   });
 
   it('扫描 .elf/skills/ 子目录，name=目录名，对象不存正文', () => {
-    makeSkillDir(cwd, 'hello', 'description: 打招呼', '正文');
+    makeSkillDir('hello', 'description: 打招呼', '正文');
     const reg = new SkillRegistry();
-    reg.loadAll(cwd);
+    reg.loadAll();
     const s = reg.get('hello');
     assert.ok(s);
     assert.equal(s.name, 'hello');
@@ -116,17 +115,17 @@ describe('SkillRegistry', () => {
   });
 
   it('description 缺失时从正文首个 # 兜底', () => {
-    makeSkillDir(cwd, 'fallback', null, '# 兜底标题\n正文');
+    makeSkillDir('fallback', null, '# 兜底标题\n正文');
     const reg = new SkillRegistry();
-    reg.loadAll(cwd);
+    reg.loadAll();
     assert.equal(reg.get('fallback').description, '兜底标题');
   });
 
   it('getVisible 排除 disableModelInvocation:true', () => {
-    makeSkillDir(cwd, 'visible', 'description: a', 'x');
-    makeSkillDir(cwd, 'hidden', 'description: b\ndisable-model-invocation: true', 'x');
+    makeSkillDir('visible', 'description: a', 'x');
+    makeSkillDir('hidden', 'description: b\ndisable-model-invocation: true', 'x');
     const reg = new SkillRegistry();
-    reg.loadAll(cwd);
+    reg.loadAll();
     const names = reg.getVisible().map(s => s.name);
     assert.ok(names.includes('visible'));
     assert.ok(!names.includes('hidden'));
@@ -134,7 +133,7 @@ describe('SkillRegistry', () => {
 
   it('目录不存在静默跳过，不抛错', () => {
     const reg = new SkillRegistry();
-    reg.loadAll(cwd);   // cwd 下无 .elf/skills
+    reg.loadAll();   // cwd 下无 .elf/skills
     assert.equal(reg.getAll().length, 0);
   });
 });
@@ -143,15 +142,14 @@ describe('SkillRegistry', () => {
 // _formatSkillListing 增量推送
 // ========================
 describe('_formatSkillListing 增量推送', () => {
-  let cwd;
   beforeEach(() => {
-    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-skill-'));
+    fs.rmSync(path.join(_isolatedHome, '.elf', 'skills'), { recursive: true, force: true });
   });
 
   it('首推全量，之后无新增返回空', () => {
-    makeSkillDir(cwd, 'a', 'description: aa', 'x');
-    makeSkillDir(cwd, 'b', 'description: bb', 'x');
-    const agent = makeSkillAgent(cwd);
+    makeSkillDir('a', 'description: aa', 'x');
+    makeSkillDir('b', 'description: bb', 'x');
+    const agent = makeSkillAgent();
 
     const first = agent.skillLister._formatListing();
     assert.ok(first.includes('- a: aa'));
@@ -164,21 +162,21 @@ describe('_formatSkillListing 增量推送', () => {
   });
 
   it('whenToUse 追加到行尾', () => {
-    makeSkillDir(cwd, 'w', 'description: d\nwhen_to_use: 何时用', 'x');
-    const agent = makeSkillAgent(cwd);
+    makeSkillDir('w', 'description: d\nwhen_to_use: 何时用', 'x');
+    const agent = makeSkillAgent();
     const listing = agent.skillLister._formatListing();
     assert.ok(listing.includes('- w: d - 何时用'));
   });
 
   it('热更新：新增 skill → 推增量', () => {
-    makeSkillDir(cwd, 'a', 'description: aa', 'x');
-    const agent = makeSkillAgent(cwd);
+    makeSkillDir('a', 'description: aa', 'x');
+    const agent = makeSkillAgent();
     const first = agent.skillLister._formatListing();
     assert.ok(first.includes('- a: aa'));
 
     // 会话中途新增 skill b（热更新：入口重扫会发现）
-    makeSkillDir(cwd, 'b', 'description: bb', 'x');
-    agent.skillLister.registry.loadAll(cwd);   // 模拟入口重扫
+    makeSkillDir('b', 'description: bb', 'x');
+    agent.skillLister.registry.loadAll();   // 模拟入口重扫
     const second = agent.skillLister._formatListing();
     assert.ok(second, '应推增量');
     assert.ok(second.includes('- b: bb'), '含新增 b');
@@ -186,14 +184,14 @@ describe('_formatSkillListing 增量推送', () => {
   });
 
   it('热更新：删除 skill → 推全量修正清单', () => {
-    makeSkillDir(cwd, 'a', 'description: aa', 'x');
-    makeSkillDir(cwd, 'b', 'description: bb', 'x');
-    const agent = makeSkillAgent(cwd);
+    makeSkillDir('a', 'description: aa', 'x');
+    makeSkillDir('b', 'description: bb', 'x');
+    const agent = makeSkillAgent();
     agent.skillLister._formatListing();   // 首推全量 a/b
 
     // 会话中途删除 skill a
-    fs.rmSync(path.join(cwd, '.elf', 'skills', 'a'), { recursive: true, force: true });
-    agent.skillLister.registry.loadAll(cwd);   // 入口重扫：a 消失
+    fs.rmSync(path.join(_isolatedHome, '.elf', 'skills', 'a'), { recursive: true, force: true });
+    agent.skillLister.registry.loadAll();   // 入口重扫：a 消失
     const after = agent.skillLister._formatListing();
     assert.ok(after, '删除后应推修正清单');
     assert.ok(after.includes('- b: bb'), '修正清单含仍在的 b');
@@ -201,14 +199,14 @@ describe('_formatSkillListing 增量推送', () => {
   });
 
   it('热更新：改 description → 推全量修正清单', () => {
-    makeSkillDir(cwd, 'a', 'description: 旧描述', 'x');
-    const agent = makeSkillAgent(cwd);
+    makeSkillDir('a', 'description: 旧描述', 'x');
+    const agent = makeSkillAgent();
     agent.skillLister._formatListing();
 
     // 改 a 的 description
-    fs.writeFileSync(path.join(cwd, '.elf', 'skills', 'a', 'SKILL.md'),
+    fs.writeFileSync(path.join(_isolatedHome, '.elf', 'skills', 'a', 'SKILL.md'),
       '---\ndescription: 新描述\n---\nx');
-    agent.skillLister.registry.loadAll(cwd);
+    agent.skillLister.registry.loadAll();
     const after = agent.skillLister._formatListing();
     assert.ok(after.includes('新描述'));
     assert.ok(!after.includes('旧描述'));
@@ -221,12 +219,12 @@ describe('_formatSkillListing 增量推送', () => {
   });
 
   it('注册了 registry 但未注册 Skill 工具 → 不产出（门控对齐 mhY ①）', () => {
-    makeSkillDir(cwd, 'a', 'description: aa', 'x');
+    makeSkillDir('a', 'description: aa', 'x');
     const config = minConfig();
     const toolManager = new ToolManager();   // 无 Skill 工具
     const messageManager = new MessageManager({ config });
     const agent = new Agent({ config, model: new MockModel(), toolManager, messageManager });
-    agent.skillLister = new SkillLister({ messageManager, toolManager, cwd });
+    agent.skillLister = new SkillLister({ messageManager, toolManager });
     agent.skillLister.enable();
     assert.equal(agent.skillLister._formatListing(), '');
   });
@@ -236,14 +234,13 @@ describe('_formatSkillListing 增量推送', () => {
 // Skill 工具 execute 两段消息
 // ========================
 describe('Skill 工具 execute', () => {
-  let cwd;
   beforeEach(() => {
-    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-skill-'));
+    fs.rmSync(path.join(_isolatedHome, '.elf', 'skills'), { recursive: true, force: true });
   });
 
   it('注入 ① <command-*> 非-isMeta + ② 正文裸 isMeta，并记录 _invokedSkills', async () => {
-    makeSkillDir(cwd, 'hello', 'description: 打招呼', '你好，${CLAUDE_SKILL_DIR} 的 skill。参数=$ARGUMENTS');
-    const agent = makeSkillAgent(cwd);
+    makeSkillDir('hello', 'description: 打招呼', '你好，${CLAUDE_SKILL_DIR} 的 skill。参数=$ARGUMENTS');
+    const agent = makeSkillAgent();
     const before = agent.messageManager.messages.length;
 
     const result = await Skill.execute({ skill: 'hello', args: '世界' }, {}, { agent });
@@ -275,15 +272,15 @@ describe('Skill 工具 execute', () => {
   });
 
   it('无 args 时不输出 <command-args> 行', async () => {
-    makeSkillDir(cwd, 'noargs', 'description: x', '正文');
-    const agent = makeSkillAgent(cwd);
+    makeSkillDir('noargs', 'description: x', '正文');
+    const agent = makeSkillAgent();
     await Skill.execute({ skill: 'noargs' }, {}, { agent });
     const last = agent.messageManager.messages[agent.messageManager.messages.length - 2];
     assert.ok(!last.content.includes('<command-args>'));
   });
 
   it('未知 skill 报错，不注入消息', async () => {
-    const agent = makeSkillAgent(cwd);
+    const agent = makeSkillAgent();
     const before = agent.messageManager.messages.length;
     const r = await Skill.execute({ skill: 'noexist' }, {}, { agent });
     assert.ok(r.startsWith('Error: Unknown skill'));
@@ -298,8 +295,8 @@ describe('Skill 工具 execute', () => {
   });
 
   it('fork skill 报错跳过', async () => {
-    makeSkillDir(cwd, 'forker', 'description: x\ncontext: fork', '正文');
-    const agent = makeSkillAgent(cwd);
+    makeSkillDir('forker', 'description: x\ncontext: fork', '正文');
+    const agent = makeSkillAgent();
     const r = await Skill.execute({ skill: 'forker' }, {}, { agent });
     assert.ok(r.includes('fork skills not supported'));
   });
@@ -309,14 +306,13 @@ describe('Skill 工具 execute', () => {
 // compact 恢复 invoked_skills
 // ========================
 describe('compact 恢复 invoked_skills', () => {
-  let cwd;
   beforeEach(() => {
-    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-skill-'));
+    fs.rmSync(path.join(_isolatedHome, '.elf', 'skills'), { recursive: true, force: true });
   });
 
   it('压缩后重推：清单字段补全量 + invoked_skills（有触发过的）补回全文', async () => {
-    makeSkillDir(cwd, 'hello', 'description: 打招呼', '你好');
-    const agent = makeSkillAgent(cwd);
+    makeSkillDir('hello', 'description: 打招呼', '你好');
+    const agent = makeSkillAgent();
     agent.skillLister._formatListing();                 // 先推一次清单（全加入 _pushedSkills）
     await Skill.execute({ skill: 'hello' }, {}, { agent });  // 触发一次，记录 _invokedSkills
     const before = agent.messageManager.messages.length;
@@ -331,26 +327,26 @@ describe('compact 恢复 invoked_skills', () => {
     assert.ok(mInvoked.content.includes('### Skill: hello'));
     assert.ok(mInvoked.content.includes('你好'));          // 正文全文
 
-    // 全量清单经 refreshSkillListing 写入 skillListing 字段（不进 messages，临注入到 LLM 请求）。
-    assert.ok(agent.messageManager.skillListing.includes('following skills'));
-    assert.ok(agent.messageManager.skillListing.includes('- hello: 打招呼'));
+    // 全量清单经 reinvokeAfterCompact 重算到 lister._currentListing（注入器 provider 读它，临注入到 LLM 请求）。
+    assert.ok(agent.skillLister._currentListing.includes('following skills'));
+    assert.ok(agent.skillLister._currentListing.includes('- hello: 打招呼'));
   });
 
   it('压缩后只补清单字段（无已触发 skill 时不补 invoked_skills）', async () => {
-    makeSkillDir(cwd, 'hello', 'description: 打招呼', '你好');
-    const agent = makeSkillAgent(cwd);
+    makeSkillDir('hello', 'description: 打招呼', '你好');
+    const agent = makeSkillAgent();
     const before = agent.messageManager.messages.length;
     await agent.skillLister.reinvokeAfterCompact();   // _invokedSkills 为空
     // listing 不进 messages；无 invoked_skills → messages 不增
     assert.equal(agent.messageManager.messages.length, before);
-    // 但 skillListing 字段已被补为全量
-    assert.ok(agent.messageManager.skillListing.includes('following skills'));
-    assert.ok(agent.messageManager.skillListing.includes('- hello: 打招呼'));
+    // 但 lister._currentListing 已被补为全量
+    assert.ok(agent.skillLister._currentListing.includes('following skills'));
+    assert.ok(agent.skillLister._currentListing.includes('- hello: 打招呼'));
   });
 
   it('compact 后清单重推（压缩把 listing 吞了，补回全量）', async () => {
-    makeSkillDir(cwd, 'a', 'description: aa', 'x');
-    const agent = makeSkillAgent(cwd);
+    makeSkillDir('a', 'description: aa', 'x');
+    const agent = makeSkillAgent();
     const first = agent.skillLister._formatListing();
     assert.ok(first);                                   // 首推全量
     await agent.skillLister.reinvokeAfterCompact();                // compact 后钩子：重置快照 + 重推全量
@@ -360,9 +356,9 @@ describe('compact 恢复 invoked_skills', () => {
   });
 
   it('清空记忆（_resetSkillPushState）后重新首推全量', () => {
-    makeSkillDir(cwd, 'a', 'description: aa', 'x');
-    makeSkillDir(cwd, 'b', 'description: bb', 'x');
-    const agent = makeSkillAgent(cwd);
+    makeSkillDir('a', 'description: aa', 'x');
+    makeSkillDir('b', 'description: bb', 'x');
+    const agent = makeSkillAgent();
     agent.skillLister._formatListing();          // 首推，_pushedSkills 记满
     assert.equal(agent.skillLister._formatListing(), '');   // 无变化不推
 
@@ -382,16 +378,14 @@ describe('compact 恢复 invoked_skills', () => {
 // skill_listing 临注入（不持久化、不堆积）
 // ========================
 describe('skill_listing 临注入（不发写入记忆）', () => {
-  let cwd;
   beforeEach(() => {
-    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-skill-'));
+    fs.rmSync(path.join(_isolatedHome, '.elf', 'skills'), { recursive: true, force: true });
   });
 
-  it('多轮 _injectSkillListing 不往 messages 堆 listing，skillListing 字段每轮在场', () => {
-    makeSkillDir(cwd, 'a', 'description: aa', 'x');
-    const agent = makeSkillAgent(cwd);
+  it('多轮 inject 不往 messages 堆 listing，lister._currentListing 每轮在场', () => {
+    makeSkillDir('a', 'description: aa', 'x');
+    const agent = makeSkillAgent();
 
-    // 模拟 3 轮 reasoning 入口
     agent.skillLister.inject();
     agent.messageManager.addUserMessage('第一轮');
     agent.skillLister.inject();
@@ -402,41 +396,49 @@ describe('skill_listing 临注入（不发写入记忆）', () => {
     // messages 里没有任何 skill_listing 持久化消息
     const listings = agent.messageManager.messages.filter(m => m.metaTag === 'skill_listing');
     assert.equal(listings.length, 0);
-    // 字段仍在场，含全量清单
-    assert.ok(agent.messageManager.skillListing.includes('following skills'));
-    assert.ok(agent.messageManager.skillListing.includes('- a: aa'));
+    // lister._currentListing 仍在场，含全量清单
+    assert.ok(agent.skillLister._currentListing.includes('following skills'));
+    assert.ok(agent.skillLister._currentListing.includes('- a: aa'));
   });
 
-  it('getMessagesForLLM 临注入一份 listing 到最近 user 之前，且过滤旧持久化 listing', () => {
-    makeSkillDir(cwd, 'a', 'description: aa', 'x');
-    const agent = makeSkillAgent(cwd);
+  it('assembler.assemble 把 listing 临注入到最近 user 之前（不进 messages）', () => {
+    makeSkillDir('a', 'description: aa', 'x');
+    const agent = makeSkillAgent();
     agent.skillLister.inject();
     agent.messageManager.addUserMessage('你好');
+    const beforeMsgs = agent.messageManager.messages.length;
 
-    const msgs = agent.messageManager.getMessagesForLLM();
-    // system + 临时 listing + user = 3
+    // 经 assembler 拼装（listing 注入器插到最近 user 之前）
+    const msgs = agent.promptAssembler.assemble(agent.messageManager.getBaseForLLM(), { agent, messageManager: agent.messageManager });
+    assert.equal(beforeMsgs, agent.messageManager.messages.length, 'messages 数组不变（临注入不落盘）');
+    // system + listing + user = 3
     assert.equal(msgs.length, 3);
     assert.equal(msgs[0].role, 'system');
-    assert.equal(msgs[0].role, 'system');
-    const listingMsg = msgs[1];
-    assert.equal(listingMsg.role, 'user');
-    assert.ok(listingMsg.content.includes('following skills'), '临注入 listing 应在 user 之前');
+    assert.equal(msgs[1].role, 'user');
+    assert.ok(msgs[1].content.includes('following skills'), 'listing 应在 user 之前');
     assert.equal(msgs[2].content, '你好');
   });
 
-  it('旧 context.json 里残留的 skill_listing 持久化消息被 getMessagesForLLM 过滤掉', () => {
-    makeSkillDir(cwd, 'a', 'description: aa', 'x');
-    const agent = makeSkillAgent(cwd);
-    // 模拟旧版本写入的持久化 listing（直接塞进 messages，模拟历史残留）
+  it('旧 context.json 里残留的 skill_listing 持久化消息被 base 过滤掉（listing 改 assemble 临注入）', () => {
+    makeSkillDir('a', 'description: aa', 'x');
+    const agent = makeSkillAgent();
     agent.messageManager.addMetaMessage('<system-reminder>\nold listing\n</system-reminder>', 'skill_listing');
     agent.messageManager.addUserMessage('你好');
     agent.skillLister.inject();
 
+    // base（getMessagesForLLM）过滤掉旧持久化 skill_listing，且不临注入任何 listing
     const msgs = agent.messageManager.getMessagesForLLM();
-    // 旧持久化 listing 不应出现，只剩本轮临注入的那一份
-    const listCount = msgs.filter(m => m.role === 'user' && m.content.includes('listing')).length;
-    assert.equal(listCount, 0);
-    const fresh = msgs.filter(m => m.role === 'user' && m.content.includes('following skills'));
-    assert.equal(fresh.length, 1, '只保留本轮临注入一份');
+    const oldListing = msgs.filter(m => m.role === 'user' && m.content.includes('listing'));
+    assert.equal(oldListing.length, 0, '旧持久化 listing 应被过滤');
+    // listing 由 assembler 注入，base 不含
+    const freshInBase = msgs.filter(m => m.role === 'user' && m.content.includes('following skills'));
+    assert.equal(freshInBase.length, 0, 'base 不含 listing（assemble 时临注入）');
+
+    // 经 assembler：旧 listing 仍被过滤，本轮 fresh listing 插到最近 user 之前
+    const assembled = agent.promptAssembler.assemble(agent.messageManager.getBaseForLLM(), { agent, messageManager: agent.messageManager });
+    const oldInAsm = assembled.filter(m => m.role === 'user' && m.content.includes('old listing'));
+    assert.equal(oldInAsm.length, 0, 'assemble 仍不含旧 listing');
+    const freshInAsm = assembled.filter(m => m.role === 'user' && m.content.includes('following skills'));
+    assert.equal(freshInAsm.length, 1, 'assemble 临注入本轮 fresh listing 一份');
   });
 });

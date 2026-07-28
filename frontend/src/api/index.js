@@ -24,6 +24,18 @@ export async function rediscoverAgents() {
   return null;
 }
 
+/** 从独立模板创建一个白板 agent（仅 name 必填），返回 { agentId, name, port } */
+export async function createAgent(name) {
+  const res = await fetch(`${API_BASE}/agents`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status, data });
+  return data;
+}
+
 /** 获取单个 agent 详情（含 streaming 状态） */
 export async function getAgent(id) {
   const res = await fetch(`${API_BASE}/agents/${id}`);
@@ -203,16 +215,16 @@ export async function getAvailableTools() {
 
 // ===== Skill 管理（平台级） =====
 
-/** 列出 user + project 两目录下所有 skill */
+/** 列出 ~/.elf/skills 下所有 skill */
 export async function listSkills() {
   const res = await fetch(`${API_BASE}/skills`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return await res.json();   // { skills, roots }
+  return await res.json();   // { skills, root }
 }
 
 /** 读单个 skill 的 SKILL.md 全文 */
-export async function getSkillDetail(source, name) {
-  const res = await fetch(`${API_BASE}/skills/${source}/${encodeURIComponent(name)}`);
+export async function getSkillDetail(name) {
+  const res = await fetch(`${API_BASE}/skills/${encodeURIComponent(name)}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || `HTTP ${res.status}`);
@@ -221,8 +233,8 @@ export async function getSkillDetail(source, name) {
 }
 
 /** 删除一个 skill 目录 */
-export async function deleteSkill(source, name) {
-  const res = await fetch(`${API_BASE}/skills/${source}/${encodeURIComponent(name)}`, { method: 'DELETE' });
+export async function deleteSkill(name) {
+  const res = await fetch(`${API_BASE}/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || `HTTP ${res.status}`);

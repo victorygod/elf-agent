@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { MockModel } from '../engine/mock_model.js';
+import { MockModel } from '../engine/models/index.js';
 import { MessageManager } from '../engine/message_manager.js';
 import { ToolManager } from '../engine/tools/tool_manager.js';
-import { Agent } from '../engine/default_agent.js';
-import { RoomMiddleware } from '../engine/room_plugin.js';
+import { Agent } from '../engine/agent.js';
+import { RoomMiddleware } from '../engine/plugins/room_plugin.js';
 import { buildRunContext } from '../engine/run_context.js';
 import { Speak as RealSpeak } from '../engine/tools/Speak.js';
 
@@ -63,7 +63,7 @@ describe('RoomAgent 门控', () => {
     // 未@消息进 buffer,不进 context
     assert.equal(a.messageManager.messages.length, 0);
     assert.equal(a._rm._buffer.length, 1);
-    assert.match(a._rm._buffer[0], /elf-002: hello/);
+    assert.match(a._rm._buffer[0], /elf-002 \[\d{4} \d{2}:\d{2}\]: hello/);
     assert.equal(a._rm._bufferHasMention, false);
   });
 
@@ -74,7 +74,8 @@ describe('RoomAgent 门控', () => {
     assert.ok(tokens.length > 0, '应有 token 事件');
     // 一条 user(buffer 合成) + 一条 assistant
     assert.equal(a.messageManager.messages.length, 2);
-    assert.match(a.messageManager.messages[0].content, /elf-002: 喂 @elf-001/);
+    assert.match(a.messageManager.messages[0].content, /\[聊天历史\]/);
+    assert.match(a.messageManager.messages[0].content, /elf-002 \[\d{4} \d{2}:\d{2}\]: 喂 @elf-001/);
     // buffer 已清
     assert.equal(a._rm._buffer.length, 0);
   });
@@ -374,18 +375,15 @@ describe('RoomAgent 门控', () => {
     assert.equal(a._rm._bufferHasMention, false);
   });
 
-  it('flushLoop 多轮 reflush：第一轮回完，pending 有 mention → 触发第二轮 reasoning', async () => {
-    // 构造：buffer 里有被@消息 → 第一轮 reasoning → 手工塞 pending(mention) → flushLoop 循环应再跑一轮
+  it('flush 循环多轮 reflush：第一轮回完，pending 有 mention → 触发第二轮 reasoning', async () => {
+    // 构造：发一条 @消息触发 flush → 第一轮 reasoning → patch 在第一轮中往 pending 塞 mention → 循环再跑一轮。
+    //   flush 循环内联于 receive，故从 receive 入口驱动（不再直调已删的 flushLoop）。
     const a = makeRoomAgent({
+      memberName: 'elf-001',
       dataDir: '/tmp',
       // 第1轮答完、第2轮（reflush）再答一次
       responses: [{ content: '第一答' }, { content: '第二答' }],
     });
-    a._rm.ensureState();
-    a._rm._buffer.push('elf-002: @elf-001 开问');
-    a._rm._bufferHasMention = true;
-
-    // 在 _replying 期间往 pending 塞消息：用 monkey-patch reasoning 包装
     const origReasoning = a.reasoning.bind(a);
     let reasoningCall = 0;
     a.reasoning = async function (...args) {
@@ -398,21 +396,24 @@ describe('RoomAgent 门控', () => {
       return origReasoning(...args);
     };
 
-    await collect(emit => a._rm.flushLoop(emit));
+    await collect(emit => a.receive(
+      { from: 'elf-002', content: '@elf-001 开问', mentions: ['elf-001'], role: 'chat' },
+      { emit },
+    ));
     assert.equal(reasoningCall, 2, '应触发两轮 reasoning（第一轮完后 pending 有 mention → reflush 第二轮）');
     assert.equal(a._rm._buffer.length, 0, 'reflush 后 buffer 清空');
-    assert.equal(a._rm._replying, false, 'flushLoop 结束后 _replying 还原');
+    assert.equal(a._rm._replying, false, 'flush 结束后 _replying 还原');
   });
 
-  it('flushLoop 单轮：第一轮回完无 pending mention → 不 reflush', async () => {
-    const a = makeRoomAgent({ dataDir: '/tmp', responses: [{ content: '答' }] });
-    a._rm.ensureState();
-    a._rm._buffer.push('elf-002: @elf-001 问');
-    a._rm._bufferHasMention = true;
+  it('flush 循环单轮：第一轮回完无 pending mention → 不 reflush', async () => {
+    const a = makeRoomAgent({ memberName: 'elf-001', dataDir: '/tmp', responses: [{ content: '答' }] });
     let calls = 0;
     const orig = a.reasoning.bind(a);
     a.reasoning = async function (...args) { calls++; return orig(...args); };
-    await collect(emit => a._rm.flushLoop(emit));
+    await collect(emit => a.receive(
+      { from: 'elf-002', content: '@elf-001 问', mentions: ['elf-001'], role: 'chat' },
+      { emit },
+    ));
     assert.equal(calls, 1, '无 pending mention 只跑一轮');
   });
 
@@ -422,7 +423,7 @@ describe('RoomAgent 门控', () => {
     a._rm.ensureState();
     a._rm._agentNames.set('elf-002', 'elf-002');
     const { text, mentionedMe } = a._rm._parse({ from: 'elf-002', contents: ['第一句', '第二句'], mentions: ['elf-001'] });
-    assert.ok(text.includes('elf-002: 第一句') && text.includes('elf-002: 第二句'), '每条加前缀');
+    assert.ok(text.includes('elf-002 [') && text.includes(']: 第一句') && text.includes(']: 第二句'), '每条加前缀');
     assert.ok(text.includes('\n'), '多条用换行连接');
     assert.equal(mentionedMe, true, 'mentions 含本 agentId 命中');
   });
@@ -441,7 +442,7 @@ describe('RoomAgent 门控', () => {
     a._rm.ensureState();
     a._rm._agentNames.set('elf-002', '小二');
     const { text } = a._rm._parse({ from: 'elf-002', content: 'hi', mentions: [] });
-    assert.match(text, /^小二: hi/, '前缀应是映射后的显示名');
+    assert.match(text, /^小二 \[\d{4} \d{2}:\d{2}\]: hi/, '前缀应是映射后的显示名');
   });
 
   // ===== 缺口补测：_consumeGapMessage 路径的自消息 + seq 去重 =====

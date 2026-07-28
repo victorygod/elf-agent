@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { MockModel } from '../engine/mock_model.js';
+import { MockModel } from '../engine/models/index.js';
 import { MessageManager } from '../engine/message_manager.js';
 import { ToolManager } from '../engine/tools/tool_manager.js';
-import { Agent } from '../engine/default_agent.js';
-import { RoomMiddleware } from '../engine/room_plugin.js';
+import { Agent } from '../engine/agent.js';
+import { RoomMiddleware } from '../engine/plugins/room_plugin.js';
 import { buildRunContext } from '../engine/run_context.js';
 import { createAgentServer } from '../engine/server.js';
 

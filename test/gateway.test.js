@@ -6,7 +6,13 @@
 import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
+import os from 'os';
+
+// profiles 根隔离到 tmpDir（仿 integration.test.js），防 gateway test 写真实 cwd/rooms、cwd/profiles。
+const __profilesRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-gw-profiles-'));
+process.env.ELF_PROFILES_ROOT = __profilesRoot;
 import path from 'path';
+import { _resetProfilesRoot, roomsRoot } from '../shared/profiles_paths.js';
 import { execSync } from 'child_process';
 import { ProcessManager } from '../gateway/process_manager.js';
 import { createGatewayApp } from '../gateway/server.js';
@@ -117,15 +123,15 @@ describe('Gateway HTTP Server', () => {
       agent.status = 'stopped';
       agent.pid = null;
     }
-    // v3：注入 roomManager + 私聊房历史，挂 /rooms/chat-<id>/* 路由。
+    // v3：注入 roomManager + 私聊房历史，挂 /rooms/chat-<id>/* 路由。roomsDir 走 profilesRoot 隔离。
+    _resetProfilesRoot();   // 确保读已设的 ELF_PROFILES_ROOT
     const { RoomManager } = await import('../gateway/room_bus.js');
     const { ChatHistory } = await import('../gateway/chat_history.js');
-    const roomsDir = path.join(process.cwd(), 'rooms');
+    const roomsDir = roomsRoot();
     try { fs.mkdirSync(roomsDir, { recursive: true }); } catch (e) {}
     const roomManager = new RoomManager(roomsDir, testPort, { pm, gatewayUrl: `http://127.0.0.1:${testPort}` });
     const privateRoomHistory = new ChatHistory(roomsDir, roomsDir, { roomMode: true, roomsDir });
     pm.privateRoomHistory = privateRoomHistory;
-    pm.chatDir = path.join(process.cwd(), 'chat');
     pm._gatewayUrl = `http://127.0.0.1:${testPort}`;
     const app = createGatewayApp(pm, roomManager, { privateRoomHistory });
     await new Promise((resolve) => {
@@ -155,6 +161,9 @@ describe('Gateway HTTP Server', () => {
       await new Promise((resolve) => server.close(resolve));
     }
     delete process.env.ELF_FORCE_MOCK_MODEL;
+    delete process.env.ELF_PROFILES_ROOT;
+    _resetProfilesRoot();
+    try { fs.rmSync(__profilesRoot, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
   it('GET /agents 应返回 Agent 列表', async () => {

@@ -4,6 +4,7 @@ import useAgentStore from '../stores/agentStore';
 import { useRoomStore } from '../stores/roomStore';
 import * as api from '../api/index';
 import CreateRoomModal from './CreateRoomModal';
+import CreateAgentModal from './CreateAgentModal';
 import styles from './Sidebar.module.css';
 
 /**
@@ -55,6 +56,7 @@ export default function Sidebar({ onSelect }) {
 
   const [spinning, setSpinning] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  const [showCreateAgent, setShowCreateAgent] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsName, setSettingsName] = useState('');
   // 新选的头像 File（未上传），preview 为本地 dataURL 用于预览
@@ -315,7 +317,10 @@ export default function Sidebar({ onSelect }) {
         ))}
 
         {/* 私聊区段 */}
-        <div className={styles.sectionHeader}><span>私聊</span></div>
+        <div className={styles.sectionHeader}>
+          <span>私聊</span>
+          <button className={styles.btnIconSm} onClick={() => setShowCreateAgent(true)} title="新建 Agent">+</button>
+        </div>
         {orderedAgents.map(agent => (
           <div
             key={agent.agentId}
@@ -345,6 +350,7 @@ export default function Sidebar({ onSelect }) {
         ))}
       </div>
       {showCreate && <CreateRoomModal onClose={() => setShowCreate(false)} />}
+      {showCreateAgent && <CreateAgentModal onClose={() => setShowCreateAgent(false)} />}
     </div>
   );
 }

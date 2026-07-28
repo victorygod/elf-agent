@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import http from 'node:http';
+import { profilesRoot, roomsRoot, agentRoomState, _resetProfilesRoot } from '../shared/profiles_paths.js';
 import { RoomBroadcaster, RoomHistory, allocPort, RoomRegistry, RoomConfig, RoomManager, MEMBER_STATUS } from '../gateway/room_bus.js';
 
 /** 造 mock res（捕获 write/end，模拟 close 事件）
@@ -389,7 +390,10 @@ describe('RoomManager', () => {
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-rm-'));
-    roomsDir = path.join(tmpDir, 'rooms');
+    // profiles 根隔离到 tmpDir：rooms 与 agentRoomState 同根，clearMemberMemory/deleteRoom 落盘全在 tmpDir 下。
+    process.env.ELF_PROFILES_ROOT = tmpDir + '/profiles';
+    _resetProfilesRoot();
+    roomsDir = roomsRoot();
     chatDir = path.join(tmpDir, 'chat');
     agentsDir = path.join(tmpDir, 'agents');
     // 造两个假 agent config 目录，让 agentConfigDir 能找到 config.json
@@ -404,7 +408,10 @@ describe('RoomManager', () => {
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    delete process.env.ELF_PROFILES_ROOT;
+    _resetProfilesRoot();
   });
+
 
   /** fake spawn：返回带 _fakeReady=true 的假 child，记录调用 */
   function fakeSpawnFactory(calls = []) {
@@ -467,13 +474,14 @@ describe('RoomManager', () => {
     const calls = [];
     const mgr = newManager(calls);
     const r = await mgr.createRoom('群', ['elf-001', 'elf-002']);
+    // 造该成员对本群的记忆目录（profiles/agents/elf-002/rooms/<rid>），removeMember 应清掉它
+    const dataDir = agentRoomState('elf-002', r.roomId);
+    fs.mkdirSync(dataDir, { recursive: true });
     await mgr.removeMember(r.roomId, 'elf-002');
     const room = mgr.getRoom(r.roomId);
     assert.equal(room.members.length, 1);
     assert.equal(room.members[0].agentId, 'elf-001');
-    // data 目录已删
-    const dataDir = path.join(roomsDir, r.roomId, 'data', 'elf-002');
-    assert.equal(fs.existsSync(dataDir), false);
+    assert.equal(fs.existsSync(dataDir), false, '成员对本群的记忆目录已删');
   });
 
   it('listRooms 列出所有群', async () => {
@@ -538,8 +546,9 @@ describe('RoomManager', () => {
     const calls = [];
     const mgr = newManager(calls);
     const r = await mgr.createRoom('群', ['elf-001']);
-    // 造一份 context.json + tool-results 在副本 data 目录
-    const dataDir = path.join(roomsDir, r.roomId, 'data', 'elf-001');
+    // 造一份 context.json + tool-results 在成员群记忆目录（profiles/agents/<id>/rooms/<rid>）
+    const dataDir = agentRoomState('elf-001', r.roomId);
+    fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(path.join(dataDir, 'context.json'), JSON.stringify([{ role: 'user', content: 'x' }]), 'utf-8');
     fs.mkdirSync(path.join(dataDir, 'tool-results'), { recursive: true });
     fs.writeFileSync(path.join(dataDir, 'tool-results', 'a.json'), '{}', 'utf-8');
@@ -558,7 +567,8 @@ describe('RoomManager', () => {
     const calls = [];
     const mgr = newManager(calls);
     const r = await mgr.createRoom('群', ['elf-001']);
-    const dataDir = path.join(roomsDir, r.roomId, 'data', 'elf-001');
+    const dataDir = agentRoomState('elf-001', r.roomId);
+    fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(path.join(dataDir, 'context.json'), JSON.stringify([{ role: 'user', content: 'x' }]), 'utf-8');
     // 内存 Map 完全清空(模拟重启)，但 run.json 仍在
     const room = mgr.rooms.get(r.roomId);
@@ -577,7 +587,7 @@ describe('RoomManager', () => {
     assert.equal(c.roomId, r.roomId);
     assert.equal(c.mode, undefined); // mode 由 defaultSpawnFn 内部加，fake 收不到
     assert.ok(c.port > 0);
-    assert.ok(c.dataDir.includes('data/elf-001'));
+    assert.ok(c.dataDir.includes('agents/elf-001/rooms/'));
     assert.match(c.roomBusUrl, /http:\/\/127.0.0.1:8080\/rooms\//);
   });
 });

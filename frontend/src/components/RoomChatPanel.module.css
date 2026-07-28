@@ -143,7 +143,8 @@
 /* 发言者名称（头像右、卡片上） */
 .speakerName {
   font-size: 12px;
-  color: var(--text-muted, #888);
+  color: #555;
+  font-weight: 600;
   margin-left: 2px;
   line-height: 18px;
 }
@@ -229,18 +230,26 @@
 .sendBtn:disabled { background-color: #ccc; cursor: not-allowed; }
 
 /* Toast 通知 */
-.toast {
+.toastStack {
   position: absolute;
   top: 12px;
   left: 50%;
   transform: translateX(-50%);
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+.toast {
+  position: relative;
   padding: 6px 16px;
   border-radius: 16px;
   font-size: 12px;
   color: #666;
   background: rgba(255,255,255,0.92);
   box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-  z-index: 10;
   opacity: 1;
   transition: opacity 0.3s ease;
   pointer-events: none;

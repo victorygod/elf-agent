@@ -11,15 +11,15 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { Config } from '../engine/config_loader.js';
-import { MockModel } from '../engine/mock_model.js';
-import { LLMModel } from '../engine/llm_model.js';
+import { MockModel } from '../engine/models/index.js';
+import { LLMModel } from '../engine/models/index.js';
 import { ToolManager } from '../engine/tools/tool_manager.js';
 import { Read, Agent as AgentTool } from '../engine/tools/index.js';
 import { reset as resetReadState } from '../engine/tools/read_state.js';
 import { MessageManager } from '../engine/message_manager.js';
-import { Agent } from '../engine/default_agent.js';
+import { Agent } from '../engine/agent.js';
 import { createAgentServer } from '../engine/server.js';
-import { RoomMiddleware } from '../engine/room_plugin.js';
+import { RoomMiddleware } from '../engine/plugins/room_plugin.js';
 import { buildRunContext } from '../engine/run_context.js';
 
 /** 创建临时 Config 用于测试 */
@@ -717,7 +717,7 @@ describe('Agent (DefaultAgent)', () => {
         { content: '文件内容已读取完毕。' }
       ]
     });
-    agent.updateModel(toolModel);
+    agent.model = toolModel;
     const events = [];
     await agent.receive('帮我看看文件', { emit: e => events.push(e) });
     const statusEvents = events.filter(e => e.event === 'status');
@@ -889,7 +889,7 @@ describe('Agent (DefaultAgent)', () => {
         throw new Error('API rate limit exceeded');
       }
     };
-    agent.updateModel(errorModel);
+    agent.model = errorModel;
 
     const events = [];
     await agent.receive('触发错误', { emit: e => events.push(e) });
@@ -1230,7 +1230,7 @@ describe('Agent abort', () => {
       responses: [{ content: '这是一段足够长的慢速回复用于测试中断功能' }],
       delayMs: 50
     });
-    agent.updateModel(slowModel);
+    agent.model = slowModel;
 
     const events = [];
     const consumePromise = agent.receive('测试中断', { emit: e => events.push(e) });
@@ -1266,7 +1266,7 @@ describe('Agent abort', () => {
       responses: [{ content: '这是一段足够长的慢速回复用于测试中断保留内容' }],
       delayMs: 40
     });
-    agent.updateModel(slowModel);
+    agent.model = slowModel;
 
     const events = [];
     const consumePromise = agent.receive('测试中断', { emit: e => events.push(e) });
@@ -1875,7 +1875,7 @@ describe('Plugin 骨架 (middleware + callback)', () => {
     const received = [];
     a.callbacks.push({ onCompact(e) { received.push(['h1', e]); } });
     a.callbacks.push({ onCompact(e) { received.push(['h2', e]); } });
-    a._emit('compact', { tokenEstimate: 100, compactId: 'c1' });
+    a.harness.emit(a.callbacks, 'compact', { tokenEstimate: 100, compactId: 'c1' });
     assert.equal(received.length, 2, '两个 handler 都应被触发');
     assert.deepEqual(received[0], ['h1', { tokenEstimate: 100, compactId: 'c1' }]);
     assert.deepEqual(received[1], ['h2', { tokenEstimate: 100, compactId: 'c1' }]);
@@ -1887,19 +1887,19 @@ describe('Plugin 骨架 (middleware + callback)', () => {
     a.callbacks.push({ onCompactError() { throw new Error('boom'); } });
     a.callbacks.push({ onCompactError(e) { called = true; } });
     // 不应抛
-    assert.doesNotThrow(() => a._emit('compact_error', { attempt: 1 }));
+    assert.doesNotThrow(() => a.harness.emit(a.callbacks, 'compact_error', { attempt: 1 }));
     assert.equal(called, true, '后续 handler 仍应被触发');
   });
 
   it('_emit 无 handler 时空跑（callbacks=[]）', () => {
     const a = makeBareAgent();
-    assert.doesNotThrow(() => a._emit('compact', {}));
+    assert.doesNotThrow(() => a.harness.emit(a.callbacks, 'compact', {}));
   });
 
   it('_emit handler 未实现该方法 → 跳过，不抛', () => {
     const a = makeBareAgent();
     a.callbacks.push({ onCompact(e) { /* only compact */ } });
-    assert.doesNotThrow(() => a._emit('compactStart', {}));
+    assert.doesNotThrow(() => a.harness.emit(a.callbacks, 'compactStart', {}));
   });
 
   it('_runInjection 注入型：多 provider 按序执行，效果累积', async () => {
@@ -1908,7 +1908,7 @@ describe('Plugin 骨架 (middleware + callback)', () => {
     a.middlewares.push({ preReason() { log.push('m1'); } });
     a.middlewares.push({ preReason() { log.push('m2'); } });
     a.middlewares.push({}); // 无该方法的 provider 应被跳过
-    await a._runInjection('preReason', a.messageManager);
+    await a.harness.runInjection([...a.middlewares, ...(a._scene ? [a._scene] : [])], 'preReason', a.messageManager);
     assert.deepEqual(log, ['m1', 'm2']);
   });
 
@@ -1917,20 +1917,20 @@ describe('Plugin 骨架 (middleware + callback)', () => {
     a.middlewares.push({ gate(acc) { return acc ?? 'first'; } });
     a.middlewares.push({ gate(acc) { return acc === 'first' ? 'second' : null; } });
     a.middlewares.push({ gate() { return null; } }); // 放行
-    const r = await a._dispatchGate('gate', null, 'arg');
+    const r = await a.harness.dispatchGate([...a.middlewares, ...(a._scene ? [a._scene] : [])], 'gate', null, 'arg');
     assert.equal(r, 'second', '应取最后非 null 归并值');
   });
 
   it('_dispatchGate：所有 provider 返回 null → 返回初始 null（调用方走默认）', async () => {
     const a = makeBareAgent();
     a.middlewares.push({ gate() { return null; } });
-    const r = await a._dispatchGate('gate', null);
+    const r = await a.harness.dispatchGate([...a.middlewares, ...(a._scene ? [a._scene] : [])], 'gate', null);
     assert.equal(r, null);
   });
 
   it('_dispatchGate：middlewares=[] → 返回 null（零回归锚）', async () => {
     const a = makeBareAgent();
-    const r = await a._dispatchGate('shouldBreakAfterTools', null, []);
+    const r = await a.harness.dispatchGate([...a.middlewares, ...(a._scene ? [a._scene] : [])], 'shouldBreakAfterTools', null, []);
     assert.equal(r, null);
   });
 

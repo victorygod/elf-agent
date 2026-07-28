@@ -4,6 +4,7 @@ import { useRoomStore } from '../stores/roomStore.js';
 import useAgentStore from '../stores/agentStore.js';
 import { useRoomChat } from '../hooks/useRoomChat.js';
 import MarkdownContent from './MarkdownContent';
+import ToastStack from './Toast';
 import styles from './RoomChatPanel.module.css';
 
 /**
@@ -75,6 +76,27 @@ export default function RoomChatPanel({ roomId }) {
   const messages = chat?.messages || [];
   const members = chat?.members || [];
 
+  // 用户是否主动上滑离开底部 — 置 true 后新消息不自动滚底,直到用户滚回底部附近
+  const userScrolledAwayRef = useRef(false);
+
+  // 检测是否在底部附近(阈值 120px,对齐私聊 ChatPanel 的体感)
+  const isNearBottom = useCallback(() => {
+    const el = listRef.current;
+    if (!el) return true;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    return distanceFromBottom <= 120;
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    // 用户向上滚离开底部后停止自动滚底;滚回底部附近则恢复跟随
+    userScrolledAwayRef.current = !isNearBottom();
+  }, [isNearBottom]);
+
   /** 点击 @mention 跳转到指定 Agent 私聊 */
   const handleMentionClick = useCallback((name) => {
     // name 可能是 agentId 也可能是 display name，查找匹配的 agentId
@@ -85,15 +107,24 @@ export default function RoomChatPanel({ roomId }) {
     useAgentStore.getState().selectAgent(member.agentId);
   }, [members]);
 
-  // 新消息滚到底
+  // 新消息滚到底:仅当用户停留在底部附近时跟随;用户主动上滑翻历史时不打扰
   useEffect(() => {
-    if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
-  }, [messages.length]);
+    if (userScrolledAwayRef.current) return;
+    scrollToBottom();
+  }, [messages.length, scrollToBottom]);
+
+  // 切换房间时复位「离开底部」标记,新房间首次进入直接滚到底(不被上一房间的上滑状态带偏)
+  useEffect(() => {
+    userScrolledAwayRef.current = false;
+    scrollToBottom();
+  }, [roomId, scrollToBottom]);
 
   const handleSend = async () => {
     const text = input.trim();
     if (!text) return;
     setInput('');
+    // 自己发消息视为重新关注底部:清除「离开底部」标记,消息回来时自动滚到底
+    userScrolledAwayRef.current = false;
     try {
       await send(text);
     } catch (e) {
@@ -133,10 +164,15 @@ export default function RoomChatPanel({ roomId }) {
 
   const onCompositionEnd = () => { isComposingRef.current = false; };
 
+  // 群聊居中通知（多条竖排，LLM 重试/失败），复用共享 ToastStack
+  const roomToastList = useRoomStore(s => s.roomToastList);
+  const removeRoomToast = useRoomStore(s => s.removeRoomToast);
+
   return (
     <div className={styles.container}>
+      <ToastStack toasts={roomToastList} remove={removeRoomToast} styles={styles} />
       {/* 消息列表 */}
-      <div className={styles.messageList} ref={listRef}>
+      <div className={styles.messageList} ref={listRef} onScroll={handleScroll}>
         {messages.length === 0 && (
           <div className={styles.empty}>群里还没有消息。发一条试试（@某成员 让它回复）。</div>
         )}
@@ -189,7 +225,7 @@ export default function RoomChatPanel({ roomId }) {
           placeholder="发消息…（@elf-001 让它回复）"
           rows={1}
         />
-        <button className={styles.sendBtn} onClick={handleSend} disabled={!input.trim()}>发送</button>
+        <button className={styles.sendBtn} type="button" aria-label="发送" onClick={handleSend} disabled={!input.trim()}></button>
       </div>
     </div>
   );

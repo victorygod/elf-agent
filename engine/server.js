@@ -106,7 +106,9 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
     }
     const mode = opts.mode || (roomId.startsWith('chat-') ? 'private' : 'room');
     const dataRoot = factoryOpts.dataRoot;
-    const dataDir = path.join(dataRoot, roomId);
+    // 群聊 dataDir = profiles/agents/<id>/rooms/<rid>（对齐 shared/profiles_paths.agentRoomState，
+    //   clearMemberMemory 删盘兜底按此路径清；旧实现漏 rooms/ 层致 context.json 清不到）。
+    const dataDir = path.join(dataRoot, 'rooms', roomId);
     fs.mkdirSync(dataDir, { recursive: true });
     // 私聊 roomId = chat-<agentId> → 取 agentId；群聊 roomId = room_xxx，需显式 agentId/mode。
     const agentId = mode === 'private' ? roomId.slice('chat-'.length) : (opts.agentId || factoryOpts.defaultAgentId);
@@ -158,16 +160,18 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
       mentions: Array.isArray(body.mentions) ? body.mentions : [],
       role: body.role || 'chat',
       seq: body.seq ?? null,
+      ts: body.ts ?? null,
       roomId: room.roomId,
     };
 
     // per-room 串行队列
     if (room.observeProcessing) {
       if (!room.pendingObserve) {
-        room.pendingObserve = { froms: [], contents: [], mentions: new Set(payload.mentions), seq: payload.seq, roomId: room.roomId };
+        room.pendingObserve = { froms: [], contents: [], tses: [], mentions: new Set(payload.mentions), seq: payload.seq, roomId: room.roomId };
       }
       room.pendingObserve.froms.push(payload.from);
       room.pendingObserve.contents.push(payload.content);
+      room.pendingObserve.tses.push(payload.ts);
       for (const m of payload.mentions) room.pendingObserve.mentions.add(m);
       if (payload.seq != null && (room.pendingObserve.seq == null || payload.seq > room.pendingObserve.seq)) {
         room.pendingObserve.seq = payload.seq;
@@ -195,6 +199,7 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
         const next = room.pendingObserve; room.pendingObserve = null;
         const mentions = [...next.mentions];
         const seq = next.seq ?? null;
+        const tses = next.tses || [];
         (async () => {
           for (let i = 0; i < next.contents.length; i++) {
             const single = {
@@ -203,6 +208,7 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
               mentions,
               role: 'chat',
               seq,
+              ts: tses[i] ?? null,
               roomId: next.roomId,
             };
             try { await room.agent.receive(single, { emit: forwardEvents ? (e)=>room.agent._pushEvent?.(e.event,{...(e.data||{}),_roomId:room.roomId}) : ()=>{} }); }
@@ -352,6 +358,9 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
   // ===== POST /clear/:roomId — 清指定房记忆（v3）=====
   function clearRoom(room) {
     const a = room.agent;
+    // 观测式：清 timer（防 /clear 后幽灵回调），clear 后下次消息 onRoomEnter 重新 arm
+    const scene = room.plugin || a._scene;
+    scene?.dispose?.();
     a.messageManager.clear();
     if (a.skillLister) { a.skillLister.reset(); a.skillLister.inject(); }
     if (typeof a.messageManager._cleanupToolResults === 'function') a.messageManager._cleanupToolResults();
@@ -363,7 +372,6 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
       const cursorFile = path.join(a.runContext.dataDir, 'sync_cursor.json');
       try { if (fs.existsSync(cursorFile)) fs.unlinkSync(cursorFile); } catch (e) {}
     }
-    const scene = room.plugin || a._scene;
     if (scene && Array.isArray(scene._buffer)) { scene._buffer.length = 0; scene._bufferHasMention = false; }
     logger.info(`RoomState[${room.roomId}] 记忆已清空`);
   }
@@ -383,6 +391,9 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
   // ===== POST /reload/:roomId + 旧 /reload（默认房）— rewind 后重载 context.json + 清 tool-results =====
   function reloadRoom(room) {
     room.agent.messageManager.reloadFromDisk();
+    // 观测式：rewind 后历史已变，清 timer 防幽灵回调；重启观测窗口（下次消息或心跳自然续上）
+    const scene = room.plugin || room.agent._scene;
+    scene?.dispose?.();
     // rewind 三处重建之 tool-results：清本 room 的 tool-results 目录（snapshot 已覆盖回写，清孤儿）。
     const dataDir = room.agent.messageManager.dataDir || room.runContext?.dataDir;
     if (dataDir) {

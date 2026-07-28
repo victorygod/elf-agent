@@ -68,8 +68,7 @@ export class ToolManager {
    * run-level 工具注入：注册本次请求专用的临时工具，返回还原函数（请求结束调）。
    *   - 同名覆盖静态工具（Map 同 key，注册即覆盖）；
    *   - 记录被覆盖的旧工具，还原时恢复，保证不影响其它请求/其它 room。
-   *   - 禁用集（disableTools）只是遮蔽 getAll，不动 Map，还原无需处理（随请求清理 _activeDisabled）。
-   * 典型用法见 Agent.receive 的 runLevelScope。
+   * 典型用法见 Harness.withRunLevel（run-level 作用域总入口）。
    * @param {Array<object>} tools - 临时工具定义
    * @returns {() => void} 还原函数
    */
@@ -87,6 +86,23 @@ export class ToolManager {
       for (const name of newNames) this.tools.delete(name);
       for (const { name, tool } of backups) this.tools.set(name, tool);
     };
+  }
+
+  /**
+   * run-level 负向禁用：设本次请求的 _activeDisabled 集，返回还原函数（请求结束调）。
+   *   getAll(view) 不传 view 时读 _activeDisabled 跳过被禁工具；不动 Map。
+   *   收口原 Agent._enterRunLevel 里直接戳 _activeDisabled 私有字段的逻辑，由 ToolManager 自管。
+   * @param {Iterable<string>} names - 本请求禁用的工具名
+   * @returns {() => void} 还原函数
+   */
+  withDisabled(names) {
+    if (!names) return () => {};
+    const prevDisabled = this._activeDisabled || null;
+    const newDisabled = new Set();
+    if (prevDisabled) for (const n of prevDisabled) newDisabled.add(n);
+    for (const n of names) newDisabled.add(n);
+    this._activeDisabled = newDisabled;
+    return () => { this._activeDisabled = prevDisabled; };
   }
 
   /**

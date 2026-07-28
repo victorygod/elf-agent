@@ -1,8 +1,8 @@
 /**
  * 聊天记录持久化模块
- * 数据以 JSONL 格式追加写入 chat/{agentId}/data/history.jsonl（阶段二迁实例级，与 mm dataDir 同层）。
- *   老路径 agents/{agentId}/data/history.jsonl 由 start.js migrateDataDir 首启搬到 chat 路径。
- *   未传 chatDir 时回退 agentsDir（开发直跑兼容）。
+ * v3 room 模式：history 写 profiles/rooms/<roomId>/history.jsonl（roomMode:true + roomsDir）。
+ *   私聊房 roomId=chat-<id> → profiles/rooms/chat-<id>/history.jsonl；群聊 → profiles/rooms/<rid>/history.jsonl。
+ *   非 room 老路径（chat/<id>/data/history.jsonl）已废，chatDir/agentsDir 仅留构造兼容字段。
  * 只记录 user / assistant 消息，不含 tool / system，不做压缩
  */
 

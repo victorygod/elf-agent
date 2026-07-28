@@ -2,20 +2,22 @@
  * Rewind 快照包模块（整文件替换回退）
  *
  * 设计见 docs/rewind-design.md A.3-A.5。
- * 快照包 = 用户发消息「之前」的 data/ 会话状态整份副本：
- *   data/checkpoints/<checkpointId>/
+ * 快照包 = 用户发消息「之前」的会话状态整份副本（记忆源 profiles/agents/<id>/memory）：
+ *   profiles/agents/<id>/memory/checkpoints/<checkpointId>/
  *     meta.json          { id, createdAt, prompt, restoredPrompt }
  *     context.json       快照时刻整份
- *     history.jsonl      快照时刻整份
+ *     history.jsonl      快照时刻整份（agent 记忆内的紧凑历史，已废用，保留兼容）
+ *     room-history.jsonl 私聊房 SSE 历史快照（profiles/rooms/chat-<id>/history.jsonl）
  *     tool-results/      快照时刻整份（仅 Elf-002 等落盘 tool-result 的 agent 才有）
  *
- * 回退 = 把某个快照包整份覆盖回 data/，删掉其后所有快照包。
+ * 回退 = 把某个快照包整份覆盖回 memory/（记忆）+ roomHistoryPath（房历史），删掉其后所有快照包。
  * 全部责任在 gateway，agent 仅被动 /reload 内存。
  */
 
 import fs from 'fs';
 import path from 'path';
 import { createLogger } from '../shared/logger.js';
+import { agentMemory } from '../shared/profiles_paths.js';
 
 const logger = createLogger('snapshot', 'gateway.log');
 
@@ -26,14 +28,14 @@ function _rand4() {
   return Math.random().toString(16).slice(2, 6);
 }
 
-/** data 目录路径 */
-function _dataDir(agentsDir, agentId) {
-  return path.join(agentsDir, agentId, 'data');
+/** agent 私聊记忆目录：profiles/agents/<id>/memory（snapshot 打包/还原的"记忆源"） */
+function _dataDir(agentId) {
+  return agentMemory(agentId);
 }
 
-/** checkpoints 根目录 */
-function _checkpointsDir(agentsDir, agentId) {
-  return path.join(_dataDir(agentsDir, agentId), 'checkpoints');
+/** checkpoints 根目录：profiles/agents/<id>/memory/checkpoints */
+function _checkpointsDir(agentId) {
+  return path.join(_dataDir(agentId), 'checkpoints');
 }
 
 /** 递归拷贝目录 */
@@ -60,40 +62,47 @@ function _rmDir(dir) {
 /**
  * 在用户发消息前打一个快照包（说话前状态）
  * 必须在写 user 进 history.jsonl 之前调用。
- * @param {string} agentsDir
+ * 记忆源 = profiles/agents/<id>/memory（context/history(tool-results）。
  * @param {string} agentId
  * @param {string} prompt - 本轮用户消息全文（菜单标题 + 回填输入框）
- * @param {string} [roomHistoryPath] - v3 私聊房 history 路径（rooms/chat-<id>/history.jsonl），
+ * @param {string} [roomHistoryPath] - 私聊房 history 路径（profiles/rooms/chat-<id>/history.jsonl），
  *        传入则一并快照（与 memory 三件套同进同出），rewind 时同步恢复。
  * @returns {string|null} checkpointId，失败返回 null
  */
-export function snapshotBeforeSend(agentsDir, agentId, prompt, roomHistoryPath) {
-  const dataDir = _dataDir(agentsDir, agentId);
+export function snapshotBeforeSend(agentId, prompt, roomHistoryPath) {
+  const dataDir = _dataDir(agentId);
   const contextFile = path.join(dataDir, 'context.json');
   const jsonlFile = path.join(dataDir, 'history.jsonl');
   const toolResultsDir = path.join(dataDir, 'tool-results');
 
-  // 没有任何会话数据，不打快照（首次对话前）
+  // 【改动1】首次对话也打快照：如果文件不存在，先创建空文件再 snapshot
   const hasContext = fs.existsSync(contextFile);
   const hasJsonl = fs.existsSync(jsonlFile);
-  if (!hasContext && !hasJsonl) {
-    logger.info(`[snapshot 跳过 ${agentId}] 无 context.json/history.jsonl（首次对话前不打快照）`);
-    return null;
+  if (!hasContext) {
+    fs.writeFileSync(contextFile, '[]', 'utf-8');
+    logger.info(`[snapshot ${agentId}] 首次创建空 context.json`);
+  }
+  if (!hasJsonl) {
+    // history.jsonl 将在 gateway/room_routes.js 的 /say 路由中写入第一条 user 记录；
+    // 此处创建空文件仅确保 checkpoint 有对应的源文件。
+    fs.writeFileSync(jsonlFile, '', 'utf-8');
+    logger.info(`[snapshot ${agentId}] 首次创建空 history.jsonl`);
   }
 
-  const beforeCount = listCheckpoints(agentsDir, agentId).length;
+  const beforeCount = listCheckpoints(agentId).length;
   const cpId = `cp_${Date.now()}_${_rand4()}`;
-  const cpDir = path.join(_checkpointsDir(agentsDir, agentId), cpId);
+  const cpDir = path.join(_checkpointsDir(agentId), cpId);
   fs.mkdirSync(cpDir, { recursive: true });
   logger.info(`[snapshot 开始 ${agentId}] 打快照前磁盘 ${beforeCount} 个；新建 ${cpId}；源存在 context=${hasContext} jsonl=${hasJsonl} tool-results=${fs.existsSync(toolResultsDir)}；prompt="${(prompt || '').slice(0, 30)}"`);
 
   try {
-    if (hasContext) fs.copyFileSync(contextFile, path.join(cpDir, 'context.json'));
-    if (hasJsonl) fs.copyFileSync(jsonlFile, path.join(cpDir, 'history.jsonl'));
+    // 文件此时一定存在（首次对话已在上方创建空文件）
+    fs.copyFileSync(contextFile, path.join(cpDir, 'context.json'));
+    fs.copyFileSync(jsonlFile, path.join(cpDir, 'history.jsonl'));
     if (fs.existsSync(toolResultsDir) && fs.statSync(toolResultsDir).isDirectory()) {
       _copyDir(toolResultsDir, path.join(cpDir, 'tool-results'));
     }
-    // v3 私聊房 history（rooms/chat-<id>/history.jsonl）一并快照（单独命名 room-history.jsonl 与 memory history 区分）
+    // 私聊房 history（profiles/rooms/chat-<id>/history.jsonl）一并快照（单独命名 room-history.jsonl 与 memory history 区分）
     if (roomHistoryPath && fs.existsSync(roomHistoryPath)) {
       fs.copyFileSync(roomHistoryPath, path.join(cpDir, 'room-history.jsonl'));
     }
@@ -107,7 +116,7 @@ export function snapshotBeforeSend(agentsDir, agentId, prompt, roomHistoryPath) 
       'utf-8'
     );
     // 滑窗淘汰：超过上限删掉最旧的快照包
-    _evictOld(agentsDir, agentId);
+    _evictOld(agentId);
     return cpId;
   } catch (err) {
     logger.error(`打快照失败 (${agentId}): ${err.message}`);
@@ -117,8 +126,8 @@ export function snapshotBeforeSend(agentsDir, agentId, prompt, roomHistoryPath) 
 }
 
 /** 滑窗淘汰：保留最近 MAX_CHECKPOINTS 个，删掉更旧的 */
-function _evictOld(agentsDir, agentId) {
-  const root = _checkpointsDir(agentsDir, agentId);
+function _evictOld(agentId) {
+  const root = _checkpointsDir(agentId);
   if (!fs.existsSync(root)) return;
   const dirs = fs.readdirSync(root, { withFileTypes: true })
     .filter(e => e.isDirectory())
@@ -158,8 +167,8 @@ function _cpTimestamp(cpDir) {
  * 列出所有快照包（按 createdAt 升序，最旧在前）
  * @returns {Array<{ id, createdAt, prompt }>}
  */
-export function listCheckpoints(agentsDir, agentId) {
-  const root = _checkpointsDir(agentsDir, agentId);
+export function listCheckpoints(agentId) {
+  const root = _checkpointsDir(agentId);
   if (!fs.existsSync(root)) return [];
   const entries = fs.readdirSync(root, { withFileTypes: true })
     .filter(e => e.isDirectory())
@@ -181,20 +190,20 @@ export function listCheckpoints(agentsDir, agentId) {
 /**
  * 解析「最近一个 checkpoint」的 id（空输入框双击 Esc / 回退按钮默认动作）
  */
-export function latestCheckpointId(agentsDir, agentId) {
-  const list = listCheckpoints(agentsDir, agentId);
+export function latestCheckpointId(agentId) {
+  const list = listCheckpoints(agentId);
   return list.length ? list[list.length - 1].id : null;
 }
 
 /**
  * 回退到指定 checkpoint：整文件替换 + 删其后快照包
- * @param {string} agentsDir
+ * 记忆还原回 profiles/agents/<id>/memory，房历史还原回 roomHistoryPath（profiles/rooms/chat-<id>/history.jsonl）。
  * @param {string} agentId
  * @param {string} [checkpointId] - 省略 = 最近一个
  * @returns {{ ok: boolean, restoredPrompt: string|null, error?: string }}
  */
-export function rewindTo(agentsDir, agentId, checkpointId, roomHistoryPathOpt) {
-  const list = listCheckpoints(agentsDir, agentId);
+export function rewindTo(agentId, checkpointId, roomHistoryPathOpt) {
+  const list = listCheckpoints(agentId);
   logger.info(`[rewindTo 入口 ${agentId}] checkpointId=${checkpointId || '(latest)'} 删除前现有 ${list.length} 个快照包: ${_fmtList(list)}`);
   if (list.length === 0) return { ok: false, restoredPrompt: null, error: 'no checkpoint' };
 
@@ -208,12 +217,12 @@ export function rewindTo(agentsDir, agentId, checkpointId, roomHistoryPathOpt) {
   const targetTs = target.createdAt ? Date.parse(target.createdAt) : 0;
   logger.info(`[rewindTo 目标 ${agentId}] 目标项 idx=${idx} id=${target.id} createdAt=${target.createdAt} ts=${targetTs} prompt="${(target.prompt || '').slice(0, 30)}"`);
 
-  const root = _checkpointsDir(agentsDir, agentId);
+  const root = _checkpointsDir(agentId);
   const targetCpDir = path.join(root, list[idx].id);
   const meta = _readMeta(targetCpDir);
   if (!meta) return { ok: false, restoredPrompt: null, error: 'checkpoint meta missing' };
 
-  const dataDir = _dataDir(agentsDir, agentId);
+  const dataDir = _dataDir(agentId);
   const roomHistoryPath = roomHistoryPathOpt || null;
   try {
     // 1. 整份覆盖 context.json
@@ -235,32 +244,58 @@ export function rewindTo(agentsDir, agentId, checkpointId, roomHistoryPathOpt) {
     const liveToolResults = path.join(dataDir, 'tool-results');
     if (fs.existsSync(liveToolResults)) _rmDir(liveToolResults);
     if (fs.existsSync(cpToolResults)) _copyDir(cpToolResults, liveToolResults);
-    // 4. 整份覆盖 v3 私聊房 room-history.jsonl（快照里无则清空）
+    // 4. 整份覆盖私聊房 room-history.jsonl
+    //    快照里有 → 直接覆盖；快照里无（agent-side mid-turn checkpoint）→ 从 context.json 重建
     const cpRoomHistory = path.join(targetCpDir, 'room-history.jsonl');
     if (roomHistoryPath) {
       if (fs.existsSync(cpRoomHistory)) {
         fs.copyFileSync(cpRoomHistory, roomHistoryPath);
-      } else if (fs.existsSync(roomHistoryPath)) {
-        fs.writeFileSync(roomHistoryPath, '', 'utf-8');
+      } else {
+        // 从刚恢复的 context.json 重建 room-history.jsonl，保持与 agent memory 一致
+        const restoredCtx = path.join(dataDir, 'context.json');
+        let reconstructed = '';
+        try {
+          const raw = fs.readFileSync(restoredCtx, 'utf-8');
+          const msgs = JSON.parse(raw);
+          let seq = 1;
+          const lines = [];
+          for (const m of msgs) {
+            if (m.role === 'tool' || m.isMeta) continue;
+            const record = {
+              id: m.id || `msg_${Date.now()}_${seq}`,
+              seq: seq++,
+              role: m.role,
+              content: m.content || '',
+              ts: m.ts || new Date().toISOString(),
+            };
+            if (m.tool_calls) record.toolCalls = m.tool_calls;
+            lines.push(JSON.stringify(record));
+          }
+          reconstructed = lines.join('\n') + (lines.length > 0 ? '\n' : '');
+        } catch (e) {
+          // context.json 读取失败 → 清空 room history
+        }
+        if (fs.existsSync(roomHistoryPath)) {
+          fs.writeFileSync(roomHistoryPath, reconstructed, 'utf-8');
+        }
       }
     }
 
-    // 4. 删掉该点及其之后的快照包（被回退项也删，回到「发这条消息之前」）
-    //    target 关注的是「回到该点之前」，故该点本身（含 prompt 回填用的那份）一并删除；
-    //    注意覆盖用的 meta.restoredPrompt 已在上文读入内存，删目录不影响返回值。
+    // 4. 删掉 target 之后（不含 target）的快照包
+    //    保留 target 本身，这样用户可以重复回退到同一 checkpoint。
     const deletedIds = [];
     const keptIds = [];
     for (const cp of list) {
       const ts = cp.createdAt ? Date.parse(cp.createdAt) : 0;
-      if (ts >= targetTs) {
+      if (ts > targetTs) {
         _rmDir(path.join(root, cp.id));
         deletedIds.push(cp.id);
       } else {
         keptIds.push(cp.id);
       }
     }
-    const after = listCheckpoints(agentsDir, agentId);
-    logger.info(`[rewindTo 删除 ${agentId}] 目标 ts=${targetTs}，判定规则 ts>=目标=删（含被回退项）。删除 ${deletedIds.length} 个: ${deletedIds.join(',') || '(无)'}；保留 ${keptIds.length} 个: ${keptIds.join(',')}`);
+    const after = listCheckpoints(agentId);
+    logger.info(`[rewindTo 删除 ${agentId}] 目标 ts=${targetTs}，判定规则 ts>目标=删（保留目标本身）。删除 ${deletedIds.length} 个: ${deletedIds.join(',') || '(无)'}；保留 ${keptIds.length} 个: ${keptIds.join(',')}`);
     logger.info(`[rewindTo 删除后回查 ${agentId}] 磁盘实际剩余 ${after.length} 个快照包: ${_fmtList(after)}`);
 
     return { ok: true, restoredPrompt: meta.restoredPrompt ?? meta.prompt ?? null };

@@ -83,7 +83,7 @@ export default function useChat(agentId) {
       const data = await api.rewindAgent(agentId, checkpointId);
       if (data?.status === 'ok') {
         finalizeActiveTurn(agentId);
-        await useAgentStore.getState().loadHistory(agentId);
+        await useAgentStore.getState().loadHistory(agentId, { force: true });
         return { ok: true, restoredPrompt: data.restoredPrompt ?? null };
       }
       api.log('WARN', `rewind 失败: ${data?.error || 'unknown'}`);

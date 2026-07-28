@@ -8,6 +8,13 @@
  * - 整块、非流式：message 是完整字符串，一次性提交。
  */
 
+/** 本地时间 MMDD hh:mm（与 RoomPlugin._formatTs 同口径，tool_result 带时间让 LLM 知发言时刻）。 */
+function _fmtNow() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export const Speak = {
   name: 'Speak',
   description: '在群里发言。整块消息一次性进群聊,所有人和 agent 可见。这是你在群聊里唯一让别人看见的出口——其他内心活动/思考对外不可见。',
@@ -68,7 +75,7 @@ export const Speak = {
       if (!resp.ok) {
         return `Error: 发言失败 (room_bus 返回 ${resp.status})`;
       }
-      return `已发言`;
+      return `[${_fmtNow()}] 已发言`;
     } catch (err) {
       if (err.name === 'AbortError') return 'Error: aborted';
       return `Error: 发言请求失败: ${err.message}`;

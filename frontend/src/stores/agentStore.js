@@ -45,14 +45,25 @@ const useAgentStore = create((set, get) => ({
   configDrawerOpen: false,
   configAgentId: null,
 
-  // ===== Toast 通知 =====
-  toastMessage: null,
+  // ===== Toast 通知（多条竖排，各自独立计时） =====
+  // toasts: [{ id, fields }] —— fields 为 string 或 notice 字段对象。
+  toastList: [],
+  toastMessage: null,   // 兼容旧引用（仅最后一条的字符串镜像）
   _toastKey: 0,
 
-  showToast: (message) => set(s => ({
-    toastMessage: message,
-    _toastKey: s._toastKey + 1,
-  })),
+  showToast: (fields) => set(s => {
+    const id = s._toastKey + 1;
+    const next = [...s.toastList, { id, fields }];
+    return {
+      toastList: next,
+      toastMessage: typeof fields === 'string' ? fields : (fields?.text || null),
+      _toastKey: id,
+    };
+  }),
+
+  removeToast: (id) => set(s => ({ toastList: s.toastList.filter(t => t.id !== id) })),
+
+  clearToast: () => set({ toastList: [] }),
 
   // ===== Agent 列表 =====
 
@@ -113,9 +124,8 @@ const useAgentStore = create((set, get) => ({
         _savedScrollTop: 0,
       });
     } else {
-      // 重新激活已存在的 chat：常驻 subscribe（useAgentSubscriptions）在场期间持续更新 store，
-      // 切 tab 不丢异步事件，切回无需从磁盘 loadHistory 重建（否则会用磁盘快照覆盖实时 store 抖动）。
-      // 故只标 _isActive，不动 historyLoaded（首次未 load 的仍由 ChatPanel init effect 触发一次 load）。
+      // 重新激活已存在的 chat：常驻 SSE subscribe 在场期间持续更新 store，切 tab 不丢异步事件，
+      //   切回无需重建。仅标 _isActive（historyLoaded 已由 SSE snapshot 置位；未 running 的由 ChatPanel init force 兜底）。
       newChats.set(agentId, { ...newChats.get(agentId), _isActive: true });
     }
 
@@ -141,29 +151,33 @@ const useAgentStore = create((set, get) => ({
   _patchChat: (agentId, updates) => {
     const chats = new Map(get().chats);
     const chat = chats.get(agentId);
-    if (!chat) return;
-    chats.set(agentId, { ...chat, ...updates });
+    const defaults = { streaming: false, activeTurn: null, turns: [], historyLoaded: false, hasMore: false };
+    // SSE subscribe 可能在 ChatPanel mount 前就收到 snapshot——chat 不存在时懒创建，防止事件被丢弃。
+    chats.set(agentId, chat ? { ...chat, ...updates } : { ...defaults, ...updates });
     set({ chats });
   },
 
   // ===== 聊天历史 =====
 
-  loadHistory: async (agentId) => {
+  loadHistory: async (agentId, { force = false } = {}) => {
+    // 初始历史由 SSE snapshot 提供（single source）。本方法仅 rewind 后 force 重建用。
+    if (!force) return;
     const chats = new Map(get().chats);
     const chat = chats.get(agentId);
     if (!chat) return;
-    // ★ activeTurn 在途时不 loadHistory —— 发消息瞬间 user 已落盘 jsonl，
-    //   此时 loader 会把这条 user 读进 turns，与 activeTurn 同框渲染导致对话翻倍。
-    if (chat.activeTurn) return;
+    api.log('INFO', `[loadHistory] agent=${agentId} force 重建（rewind）`);
     try {
       const data = await api.getHistory(agentId, { limit: HISTORY_PAGE_SIZE });
       const messages = data.messages || [];
       const turns = historyToTurns(messages);
+      api.log('INFO', `[loadHistory] agent=${agentId} REST 返回 ${messages.length} 条，降为 ${turns.length} turns`);
       chats.set(agentId, {
         ...chat,
         turns,
+        activeTurn: null,
         hasMore: data.hasMore || false,
         historyLoaded: true,
+        loadingHistory: false,
       });
       set({ chats });
     } catch (e) {

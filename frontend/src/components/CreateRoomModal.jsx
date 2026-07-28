@@ -53,8 +53,8 @@ export default function CreateRoomModal({ onClose }) {
             {agents.map(a => (
               <label key={a.agentId} className={`${styles.agentItem} ${selected.has(a.agentId) ? styles.checked : ''}`}>
                 <input type="checkbox" checked={selected.has(a.agentId)} onChange={() => toggle(a.agentId)} />
-                <span>{a.name}</span>
-                <span className={styles.idHint}>({a.agentId})</span>
+                <span className={styles.agentName}>{a.name}</span>
+                <span className={styles.idHint}>@{a.agentId}</span>
               </label>
             ))}
           </div>

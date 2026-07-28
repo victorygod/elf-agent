@@ -17,10 +17,10 @@ import path from 'path';
 import os from 'os';
 import { buildRunContext, buildPrivateRunContext } from '../engine/run_context.js';
 import { Config } from '../engine/config_loader.js';
-import { MockModel } from '../engine/mock_model.js';
+import { MockModel } from '../engine/models/index.js';
 import { ToolManager } from '../engine/tools/tool_manager.js';
 import { MessageManager } from '../engine/message_manager.js';
-import { Agent } from '../engine/default_agent.js';
+import { Agent } from '../engine/agent.js';
 import { createAgentServer } from '../engine/server.js';
 
 /** 造临时 config 目录（仿 agent.test.js 风格） */

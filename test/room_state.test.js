@@ -14,7 +14,7 @@ import os from 'os';
 import path from 'path';
 import { createRoomState } from '../engine/room_state.js';
 import { createAgentServer } from '../engine/server.js';
-import { MockModel } from '../engine/mock_model.js';
+import { MockModel } from '../engine/models/index.js';
 
 const ELF001_CONFIG_DIR = path.join(process.cwd(), 'agents', 'elf-001', 'config');
 

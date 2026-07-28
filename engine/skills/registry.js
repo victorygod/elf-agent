@@ -1,16 +1,15 @@
 /**
  * Skill 注册表（L0：对象常驻但极轻）
  *
- * 扫描 skills 目录，为每个子目录的 SKILL.md 构造一个轻量 Skill 对象。
+ * 扫描单一 skills 目录 ~/.elf/skills，为每个子目录的 SKILL.md 构造一个轻量 Skill 对象。
  * 对齐 Claude Code `WN8`/`Gp6`（cli.js:1637）：
  *  - skill 名永远取目录名（不取 frontmatter.name）
  *  - 对象只存 contentLength，不存正文（progressive disclosure）
  *  - description 缺失时从正文取第一个 # 标题兜底
  *  - 目录不存在 / 读不到 → 静默跳过，不中断加载
  *
- * 来源（本期 2 个，对齐 CC 的 user/project 概念）：
- *  - user：    ~/.elf/skills/<name>/SKILL.md
- *  - project：  <cwd>/.elf/skills/<name>/SKILL.md   （同名 project 覆盖 user）
+ * 单一来源：~/.elf/skills/<name>/SKILL.md（无 project 级，所有项目共享一套）。
+ *   ELF_SKILLS_USER_DIR env 覆盖用户级目录（测试隔离用，生产留空走默认 ~/.elf/skills）。
  */
 
 import fs from 'fs';
@@ -48,27 +47,19 @@ export class SkillRegistry {
   }
 
   /**
-   * 扫描并加载所有 skill。project 覆盖 user。
-   * 扫描并加载所有 skill。project 覆盖 user。
+   * 扫描并加载所有 skill（单一来源 ~/.elf/skills）。
    * 每次调用都先清空再重扫——支持热更新（入口每轮重扫时，已删除的 skill 不会残留）。
-   * @param {string} cwd - 工作目录
    */
-  loadAll(cwd) {
+  loadAll() {
     this.skills.clear();   // 热更新：重扫前清空，删除的 skill 不残留
-    // ELF_SKILLS_USER_DIR 覆盖用户级目录（测试隔离用，生产留空走默认 ~/.elf/skills）
     const home = process.env.ELF_SKILLS_USER_DIR || os.homedir();
-    const userDir = path.join(home, '.elf', 'skills');
-    const projectDir = path.join(cwd, '.elf', 'skills');
-
-    // 先 user 后 project，后者同名覆盖前者
-    this._loadDir(userDir, 'user');
-    this._loadDir(projectDir, 'project');
+    this._loadDir(path.join(home, '.elf', 'skills'));
   }
 
   /**
    * 解析单个 skills 目录。异常静默吞掉（ENOENT/EACCES 返回空）。
    */
-  _loadDir(dir, source) {
+  _loadDir(dir) {
     let entries;
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -82,11 +73,11 @@ export class SkillRegistry {
 
     for (const entry of entries) {
       if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-      this._loadOne(path.join(dir, entry.name), entry.name, source);
+      this._loadOne(path.join(dir, entry.name), entry.name);
     }
   }
 
-  _loadOne(dir, name, source) {
+  _loadOne(dir, name) {
     // 大小写不敏感找 SKILL.md，取第一个
     let fileName;
     try {
@@ -122,7 +113,6 @@ export class SkillRegistry {
       disableModelInvocation: parseBool(frontmatter['disable-model-invocation'], false),
       contentLength,
       skillRoot: dir,             // skill 所在目录绝对路径
-      source,
       loadedFrom: 'skills',
       context: frontmatter.context === 'fork' ? 'fork' : undefined,
       // 高级字段本期记录但不生效：allowedTools / model / agent / arguments / paths / hooks / version

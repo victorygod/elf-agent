@@ -50,12 +50,22 @@ export async function createRoomState({ configDir, agentId, roomId, mode, dataDi
   // 场景插件注入（从 start.js 搬出，多房通用）。
   let plugin;
   if (mode === 'room') {
-    const { RoomPlugin } = await import('./room_plugin.js');
+    const { RoomPlugin } = await import('./plugins/room_plugin.js');
     const { Speak } = await import('./tools/Speak.js');
     plugin = new RoomPlugin(agent);
     agent._scene = plugin;
     agent.toolManager.register(Speak);
-    logger.info(`RoomState[${roomId}] 注入 RoomPlugin + Speak`);
+    // 观测式策略：按 config.interaction.strategy 注册 Skip + SetObserveConfig
+    const strategy = plugin._interactionStrategy();
+    if (strategy === 'observe' || strategy === 'both') {
+      const { Skip } = await import('./tools/Skip.js');
+      const { SetObserveConfig } = await import('./tools/SetObserveConfig.js');
+      agent.toolManager.register(Skip);
+      agent.toolManager.register(SetObserveConfig);
+      logger.info(`RoomState[${roomId}] 注入 RoomPlugin + Speak + Skip + SetObserveConfig (strategy=${strategy})`);
+    } else {
+      logger.info(`RoomState[${roomId}] 注入 RoomPlugin + Speak (strategy=${strategy})`);
+    }
     try {
       await plugin.syncMissingHistory();
     } catch (err) {
@@ -63,7 +73,7 @@ export async function createRoomState({ configDir, agentId, roomId, mode, dataDi
     }
   } else {
     if (gatewayUrl) agent._gatewayUrl = gatewayUrl;
-    const { PrivateChatPlugin } = await import('./private_chat_plugin.js');
+    const { PrivateChatPlugin } = await import('./plugins/private_chat_plugin.js');
     plugin = new PrivateChatPlugin(agent);
     agent._scene = plugin;
     logger.info(`RoomState[${roomId}] 注入 PrivateChatPlugin`);

@@ -1,27 +1,22 @@
 /**
  * Skill 管理面板（ConfigDrawer 的 skill 选项卡）
  *
- * - 分两区列出 user / project 目录下的 skill，每项显示名字、hover 显示 description
+ * - 列出 ~/.elf/skills 目录下的 skill，每项显示名字、hover 显示 description
  * - 每项可删除（二次确认）
- * - "添加 skill" → 浏览目录 → 选定目录后复制到 ~/.elf/skills/（user 侧）
+ * - "添加 skill" → 浏览目录 → 选定目录后复制到 ~/.elf/skills/
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import * as api from '../api/index.js';
 import ConfirmModal from './ConfirmModal';
 import styles from './SkillManager.module.css';
 
-const SOURCES = [
-  { key: 'user', label: '用户级 (~/.elf/skills)', hint: '所有项目共享' },
-  { key: 'project', label: '项目级 (.elf/skills)', hint: '仅当前项目' },
-];
-
 export default function SkillManager() {
   const [skills, setSkills] = useState([]);
-  const [roots, setRoots] = useState({});
+  const [root, setRoot] = useState('');
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState(null);          // { type: 'ok'|'error', text }
   const [browser, setBrowser] = useState(null);   // 目录浏览弹窗状态：null | { current, entries, selected, loading }
-  // 待确认删除的 skill：null | { source, name }（替代原生 confirm，避免被浏览器屏蔽）
+  // 待确认删除的 skill：null | { name }（替代原生 confirm，避免被浏览器屏蔽）
   const [pendingDelete, setPendingDelete] = useState(null);
 
   const refresh = useCallback(async () => {
@@ -29,7 +24,7 @@ export default function SkillManager() {
     try {
       const data = await api.listSkills();
       setSkills(data.skills || []);
-      setRoots(data.roots || {});
+      setRoot(data.root || '');
     } catch (e) {
       setMsg({ type: 'error', text: `加载失败: ${e.message}` });
     } finally {
@@ -39,9 +34,9 @@ export default function SkillManager() {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const handleDelete = async (source, name) => {
+  const handleDelete = async (name) => {
     try {
-      await api.deleteSkill(source, name);
+      await api.deleteSkill(name);
       setMsg({ type: 'ok', text: `已删除 ${name}` });
       refresh();
     } catch (e) {
@@ -97,7 +92,7 @@ export default function SkillManager() {
         <span className={styles.title}>已安装的 Skill</span>
         <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={openBrowser}>+ 添加 skill</button>
       </div>
-      <div className={styles.hint}>skill 通过目录存放，目录名即 skill 名。用户级所有项目共享，项目级仅当前项目生效（同名项目级覆盖用户级）。</div>
+      <div className={styles.hint}>skill 通过目录存放在 ~/.elf/skills，目录名即 skill 名，所有项目共享。</div>
 
       {msg && (
         <div className={`${styles.msg} ${msg.type === 'error' ? styles.msgErr : styles.msgOk}`}>
@@ -108,37 +103,31 @@ export default function SkillManager() {
 
       {loading && <div className={styles.loading}>加载中…</div>}
 
-      {SOURCES.map(src => {
-        const items = skills.filter(s => s.source === src.key);
-        const rootPath = roots[src.key];
-        return (
-          <div key={src.key} className={styles.section}>
-            <div className={styles.sectionHead}>
-              <span className={styles.sectionTitle}>{src.label}</span>
-              <span className={styles.sectionHint}>{src.hint}{rootPath ? ` · ${rootPath}` : ''}</span>
-            </div>
-            {items.length === 0 ? (
-              <div className={styles.empty}>（空）</div>
-            ) : (
-              <ul className={styles.list}>
-                {items.map(s => (
-                  <li key={`${s.source}/${s.name}`} className={styles.item} title={s.whenToUse ? `${s.description}\n— ${s.whenToUse}` : s.description}>
-                    <div className={styles.itemMain}>
-                      <span className={styles.itemName}>{s.name}</span>
-                      {s.whenToUse && <span className={styles.itemWhen}>{s.whenToUse}</span>}
-                    </div>
-                    <span className={styles.itemDesc}>{s.description}</span>
-                    <button
-                      className={`${styles.btn} ${styles.btnDanger} ${styles.btnSm}`}
-                      onClick={() => setPendingDelete({ source: s.source, name: s.name })}
-                    >删除</button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        );
-      })}
+      <div className={styles.section}>
+        <div className={styles.sectionHead}>
+          <span className={styles.sectionTitle}>skill 目录</span>
+          <span className={styles.sectionHint}>~/.elf/skills{root ? ` · ${root}` : ''}</span>
+        </div>
+        {skills.length === 0 ? (
+          <div className={styles.empty}>（空）</div>
+        ) : (
+          <ul className={styles.list}>
+            {skills.map(s => (
+              <li key={s.name} className={styles.item} title={s.whenToUse ? `${s.description}\n— ${s.whenToUse}` : s.description}>
+                <div className={styles.itemMain}>
+                  <span className={styles.itemName}>{s.name}</span>
+                  {s.whenToUse && <span className={styles.itemWhen}>{s.whenToUse}</span>}
+                </div>
+                <span className={styles.itemDesc}>{s.description}</span>
+                <button
+                  className={`${styles.btn} ${styles.btnDanger} ${styles.btnSm}`}
+                  onClick={() => setPendingDelete({ name: s.name })}
+                >删除</button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
 
       {browser && (
         <div className={styles.modal} onClick={() => setBrowser(null)}>
@@ -215,7 +204,7 @@ export default function SkillManager() {
         onConfirm={() => {
           const p = pendingDelete;
           setPendingDelete(null);
-          if (p) handleDelete(p.source, p.name);
+          if (p) handleDelete(p.name);
         }}
       />
     </div>

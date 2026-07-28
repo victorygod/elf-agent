@@ -14,6 +14,7 @@ import { loadGatewayConfig } from './config.js';
 import { RoomManager } from './room_bus.js';
 import { subscribePrivateRoom, startPrivateTurn } from './private_room_stream.js';
 import { rewindTo, listCheckpoints, snapshotBeforeSend } from './snapshot.js';
+import { agentMemory } from '../shared/profiles_paths.js';
 
 export function registerRoomRoutes(app, roomManager, opts = {}) {
   const logger = console; // 简化，路由层错误直接 res.json
@@ -244,7 +245,7 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
           return res.status(503).json({ error: 'Agent 未运行' });
         }
         // rewind 快照：写 user 进 jsonl 前打一个"说话前"状态快照包（含 v3 私聊房 history）。
-        try { snapshotBeforeSend(pm?.chatDir, agentId, content, privateRoomHistoryPath(req.params.rid)); } catch (e) { /* 快照失败不阻塞 */ }
+        try { snapshotBeforeSend(agentId, content, privateRoomHistoryPath(req.params.rid)); } catch (e) { /* 快照失败不阻塞 */ }
         let rec = null;
         if (privateRoomHistory) {
           rec = privateRoomHistory.addMessage(req.params.rid, 'user', content);
@@ -268,6 +269,21 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
       }
       const rec = await roomManager.processRoomMessage(req.params.rid, speakerUid, content);
       res.json({ status: 'ok', id: rec.id });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /rooms/:rid/notice — agent 直推的居中瞬态通知（LLM 重试/最终失败等），不入 history。
+  //   仅群聊用（私聊 notice 经 agent /events→_onAgentEvent chat- 转发）。SSE-only 广播，不发 /observe。
+  //   body: { kind, agentId, memberName?, attempt?, maxRetries?, error?, final?, roomId? }
+  app.post('/rooms/:rid/notice', checkRoomExists, (req, res) => {
+    try {
+      const data = { ...(req.body || {}) };
+      delete data._roomId;
+      const bc = roomManager.getBroadcaster(req.params.rid);
+      bc.broadcast('notice', data);
+      res.json({ status: 'ok' });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -319,7 +335,7 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
     if (!isPrivateRoom(rid)) return res.status(400).json({ error: '仅私聊房支持此端点' });
     const agentId = privateAgentId(rid);
     try {
-      const checkpoints = listCheckpoints(pm?.chatDir, agentId);
+      const checkpoints = listCheckpoints(agentId);
       res.json({ checkpoints });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -332,7 +348,7 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
     if (!isPrivateRoom(rid)) return res.status(400).json({ error: '仅私聊房支持此端点' });
     const agentId = privateAgentId(rid);
     const checkpointId = req.body?.checkpointId ?? null;
-    const result = rewindTo(pm?.chatDir, agentId, checkpointId, privateRoomHistoryPath(rid));
+    const result = rewindTo(agentId, checkpointId, privateRoomHistoryPath(rid));
     if (!result.ok) return res.status(400).json({ error: result.error });
     const port = pm?.getAgentPort?.(agentId);
     if (port) {
@@ -341,7 +357,7 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
         .then(() => {})
         .catch(err => { /* reload 失败不语义阻塞，下条消息自然重载 */ });
     }
-    const remaining = listCheckpoints(pm?.chatDir, agentId);
+    const remaining = listCheckpoints(agentId);
     res.json({ status: 'ok', restoredPrompt: result.restoredPrompt, checkpoints: remaining });
   });
 
@@ -357,7 +373,7 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
       try { await fetch(`http://127.0.0.1:${port}/clear/${rid}`, { method: 'POST', signal: AbortSignal.timeout(5000) }); }
       catch (err) { /* 清内存失败不阻塞，盘上兜底 */ }
     } else {
-      const dataDir = path.join(pm?.chatDir || '', agentId, 'data');
+      const dataDir = agentMemory(agentId);
       try {
         const ctx = path.join(dataDir, 'context.json');
         if (fs.existsSync(ctx)) fs.writeFileSync(ctx, '[]', 'utf-8');
