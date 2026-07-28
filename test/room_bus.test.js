@@ -484,6 +484,62 @@ describe('RoomManager', () => {
     assert.equal(fs.existsSync(dataDir), false, '成员对本群的记忆目录已删');
   });
 
+  it('pm 模式 removeMember 通知副本 /clear/:roomId（停观测定时器，否则被踢后仍自驱循环）', async () => {
+    const calls = [];
+    const mgr = newManager(calls);
+    const r = await mgr.createRoom('群', ['elf-001', 'elf-002']);
+
+    // 把 elf-002 换成 mock 副本 http server，记录收到的请求
+    const received = [];
+    const srv = http.createServer((req, res2) => {
+      received.push(`${req.method} ${req.url}`);
+      res2.writeHead(200); res2.end();
+    });
+    await new Promise(resolve => srv.listen(0, '127.0.0.1', resolve));
+    const repPort = srv.address().port;
+
+    // 切到 pm 共享进程模式：stopReplica 仅判 this.pm 真值且不调其方法，空对象即可。
+    // spawn 分支曾把 elf-002 的 port 设成无人监听的 allocPort，此处覆盖成 mock 副本。
+    mgr.pm = {};
+    const room = mgr.rooms.get(r.roomId);
+    room.members.set('elf-002', { port: repPort, pid: 2, status: MEMBER_STATUS.RUNNING });
+    room.broadcaster.subscribeAgent('elf-002', repPort);
+
+    await mgr.removeMember(r.roomId, 'elf-002');
+
+    // stopReplica pm 分支异步 fetch /clear，不 await removeMember 返回；留时间收请求
+    await new Promise(resolve => setTimeout(resolve, 150));
+
+    assert.ok(
+      received.some(s => s === `POST /clear/${r.roomId}`),
+      `副本应收到 POST /clear/${r.roomId}，实际 ${JSON.stringify(received)}`,
+    );
+    assert.equal(mgr.getRoom(r.roomId).members.length, 1, 'config 成员已移除');
+    assert.equal(room.members.get('elf-002').status, MEMBER_STATUS.STOPPED, '副本标 STOPPED');
+
+    await new Promise(resolve => srv.close(resolve));
+  });
+
+  it('pm 模式 removeMember 副本不可达时只 warn、不抛、仍清 config 与 data', async () => {
+    const calls = [];
+    const mgr = newManager(calls);
+    const r = await mgr.createRoom('群', ['elf-001', 'elf-002']);
+    const dataDir = agentRoomState('elf-002', r.roomId);
+    fs.mkdirSync(dataDir, { recursive: true });
+
+    mgr.pm = {};
+    const room = mgr.rooms.get(r.roomId);
+    // 指一个没人监听的端口，模拟进程已不在；fetch 会 ECONNREFUSED
+    room.members.set('elf-002', { port: 1, pid: 2, status: MEMBER_STATUS.RUNNING });
+
+    await mgr.removeMember(r.roomId, 'elf-002');
+    await new Promise(resolve => setTimeout(resolve, 60));
+
+    assert.equal(mgr.getRoom(r.roomId).members.length, 1, 'config 成员已移除');
+    assert.equal(fs.existsSync(dataDir), false, '成员对本群的记忆目录已删');
+    assert.equal(room.members.get('elf-002').status, MEMBER_STATUS.STOPPED, '副本标 STOPPED');
+  });
+
   it('listRooms 列出所有群', async () => {
     const mgr = newManager([]);
     await mgr.createRoom('群1', ['elf-001']);

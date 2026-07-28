@@ -728,10 +728,22 @@ export class RoomManager {
     const room = this._ensureRoom(roomId);
     const m = room.members.get(agentId);
     if (this.pm) {
-      // 共享进程：只退订，不动进程
+      // 共享进程：只退订，不动进程。先取 port（registry.remove 后就取不到），再退订；
+      // 随后异步通知副本本房 leave（/clear/:roomId → scene.dispose 停观测定时器），
+      //   否则被踢/退群后 agent 进程内观测定时器仍自驱循环（gateway 已退订广播，副本收不到事件）。
+      let leavePort = m?.port;
+      if (!leavePort) { const rec = this.registry.read(roomId, agentId); leavePort = rec?.port || null; }
       this.registry.remove(roomId, agentId);
       room.broadcaster.unsubscribeAgent(agentId);
       room.members.set(agentId, { port: null, pid: null, status: MEMBER_STATUS.STOPPED });
+      if (leavePort) {
+        fetch(`http://127.0.0.1:${leavePort}/clear/${encodeURIComponent(roomId)}`, { method: 'POST', signal: AbortSignal.timeout(5000) })
+          .then(r => { r.ok ? logger.info(`副本 ${roomId}/${agentId} 已通知退群（/clear dispose 停观测定时器）`)
+                            : logger.warn(`副本 ${roomId}/${agentId} 退群通知返回 ${r.status}`); })
+          .catch(err => logger.warn(`副本 ${roomId}/${agentId} 退群通知不可达(${err.message})，观测定时器需靠下次进房复活`));
+      } else {
+        logger.warn(`副本 ${roomId}/${agentId} 无 port，未能通知退群，观测定时器需靠下次进房复活`);
+      }
       logger.info(`副本 ${roomId}/${agentId} 退订（pm 共享进程保留）`);
       return;
     }
