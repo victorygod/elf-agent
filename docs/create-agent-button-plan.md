@@ -68,7 +68,7 @@ agents/elf-001/
   "memoryTokenLimit": 40000,
   "maxIterations": 0,
   "messageManagerClass": "message_manager",
-  "interaction": { "strategy": "observe", "observe": { "observationWindowSec": 60 } },
+  "interaction": { "strategy": "observe" },
   "tools": ["Read", "Bash", "Grep", "Glob"],
   "_ui": { /* 各字段 label/hint,ConfigDrawer 渲染用 */ }
 }
@@ -150,7 +150,7 @@ gateway/agent_template/
   "memoryTokenLimit": 40000,
   "maxIterations": 0,
   "messageManagerClass": "message_manager",
-  "interaction": { "strategy": "observe", "observe": { "observationWindowSec": 60 } },
+  "interaction": { "strategy": "observe" },
   "tools": ["Read", "Bash", "Grep", "Glob"],
   "_ui": { /* 同 elf-001 的字段布局 */ }
 }

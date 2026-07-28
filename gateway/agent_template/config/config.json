@@ -14,7 +14,7 @@
   "memoryTokenLimit": 40000,
   "maxIterations": 0,
   "messageManagerClass": "message_manager",
-  "interaction": { "strategy": "observe", "observe": { "observationWindowSec": 60 } },
+  "interaction": { "strategy": "observe" },
   "tools": ["Read", "Bash", "Grep", "Glob"],
   "_ui": {
     "name": {

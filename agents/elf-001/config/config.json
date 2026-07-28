@@ -24,10 +24,7 @@
   "maxIterations": 0,
   "messageManagerClass": "message_manager",
   "interaction": {
-    "strategy": "observe",
-    "observe": {
-      "observationWindowSec": 60
-    }
+    "strategy": "observe"
   },
   "tools": [
     "Read",

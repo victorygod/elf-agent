@@ -12,7 +12,7 @@
 | 触发 | 被 @ 即时 | 关键词命中即时 **或** 观测窗口到期 |
 | 发言义务 | 必须发言 | 允许不发言（Skip / 连续静默） |
 | 门控阈值 | 不调 Speak 重试 1 次放弃 | 连续 `silentRetries`（默认2）次放弃 |
-| 配置 | 无 | 关键词 + 观测窗口（agent 可运行时自改） |
+| 配置 | 无 | 关键词（agent 运行时自改）；观测间隔=动态退避常量（不可配） |
 
 `interaction.strategy`：`'mention'`（默认，向后兼容）/ `'observe'` / `'both'`（@ 优先，观测兜底）。
 
@@ -25,7 +25,7 @@
 ```
 
 - **关键词命中**：buffer 未读消息里有任一条匹配本 agent 的关键词（子串/正则）。即时触发一次 reasoning（加急通道，等同 @ 的即时性，但走弱门控）。
-- **观测窗口到期 ∧ buffer 非空**：上次 reasoning 结束后满 `observationWindowSec` 秒的"沉淀期"，若期间 buffer 又攒了新消息，触发一次巡视 reasoning。窗口起算点 = 上次 reasoning 结束时刻。
+- **观测窗口到期 ∧ buffer 非空**：上次 reasoning 结束后满当前观测间隔（`_observeIntervalSec`）的"沉淀期"，若期间 buffer 又攒了新消息，触发一次巡视 reasoning。窗口起算点 = 上次 reasoning 结束时刻。观测间隔动态退避：初始 10s；每次 `Skip`→间隔×2 封顶 600s；每次 `Speak`→复位 10s；沉默不变（不落盘、重启回 10s，不在提示词里反映）。
 
 两条都走弱门控（可静默）。`both` 策略下，被 @ 仍优先即时触发并走强门控（必须发言）；观测路径走弱门控。
 
@@ -41,7 +41,7 @@
 
 ### 3.2 为什么需要工具
 
-agent 要在运行时调整自己的关键词和观测窗口（"这个话题我感兴趣，加个关键词""群里太吵，把窗口拉长"），必须有工具写自己的配置——否则只能靠人改 config.json 重启。
+agent 要在运行时调整自己的关键词（"这个话题我感兴趣，加个关键词"），必须有工具写自己的配置——否则只能靠人改 config.json 重启。观测间隔由 RoomPlugin 按行权（Skip/Speak）动态退避，不归 agent 配。
 
 ### 3.3 `SetObserveConfig` 工具
 
@@ -49,19 +49,18 @@ agent 要在运行时调整自己的关键词和观测窗口（"这个话题我�
 name: SetObserveConfig
 params:
   keywords: string[]        // 可选，整体替换；≤7 项；超出截断并提示
-  observationWindowSec: int // 可选，[10, 3600]
-  silentRetries: int        // 可选，[1,5]
 execute:
-  // 校验 → 写 profiles/agents/<id>/rooms/<rid>/observe_config.json
+  // 校验 → 写 profiles/agents/<id>/rooms/<rid>/observe_status.json（只存关键词）
   // RoomPlugin 下次读配置走最新值（热更新，与 roster 同机制）
-  return `已更新：keywords=[...] window=Ns`
+  return `已更新：keywords=[...]`
+  // 观测间隔不由此工具设置——RoomPlugin 按 Skip/Speak 动态退避（见 §2）。silentRetries 固定常量。
 ```
 
-- 调用即生效：RoomPlugin 每条消息 / 每次心跳时 `getObserveConfig()` 优先读运行时文件，回退 `config.json` 默认。
+- 调用即生效：`getObserveConfig()` 取运行时文件里的关键词（文件是关注词唯一来源）。观测间隔不在此取——见 §2 动态退避。
 - 工具仅 `strategy in ['observe','both']` 时注册（`room_state.js` 装配判定）。
 - `keywords` 缺省 = 不改；传 `[]` = 清空（连名字也删，等同于"只靠窗口巡视"）。
 
-> 配置层优先级：`SetObserveConfig` 写的运行时文件 > `config.json` 的 `interaction.observe` 默认。
+> 配置层：`SetObserveConfig` 写的运行时文件是关注词唯一来源；观测间隔为内存动态退避（非配置项、不落盘）。
 
 ---
 
@@ -83,14 +82,14 @@ execute:
 
 现有 `receive` 是消息驱动（`/observe`→`preReceive`→`flushNow`）。观测式需要"窗口到期、无新消息也触发"。
 
-- `RoomPlugin` 武装 `setTimeout(observationWindowSec)`，到期回调 `agent.triggerRoomFlush()`。
+- `RoomPlugin` 武装 `setTimeout(_observeIntervalSec)`，到期回调 `agent.triggerRoomFlush()`。间隔按行权动态退避：`Skip`→×2 封顶 600s，`Speak`→复位 10s（`shouldBreakAfterTools` 内更新），沉默不变。
 - `default_agent.js` 抽出 `_runFlushLoop()`（把 `receive` 内联 flush 循环提为可复用），`triggerRoomFlush` 调它。
 - 到期回调内 `if (_replying) return` + `shouldFlushObserve()` 复核（buffer 非空、窗口确实到期），防竞态。
 - 心跳兜底：`onRoomEnter` 起 `setInterval(heartbeatSec)`（默认30s）巡检 `shouldFlushObserve()`，防 timer 丢失。
 
 ### 5.2 状态与生命周期
 
-`RoomPlugin` 新增：`_lastFlushAt`、`_observeTimer`、`_observeSilentCount`、`_currentTrigger`。
+`RoomPlugin` 新增：`_lastFlushAt`、`_observeTimer`、`_observeIntervalSec`（动态退避当前间隔）、`_currentTrigger`、`_speakAttempts`。
 
 `dispose()` 清 timer + interval，在 `clearRoom`/`stopReplica`/`reloadFromDisk` 调用，防幽灵回调。
 
@@ -106,11 +105,15 @@ execute:
 ## 6. 时序示例（observe）
 
 ```
-t=0  user:"这个架构有性能问题" → 命中关键词"性能"，flushNow→reasoning→调Skip，结束，_lastFlushAt=0
-t=10 user:"要重构"            → 入buffer，未命中关键词，不即时触发；arm timer=0+60s
-t=30 user:"大家怎么看"         → 入buffer
-t=60 timer到期，buffer非空     → 巡视reasoning→调Speak发言，结束，_lastFlushAt=60，重arm
-t=120 timer到期，buffer空      → 不触发
+t=0   user:"这个架构有性能问题" → 命中关键词"性能"，flushNow→reasoning→调Skip
+      _observeIntervalSec: 10→20（Skip 翻倍），_lastFlushAt=0，arm timer=0+20s
+t=8   user:"要重构"            → 入buffer，未命中关键词，不即时触发
+t=20  timer到期，buffer非空     → 巡视reasoning→又调Skip
+      _observeIntervalSec: 20→40，_lastFlushAt=20，arm timer=20+40s
+t=35  user:"大家怎么看"中"@elf" → 被@即时触发→调Speak发言
+      _observeIntervalSec: 40→10（Speak 复位），_lastFlushAt=35，arm timer=35+10s
+t=45  timer到期，buffer空       → 仍巡视一次（agent 可 Skip/主动 Speak）
+间隔封顶 600s；沉默（只输出文本不调工具）不改间隔；退避不写进提示词。
 ```
 
 ---

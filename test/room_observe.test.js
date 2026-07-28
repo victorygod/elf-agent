@@ -41,22 +41,19 @@ const mockSpeak = {
  * @param {object} opts
  * @param {string} [opts.strategy='observe']
  * @param {string[]|undefined} [opts.keywords]  自定义关注词；名字(memberName)在读取时由 RoomPlugin 并入匹配列表（不占名额、不写文件）
- * @param {number} [opts.observationWindowSec=60]
  * @param {number} [opts.silentRetries]  已废弃（固定常量2，不可配）；保留参数仅为兼容旧调用，无效果
  * @param {Array} [opts.responses]
  * @param {string} [opts.dataDir]
  * @param {boolean} [opts.withTools=true]
  */
 function makeObserveAgent({
-  strategy = 'observe', keywords, observationWindowSec = 60, silentRetries,
+  strategy = 'observe', keywords, silentRetries,
   responses = [{ content: '回复' }], dataDir = null, withTools = true,
   memberName = 'elf-001', agentId = 'elf-001',
 } = {}) {
-  const observe = {};
-  if (keywords !== undefined) observe.keywords = keywords;
-  if (observationWindowSec !== undefined) observe.observationWindowSec = observationWindowSec;
-  // silentRetries 不再写入 config（固定常量）
-  const interaction = { strategy, observe };
+  const interaction = { strategy };
+  if (keywords !== undefined) interaction.observe = { keywords };
+  // silentRetries 已废弃（固定常量）；观测间隔改为 RoomPlugin 动态退避，不在 config
   const config = {
     get: (k) => k === 'interaction' ? interaction : ({ agentId, port: 9999, maxIterations: 8, memoryTokenLimit: 8000 })[k],
     getModelConfig: () => ({ provider: 'mock' }),
@@ -133,7 +130,7 @@ describe('观测式交互策略', () => {
 
   // ---- 窗口到期巡视 ----
   it('窗口到期 ∧ buffer 非空 → triggerRoomFlush 触发 reasoning', async () => {
-    const a = makeObserveAgent({ dataDir: path.join(tmpDir, 't4'), keywords: ['架构'], observationWindowSec: 60, responses: [{ tool_calls: [speakTool()] }] });
+    const a = makeObserveAgent({ dataDir: path.join(tmpDir, 't4'), keywords: ['架构'], responses: [{ tool_calls: [speakTool()] }] });
     try {
       // 未命中消息进 buffer
       await collect(emit => a.receive({ from: 'elf-002', content: '随便聊聊', mentions: [], role: 'chat' }, { emit }));
@@ -161,11 +158,49 @@ describe('观测式交互策略', () => {
   });
 
   it('窗口未到期 → shouldFlushObserve=false', async () => {
-    const a = makeObserveAgent({ dataDir: path.join(tmpDir, 't6'), keywords: ['架构'], observationWindowSec: 60 });
+    const a = makeObserveAgent({ dataDir: path.join(tmpDir, 't6'), keywords: ['架构'] });
     try {
       await collect(emit => a.receive({ from: 'elf-002', content: '随便', mentions: [], role: 'chat' }, { emit }));
       a._rm._lastFlushAt = Date.now();   // 刚 flush，窗口未到
       assert.equal(a._rm.shouldFlushObserve(), false);
+    } finally { a._rm.dispose(); }
+  });
+
+  // ---- 观测间隔动态退避 ----
+  it('Skip→间隔×2；Speak→复位10；初始=10（内存退避，不落盘）', async () => {
+    const a = makeObserveAgent({
+      dataDir: path.join(tmpDir, 'bk1'),
+      keywords: ['架构'],
+      responses: [
+        { tool_calls: [skipTool()] },    // 第1轮：Skip
+        { tool_calls: [skipTool()] },    // 第2轮：Skip
+        { tool_calls: [speakTool()] },   // 第3轮：Speak
+      ],
+    });
+    try {
+      assert.equal(a._rm._observeIntervalSec, 10, '初始间隔=最小值10');
+      const expireAndFlush = (emit) => {
+        a._rm._lastFlushAt = Date.now() - 1000 * 1000;   // 退到足够久，保证任意间隔(≤600s)都已到期
+        return a.triggerRoomFlush('observe', { emit });
+      };
+      await collect(expireAndFlush);   // Skip → 10→20
+      assert.equal(a._rm._observeIntervalSec, 20, 'Skip 一次→×2=20');
+      await collect(expireAndFlush);   // Skip → 20→40
+      assert.equal(a._rm._observeIntervalSec, 40, 'Skip 两次→40');
+      await collect(expireAndFlush);   // Speak → 40→10
+      assert.equal(a._rm._observeIntervalSec, 10, 'Speak→复位10');
+    } finally { a._rm.dispose(); }
+  });
+
+  it('连续 Skip 封顶 600，不超上限', async () => {
+    const skips = Array.from({ length: 7 }, () => ({ tool_calls: [skipTool()] }));
+    const a = makeObserveAgent({ dataDir: path.join(tmpDir, 'bk2'), keywords: ['架构'], responses: skips });
+    try {
+      for (let i = 0; i < skips.length; i++) {
+        a._rm._lastFlushAt = Date.now() - 1000 * 1000;
+        await collect(emit => a.triggerRoomFlush('observe', { emit }));
+      }
+      assert.equal(a._rm._observeIntervalSec, 600, '封顶600');
     } finally { a._rm.dispose(); }
   });
 
@@ -244,7 +279,7 @@ describe('观测式交互策略', () => {
 
   // ---- 关键词列表注入 prompt（LLM 可感知当前关键词 + 热更新）----
   it('当前关键词列表注入 <system_reminder>，LLM 可感知', async () => {
-    const a = makeObserveAgent({ dataDir: path.join(tmpDir, 'p1'), keywords: ['架构', '性能'], observationWindowSec: 90, responses: [{ tool_calls: [speakTool()] }] });
+    const a = makeObserveAgent({ dataDir: path.join(tmpDir, 'p1'), keywords: ['架构', '性能'], responses: [{ tool_calls: [speakTool()] }] });
     try {
       // 测试无 roomBusUrl，_refreshRoster 不刷新；手动设 _rosterStatic + _roomName 模拟已刷新
       a._rm._rosterStatic = '群聊规则占位\n';
@@ -269,13 +304,13 @@ describe('观测式交互策略', () => {
   });
 
   it('SetObserveConfig 改词后，下一轮 prompt 热更新（窗口不由工具设置）', async () => {
-    const a = makeObserveAgent({ dataDir: path.join(tmpDir, 'p2'), keywords: ['架构'], observationWindowSec: 60, responses: [{ tool_calls: [speakTool()] }, { tool_calls: [speakTool()] }] });
+    const a = makeObserveAgent({ dataDir: path.join(tmpDir, 'p2'), keywords: ['架构'], responses: [{ tool_calls: [speakTool()] }, { tool_calls: [speakTool()] }] });
     try {
       a._rm._rosterStatic = '群聊规则占位\n';
       // 第一轮命中"架构"
       await collect(emit => a.receive({ from: 'elf-002', content: '聊架构', mentions: [], role: 'chat' }, { emit }));
-      // 改词（工具不再设窗口；observationWindowSec 即便传也忽略）
-      await SetObserveConfig.execute({ keywords: ['性能', 'bug'], observationWindowSec: 120 }, undefined, { agent: a });
+      // 改词（观测间隔由 RoomPlugin 动态退避，工具只管关键词）
+      await SetObserveConfig.execute({ keywords: ['性能', 'bug'] }, undefined, { agent: a });
       // 第二轮命中"性能"
       await collect(emit => a.receive({ from: 'elf-003', content: '聊性能', mentions: [], role: 'chat' }, { emit }));
       const out = a.promptAssembler.assemble(a.messageManager.getBaseForLLM(), { agent: a, messageManager: a.messageManager });
@@ -338,13 +373,12 @@ describe('观测式交互策略', () => {
       } finally { a._rm.dispose(); }
     });
 
-    it('关键词超上限截断（关注词最多7，名字不占名额）；工具不设窗口', async () => {
+    it('关键词超上限截断（关注词最多7，名字不占名额）', async () => {
       const dir = path.join(tmpDir, 't14');
       const a = makeObserveAgent({ dataDir: dir, keywords: ['x'] });
       try {
         const r = await SetObserveConfig.execute({
           keywords: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'],  // 8 个关注词，超上限
-          observationWindowSec: 5,                               // 工具已不暴露该参数，传了也忽略
         }, undefined, { agent: a });
         assert.match(r, /截断/, '关注词超限应截断');
         const cfg = a._rm.getObserveConfig();
@@ -352,7 +386,6 @@ describe('观测式交互策略', () => {
         assert.equal(cfg.focusKeywords.length, 7, '关注词截断到 7');
         assert.equal(cfg.keywords.length, 8, '含名字共 8（名字不占名额）');
         assert.equal(cfg.keywords[0], 'elf-001', '名字恒在 effective 第0位');
-        assert.equal(cfg.observationWindowSec, 60, '窗口仍为 config 默认 60（工具不设窗口）');
         assert.equal(cfg.silentRetries, 2, 'silentRetries 固定2，工具不可配');
       } finally { a._rm.dispose(); }
     });
@@ -377,7 +410,7 @@ describe('观测式交互策略', () => {
         // 工具 parameters 不含 silentRetries
         assert.equal(SetObserveConfig.parameters.properties.silentRetries, undefined, '工具不暴露 silentRetries');
         // 即便手动传，工具也不处理（execute 不读 args.silentRetries）
-        const r = await SetObserveConfig.execute({ observationWindowSec: 30, silentRetries: 5 }, undefined, { agent: a });
+        const r = await SetObserveConfig.execute({ silentRetries: 5 }, undefined, { agent: a });
         assert.match(r, /已更新/);
         assert.equal(a._rm.getObserveConfig().silentRetries, 2, 'silentRetries 恒为2');
         // 文件里不应有 silentRetries 残留
@@ -402,10 +435,9 @@ describe('观测式交互策略', () => {
         assert.deepEqual(a._rm.getObserveConfig().focusKeywords, ['架构']);
         assert.deepEqual(a._rm.getObserveConfig().keywords, ['elf-001', '架构'], 'effective 含名字（读取并入）');
         // 手动改文件 → getObserveConfig 立即反映（文件唯一来源）
-        fs.writeFileSync(fp, JSON.stringify({ keywords: ['手动词'], observationWindowSec: 99 }, null, 2), 'utf-8');
+        fs.writeFileSync(fp, JSON.stringify({ keywords: ['手动词'] }, null, 2), 'utf-8');
         assert.deepEqual(a._rm.getObserveConfig().focusKeywords, ['手动词']);
         assert.deepEqual(a._rm.getObserveConfig().keywords, ['elf-001', '手动词']);
-        assert.equal(a._rm.getObserveConfig().observationWindowSec, 99);
       } finally { a._rm.dispose(); }
     });
 

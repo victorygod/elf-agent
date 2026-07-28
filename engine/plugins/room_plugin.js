@@ -30,12 +30,12 @@ import { SyncSource } from '../sync_source.js';
 import { createLogger } from '../../shared/logger.js';
 import { ScenePlugin } from './scene_plugin.js';
 
-// 观测式策略默认参数（可被 config.interaction.observe / observe_status.json 运行时文件覆盖）
-const OBSERVE_DEFAULT_WINDOW_SEC = 10;
+// 观测式策略默认参数（关注词/静默阈值可被 observe_status.json 运行时文件覆盖；观测间隔走动态退避常量）
 const OBSERVE_FIXED_SILENT_RETRIES = 2;   // 固定阈值：连续不发言几次后放弃（不可配，agent 与人均无法改）
 const OBSERVE_MAX_KEYWORDS = 7;
-const OBSERVE_STATUS_FILE = 'observe_status.json';   // 关键词/窗口运行时文件（= runContext.dataDir/observe_status.json）
-const OBSERVE_MIN_WINDOW = 10, OBSERVE_MAX_WINDOW = 3600;
+const OBSERVE_STATUS_FILE = 'observe_status.json';   // 关注词运行时文件（= runContext.dataDir/observe_status.json）
+// 观测间隔动态退避区间：初始=MIN；每次 Skip→×2 封顶 MAX；每次 Speak→恢复 MIN；沉默不变。常量、不落盘、重启回 MIN。
+const OBSERVE_MIN_WINDOW = 10, OBSERVE_MAX_WINDOW = 600;
 
 /** 观测式"不发言"提醒文案（与 @ 式 Speak.missingReminder 区分：观测式允许不发言）。
  *  总返回文案——何时放弃由 onAssistantContent 按 silentRetries 阈值决定，不在此函数内判。 */
@@ -66,6 +66,8 @@ export class RoomPlugin extends ScenePlugin {
     // _observeTimer：观测窗口到期定时器
     this._observeTimer = null;
     this._disposed = false;
+    // _observeIntervalSec：当前生效观测间隔（秒，动态退避）。进群=MIN；Skip→×2 封顶 MAX；Speak→MIN；沉默不变。不落盘。
+    this._observeIntervalSec = OBSERVE_MIN_WINDOW;
   }
 
   _logger() {
@@ -180,7 +182,7 @@ export class RoomPlugin extends ScenePlugin {
     let s = `你正在一个多人聊天群「${this._roomName || ''}」中。以上所有历史消息都是群聊中的公开对话，来自本群成员或你的发言。\n`;
     // 观测式策略才暴露关键词/窗口
     if (this._interactionStrategy() !== 'mention') {
-      const { focusKeywords, observationWindowSec } = this.getObserveConfig();
+      const { focusKeywords } = this.getObserveConfig();
       // 显示的是纯关注词（不含名字）；名字触发是隐式的——别人@你或直呼你名字你也要回复
       s += `你当前最关注的关键词：[${(focusKeywords || []).join(', ')}]（群里有人聊到其中任何一个，或别人@你、直呼你名字，你都会被触发发言）\n`;
       s += `用 SetObserveConfig 工具写下你当前最关注的关键词（最多 ${OBSERVE_MAX_KEYWORDS} 个，整体覆盖，不是增删）。\n`;
@@ -228,17 +230,16 @@ export class RoomPlugin extends ScenePlugin {
     return s === 'observe' || s === 'both' ? s : 'mention';
   }
 
-  /** 观测参数：observe_status.json 为唯一来源（keywords/window）；silentRetries 固定。
+  /** 观测参数：observe_status.json 为唯一关注词来源；silentRetries 固定。
    *  名字不存进文件——读取时由 _effectiveKeywords 把当前显示名并入匹配列表（observe 策略下
-   *    别人直呼你名字也能触发你），但名字不占关注词名额、不在 reminder 的关键词列表里展示。 */
+   *    别人直呼你名字也能触发你），但名字不占关注词名额、不在 reminder 的关键词列表里展示。
+   *  观测间隔不在此返回——它是 _observeIntervalSec 动态退避值（Skip×2 / Speak 复位），非配置项。 */
   getObserveConfig() {
     const fileCfg = this._readObserveStatusFile();
-    const configCfg = (this._agent?.config?.get?.('interaction') || {}).observe || {};
     const focus = Array.isArray(fileCfg.keywords) ? fileCfg.keywords : [];
     return {
       keywords: this._effectiveKeywords(focus),           // 匹配用：[名字, ...focus] 去重
       focusKeywords: focus,                                // 纯关注词（agent 写下的，≤上限，不含名字）
-      observationWindowSec: fileCfg.observationWindowSec ?? configCfg.observationWindowSec ?? OBSERVE_DEFAULT_WINDOW_SEC,
       silentRetries: OBSERVE_FIXED_SILENT_RETRIES,
     };
   }
@@ -307,8 +308,8 @@ export class RoomPlugin extends ScenePlugin {
   /**
    * 写 observe_status.json（SetObserveConfig 工具调，也可内部调）。
    * 关注词纯覆盖、截断到 OBSERVE_MAX_KEYWORDS（不含名字——名字读取时并入，不占名额）。
-   * observationWindowSec 仅内部/config 路径会用（SetObserveConfig 工具不暴露）。
-   * @param {object} updates - { keywords?: string[](整体替换), observationWindowSec?: int }
+   * 仅关注词落盘；观测间隔是内存退避值（_observeIntervalSec），不在此写。
+   * @param {object} updates - { keywords?: string[](整体替换) }
    * @returns {{cfg:object, warnings:string[]}}
    */
   writeObserveStatus(updates = {}) {
@@ -325,13 +326,6 @@ export class RoomPlugin extends ScenePlugin {
       let focus = cleaned;
       if (cleaned.length > OBSERVE_MAX_KEYWORDS) { focus = cleaned.slice(0, OBSERVE_MAX_KEYWORDS); warnings.push(`关注关键词超过 ${OBSERVE_MAX_KEYWORDS} 个上限，已截断`); }
       cur.keywords = focus;
-    }
-    if (updates.observationWindowSec != null) {
-      let w = parseInt(updates.observationWindowSec, 10);
-      if (isNaN(w)) w = OBSERVE_DEFAULT_WINDOW_SEC;
-      if (w < OBSERVE_MIN_WINDOW) { w = OBSERVE_MIN_WINDOW; warnings.push(`窗口最小 ${OBSERVE_MIN_WINDOW}s`); }
-      if (w > OBSERVE_MAX_WINDOW) { w = OBSERVE_MAX_WINDOW; warnings.push(`窗口最大 ${OBSERVE_MAX_WINDOW}s`); }
-      cur.observationWindowSec = w;
     }
     try { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(fp, JSON.stringify(cur, null, 2), 'utf-8'); }
     catch (e) { return { cfg: cur, warnings: [`写入失败: ${e.message}`] }; }
@@ -371,11 +365,11 @@ export class RoomPlugin extends ScenePlugin {
     return this._bufferHasMention || this._bufferHasKeyword();
   }
 
-  /** 窗口到期巡视触发复核：窗口到期 ∧ 非回复中。不看 buffer（空 buffer 也触发，agent 巡视后可 Skip/主动 Speak）。 */
+  /** 窗口到期巡视触发复核：窗口到期 ∧ 非回复中。不看 buffer（空 buffer 也触发，agent 巡视后可 Skip/主动 Speak）。
+   *  到期判定用动态退避间隔 _observeIntervalSec（非配置窗口）。 */
   shouldFlushObserve() {
     if (this._replying) return false;
-    const { observationWindowSec } = this.getObserveConfig();
-    return Date.now() >= (this._lastFlushAt || 0) + observationWindowSec * 1000;
+    return Date.now() >= (this._lastFlushAt || 0) + this._observeIntervalSec * 1000;
   }
 
   /** flush 触发：mention 命中走强门控；观测（keyword/窗口）走弱门控。 */
@@ -393,13 +387,12 @@ export class RoomPlugin extends ScenePlugin {
   // 观测式：定时器 + 心跳 + 自驱动触发
   // ============================================================
 
-  /** 武装观测窗口定时器：到期回调 _onObserveDue。反复调用先清旧 timer。 */
+  /** 武装观测窗口定时器：到期回调 _onObserveDue。反复调用先清旧 timer。用动态退避间隔 _observeIntervalSec。 */
   _armObserveTimer() {
     if (this._disposed) return;
     if (this._interactionStrategy() === 'mention') return;   // mention 策略不起 timer
     this._clearObserveTimer();
-    const { observationWindowSec } = this.getObserveConfig();
-    const dueAt = (this._lastFlushAt || Date.now()) + observationWindowSec * 1000;
+    const dueAt = (this._lastFlushAt || Date.now()) + this._observeIntervalSec * 1000;
     const delay = Math.max(0, dueAt - Date.now());
     this._observeTimer = setTimeout(() => this._onObserveDue(), delay);
     if (typeof this._observeTimer.unref === 'function') this._observeTimer.unref();
@@ -417,8 +410,7 @@ export class RoomPlugin extends ScenePlugin {
     if (this._disposed) { log?.info(`RoomPlugin.observe [${aid}] 窗口到期复核: disposed，跳过`); return; }
     if (this._replying) { log?.info(`RoomPlugin.observe [${aid}] 窗口到期复核: 正在回复中，跳过`); return; }
     if (!this.shouldFlushObserve()) {
-      const { observationWindowSec } = this.getObserveConfig();
-      const remainMs = Math.max(0, (this._lastFlushAt || 0) + observationWindowSec * 1000 - Date.now());
+      const remainMs = Math.max(0, (this._lastFlushAt || 0) + this._observeIntervalSec * 1000 - Date.now());
       log?.info(`RoomPlugin.observe [${aid}] 窗口到期复核: 未到期 (窗口剩余=${Math.ceil(remainMs/1000)}s)`);
       return;
     }
@@ -525,8 +517,9 @@ export class RoomPlugin extends ScenePlugin {
     this.ensureState();
     // clearRoom/reloadRoom 的 dispose 会置 _disposed=true；进房消息复活（重 arm timer）
     this._disposed = false;
-    // 观测式策略：进群设窗口起算点 + 起 timer
+    // 观测式策略：进群设窗口起算点 + 间隔复位到最小值 + 起 timer
     if (this._interactionStrategy() !== 'mention') {
+      this._observeIntervalSec = OBSERVE_MIN_WINDOW;
       this._lastFlushAt = Date.now();
       this._armObserveTimer();
     }
@@ -602,8 +595,8 @@ export class RoomPlugin extends ScenePlugin {
       log?.info(`${label}: ✅ 即时触发 trigger=${this._currentTrigger} (strategy=${strategy} mentionedMe=${mentionedMe} hasKeyword=${hasKw}) 已清观测定时，待回复完毕重 arm`);
     } else {
       // 未触发：打清原因，便于诊断"为什么没回"
-      const { keywords, observationWindowSec } = this.getObserveConfig();
-      const remainMs = Math.max(0, (this._lastFlushAt || 0) + observationWindowSec * 1000 - Date.now());
+      const { keywords } = this.getObserveConfig();
+      const remainMs = Math.max(0, (this._lastFlushAt || 0) + this._observeIntervalSec * 1000 - Date.now());
       log?.info(`${label}: ⏸ 未触发 (strategy=${strategy} mentionedMe=${mentionedMe} hasKeyword=${hasKw} keywords=[${(keywords||[]).join(',')}] buffer=${this._buffer.length} 窗口剩余=${Math.ceil(remainMs/1000)}s)`);
     }
     return { action: 'buffer', seq, flushNow: triggered };
@@ -630,8 +623,18 @@ export class RoomPlugin extends ScenePlugin {
   shouldBreakAfterTools(acc, toolCallsResult) {
     if (this.runContext?.mode !== 'room') return null;
     if (!Array.isArray(toolCallsResult)) return null;
+    const names = toolCallsResult.map(tc => tc.function?.name).filter(Boolean);
+    const hasSpeak = names.includes('Speak');
+    const hasSkip = names.includes('Skip');
     // Speak 或 Skip 命中 → 结束本轮（Skip 为观测式主动放弃）
-    if (toolCallsResult.some(tc => tc.function?.name === 'Speak' || tc.function?.name === 'Skip')) {
+    if (hasSpeak || hasSkip) {
+      // 观测间隔动态退避（仅 observe/both 有定时器，mention 无影响；不在提示词里反映）：
+      //   Speak→立即恢复最小值；Skip→×2 封顶 MAX；同批两者都有以 Speak 为准（恢复）。沉默不调工具→不变。
+      if (this._interactionStrategy() !== 'mention') {
+        this._observeIntervalSec = hasSpeak
+          ? OBSERVE_MIN_WINDOW
+          : Math.min(this._observeIntervalSec * 2, OBSERVE_MAX_WINDOW);
+      }
       return true;
     }
     return null;

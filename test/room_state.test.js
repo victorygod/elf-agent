@@ -5,7 +5,7 @@
  *   - createRoomState(私聊) / createRoomState(群聊)：建独立 Agent + MM(隔离 dataDir) + ScenePlugin + AbortController
  *   - createAgentServer 多房工厂：/observe 按 body.roomId 路由 + 懒创建；跨房并发不互阻；同房串行
  *
- * 用 MockModel + 真实 agents/elf-001/config 目录（createAgent 真实装配路径）。
+ * 用 MockModel（经 ELF_FORCE_MOCK_MODEL=1 强制）+ 真实 agents/elf-001/config 目录（createAgent 真实装配路径）。
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,7 +14,6 @@ import os from 'os';
 import path from 'path';
 import { createRoomState } from '../engine/room_state.js';
 import { createAgentServer } from '../engine/server.js';
-import { MockModel } from '../engine/models/index.js';
 
 const ELF001_CONFIG_DIR = path.join(process.cwd(), 'agents', 'elf-001', 'config');
 
@@ -27,6 +26,12 @@ async function collect(fn) {
   await fn(e => events.push(e));
   return events;
 }
+
+// 本文件装配真实 agents/elf-001/config（provider:llm），不强制 mock 会向 idealab 真实 LLM 端点发请求，
+// 无内网/VPN 时连接超时。与 integration/gateway 测试一致：before 设 ELF_FORCE_MOCK_MODEL=1 强制 MockModel，
+// after 清掉（避免泄漏到断言 provider==='llm' 的 Config 类用例）。
+before(() => { process.env.ELF_FORCE_MOCK_MODEL = '1'; });
+after(() => { delete process.env.ELF_FORCE_MOCK_MODEL; });
 
 describe('RoomState 工厂', () => {
   it('私聊房：建 Agent + MM(隔离 dataDir) + PrivateChatPlugin + AbortController', async () => {

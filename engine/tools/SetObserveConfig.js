@@ -9,7 +9,7 @@
  *   （observe 策略下别人直呼你名字仍能触发你发言），但名字不存进这 MAX_KEYWORDS 个、
  *   也不在本工具的描述/参数里暴露。
  *
- * 观测窗口（observationWindowSec）不由此工具设置，由 config.interaction.observe 配置。
+ * 观测巡视间隔由 RoomPlugin 动态退避（Skip 翻倍 / Speak 复位），不由此工具设置。
  * silentRetries 固定常量（不暴露参数）。
  *
  * 仅在 interaction.strategy ∈ {observe, both} 时由 room_state.js 注册。
