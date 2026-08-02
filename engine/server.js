@@ -373,6 +373,7 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
       try { if (fs.existsSync(cursorFile)) fs.unlinkSync(cursorFile); } catch (e) {}
     }
     if (scene && Array.isArray(scene._buffer)) { scene._buffer.length = 0; scene._bufferHasMention = false; }
+    if (typeof a.clearRuntime === 'function') a.clearRuntime();   // DM agent 等清运行时文档（rm runtime + re-seed）
     logger.info(`RoomState[${room.roomId}] 记忆已清空`);
   }
   app.post('/clear/:roomId', (req, res) => {

@@ -1,119 +1,139 @@
 # DM Agent 设计
 
-私聊 DM agent（DND 5e 风格地下城主），按轮次为玩家叙事演绎剧情。
-
-每轮：撰写大纲 → review → 修订 → 渲染剧情给选项 → 后台维护设定集。
+私聊 DM agent（DND 5e 风格地下城主），按轮次为玩家叙事演绎剧情。单 agent，reasoning 内跑 4-loop workflow；数值用 md 文档维护，靠 LLM 推理 + Roll 工具。
 
 ## 1. 装配
 
 - 新建 `agents/elf-018/`，从 `gateway/agent_template` 拷改。
-- 私聊场景由 `PrivateChatPlugin` run-level 自动注入（room = `chat-elf-018`），无需在 agent 里声明。
-- `messageManagerClass: "dnd_message_manager"` 启用自定义压缩。
-
-`config.json` 关键字段：
+- 私聊场景由 `PrivateChatPlugin` run-level 自动注入（room = `chat-elf-018`），无需声明。
+- `messageManagerClass: "dnd_message_manager"` 自定义压缩。
 
 ```json
 {
-  "agentId": "elf-018", "name": "DM", "provider": "llm",
+  "agentId": "elf-018", "name": "DND DM", "provider": "llm",
   "messageManagerClass": "dnd_message_manager",
-  "compactMode": "async", "memoryTokenLimit": 40000, "maxIterations": 50,
+  "compactMode": "async", "memoryTokenLimit": 40000, "maxIterations": 0,
   "interaction": { "strategy": "observe" },
-  "tools": ["Read", "Grep", "Glob", "Write", "Edit", "Agent", "Roll"],
-  "subagents": ["DM-Reviewer", "Lore-Keeper"]
+  "tools": ["Read", "Grep", "Glob", "Write", "Edit", "Roll"]
 }
 ```
 
-不开 `skills`（文件索引走独立注入器，不依赖 skill 机制）。
+无子 agent、无数值引擎。
 
-## 2. 目录与文件命名
+## 2. 目录布局
 
 ```
 agents/elf-018/
-  index.js / create_agent.js / message_manager.js / DMChatPlugin.js
+  index.js / create_agent.js / message_manager.js
   config/
     system_prompt.md  compact_prompt.md  compact_system_prompt.md
-    lore/                       # 设定集（DM 直接 Write/Edit 改）
-      world.md  rules.md  locations.md  items.md  quests.md  foreshadowing.md
-      characters/*.md  state.md          # state.md = 背包/NPC现状/已揭露伏笔/已维护轮次
-    outline/round-{N}-{标题}.md           # 本轮大纲
-    scene/round-{N}-{标题}.md             # 本轮剧情输出
+    lore/                       # 叙事设定（lore_keeper loop 维护）
+      world.md  rules.md  locations.md  quests.md  foreshadowing.md
+      characters/*.md  state.md  metadata.md
+    stats/                     # 数值层（md，LLM 维护）
+      char/{id}.md             # 实例面板：lv/exp/hp/mp/技能/状态/背包
+      items/{id}.md            # 物品/消耗品定义
+      skills/{id}.md           # 技能/法术定义
+      rules.md                 # roll 加成阶梯/hp-mp 公式/伤害抗性规则
+    outline/round-{N}-{标题}.md           # 本轮大纲（节拍 + changes 序列）
+    scene/round-{N}-{标题}.md             # 本轮渲染剧情
 ```
 
-文件名 = **轮数 + ≤10 字高凝练标题**（如 `scene/round-03-血染黑狗酒馆.md`），由 DM 落盘时自拟。看索引即知每轮演了啥，按需 Read。
+文件名 = **轮数 + ≤10 字高凝练标题**，DM 落盘时自拟。
 
-## 3. 工具
+## 3. 数值系统（md 维护）
 
-- 复用：`Read`/`Grep`/`Glob`（检索设定集）、`Write`/`Edit`（写大纲 + 直接改设定集）、`Agent`（起子 agent）。
-- 新增 `Roll`：d20 简版。参数 `{ purpose, dc?, modifier? }`；`crypto` 取随机；自然 1 大失败 / 自然 20 大成功；给 dc 判 `total = roll + mod >= dc`。
+养成仅靠技能系统；物品是消耗资源，状态是临时效果。
 
-## 4. 子 agent（`registry.js` 新增两类）
+- **等级**：经验升级，获技能点（无属性点）。hp/mp 上限按等级 + 角色基线（公式在 `rules.md`）。
+- **技能**：技能/法术列表 + 等级；技能点解锁/升级；技能等级是 roll modifier 与伤害加成的主要来源。
+- **物品**：消耗品使用触发效果；背包记在 `char`。
+- **状态**：来源/形态/影响/清除（改 modifier、改行动、dot/hot、护盾）。
+- **roll 耦合**：`modifier = 技能等级加成 + 状态加成`；`伤害 = 技能骰 + 技能等级加成 + 状态加成`。
 
-| 类型 | 工具白名单 | 职责 |
-|---|---|---|
-| `DM-Reviewer` | `[Read, Grep, Glob]` 只读 | 加载全部设定集 + 本轮大纲，查一致性/伏笔/人物/平衡，输出整改意见 |
-| `Lore-Keeper` | `[Read, Grep, Glob, Write, Edit]` 可写、禁 `Agent`/`Roll` | 读剧情更新 `lore/` + `state.md`（背包/NPC经历/新地点人物） |
+**面板契约 = initial + changes + final**，全 md 承载：
+- `initial`：本轮初始面板（上轮 final）
+- `changes`：`[{entity, field, from, to, reason}]` 变化序列 + 原因
+- `final`：变化后终态
 
-`Agent.js` 的 `allowedNames` 需扩展：`tools` 为具体数组时取交集（当前只认 `['*']`/`disallowedTools`）。
+各 loop 用法：main 初稿拟定 changes 写进大纲；reviewer 验 changes 合理性并改；lore_keeper 按 changes 更新 `char/*.md` 到 final；render 看 initial+final 描述变化。
 
-## 5. 单轮时序
+trade-off：无数值引擎兜底，正确性靠 reviewer loop 把关（读 md 验）。先简化跑通，专用工具后加。
+
+## 4. 工具
+
+`Read`/`Grep`/`Glob`/`Write`/`Edit`/`Roll`。
+- `Roll(purpose, dc?, modifier?)`：d20 掷骰，自然 1/20 大失败/成功，`crypto` 取随机。
+- 其余数值靠 LLM 读写 md 推理。无演算/落地数值工具、无 Agent 工具、无子 agent。
+
+各 loop 取子集：main·初稿 / reviewer / lore_keeper 用上述全集；**render 无工具**。
+
+## 5. reasoning workflow（4-loop，reasoning 内编码）
+
+单 agent，reasoning 内跑 4 loop 串行，文件在 loop 间传递。每 loop 跑 LLM+工具到纯文本 break，检查期望产出，没产出注入提示再跑（不加上限），产出则切下一 loop。
+
+| loop | 角色 | 上下文 | 期望产出 |
+|---|---|---|---|
+| main·初稿 | DM 撰写 | 玩家指令 + 压缩历史 outline + 上一轮正文 + initial 面板 + 设定 metadata | `outline/round-N.md`（含 changes） |
+| reviewer | 审校改写 | 压缩历史 outline + 本轮 outline + initial 面板 + metadata + 相关设定全文 | outline 已修订（不再调工具） |
+| lore_keeper | 状态维护 | 压缩历史 outline + reviewer 后 outline + metadata + initial 面板 | `char/*.md` 更新到 final + lore/metadata |
+| render | 渲染 | 压缩历史 outline + reviewer 后 outline + 上一轮正文 + initial+final 面板 | 正文 → 流式前端 + 落 `scene/round-N.md` + 入 history(MM) |
+
+实现复用现有机制：
+- **切 prompt/context**：`promptAssembler.useSystemReplace` 换 loop system prompt；`useBeforeLastUser`/`useAppend` 注入该 loop context（面板/设定/历史 outline）。
+- **切工具视图**：`harness.withRunLevel({disableTools})` 按 loop 禁用（render 禁全部）。
+- **注入循环**：loop 纯文本 break 后检查期望产出；没产出 `addMetaMessage` 注入提示再跑该 loop，不加上限；产出切下一 loop。
+- **render 流式**：无工具 → 一次纯文本 `chatStream`（onChunk emit token 给前端）+ `addAssistantMessage` 入 MM history + `Write` 落 `scene/round-N.md`。
+- **产出检测**：检查期望产出（outline 含 changes 段 / `char/*.md` 已更新 / render 正文非空）。
+
+## 6. 大纲格式（数值契约载体）
+
+`outline/round-N-{标题}.md` 含：
+- **剧情节拍**（自然语言）：场景目标、走向、roll 判定点及结果、给玩家的选项。
+- **changes 序列**：initial → changes `[{from,to,reason}]` → final，确切值由 Roll/LLM 演算。
+
+reviewer 验改、lore_keeper 据此更新面板、render 据此描述——共用这张契约。
+
+## 7. 单轮时序
 
 ```
-1. 玩家行动
-2. 文件索引注入器现算（useBeforeLastUser，<system-reminder>，列 lore/+outline/+scene/ 文件名）
-3. DM 撰写 outline/round-N-{标题}.md：Read/Grep/Glob 查 lore、Roll 判定
-4. Agent(DM-Reviewer, 带设定集根+大纲路径) 恰好一次 → 回流整改意见
-5. 据意见 Edit 大纲（可补查补 roll）→ 不再 review
-6. 渲染剧情 → Write scene/round-N-{标题}.md 落盘 + assistant 输出给玩家 + 2-4 个选项
-7. turn 结束 → onFlushDone 同步起 Lore-Keeper 维护本轮设定/状态
+1. 玩家行动 + 文件索引注入
+2. main·初稿 loop：演算 + Roll + 写 outline/round-N.md（含 changes）
+3. reviewer loop：读 outline+面板+设定验算，直接改 outline 到不再调工具
+4. lore_keeper loop：按 outline 的 changes 更新 char/*.md（到 final）+ lore/metadata
+5. render loop：无工具，读 outline+initial+final 渲染正文 → 流式前端 + 落 scene + 入 history
+   - 若本轮触发升级：正文结尾给"如何分配技能点"选项，下一轮玩家决策后落地
 等下一轮
 ```
 
-## 6. 消息压缩定制（`DNDMessageManager`）
+## 8. 消息压缩（`DNDMessageManager`）
 
 override `compactIfNeeded`：
-
 - **保留最近一次 user 输入后的全部消息原文**。
-- 之前的老区：未超 `memoryTokenLimit` 不动；超限调 LLM 摘要（`compactPrompt` 引导保留剧情脉络/伏笔推进，丢弃工具过程/设定引用/roll/review）。
-- 历史大纲/剧情靠**落盘文件 + 注入索引**保留，不占消息历史，所以老区可放心摘要。
-- 摘要请求不含文件索引（索引是临注入）。
+- 老区超限调 LLM 摘要（`compactPrompt` 引导保留剧情脉络/伏笔推进，丢弃工具过程）。
+- 历史大纲/剧情靠**落盘文件 + 注入索引**保留，不占消息历史。
 
-## 7. 文件索引注入器
+MM 角色：存对话（玩家指令 + DM 渲染正文）；长期记忆靠文件（outline/scene/char/lore）+ 压缩历史 outline 摘要。各 loop context 显式从文件构建。
 
-注册到 `promptAssembler.useBeforeLastUser(...)`（同 skills listing 槽位）：
+## 9. 文件索引注入器
 
-- 每轮 reasoning 前扫 `lore/` + `outline/` + `scene/`。
-- 产 `<system-reminder>` 包裹的索引，插在最近 user 前。
-- 仅含目录 + 文件名（带轮次+标题），DM 据此按需 Read。
-- 非持久化、每轮现算、压缩不影响。
+`promptAssembler.useBeforeLastUser`（同 skills listing 槽位）：每轮 reasoning 前扫 `lore/`+`stats/`+`outline/`+`scene/`，产 `<system-reminder>` 索引插在最近 user 前；仅目录+文件名（带轮次+标题）；临注入、每轮现算、压缩不影响。
 
-## 8. 轮尾维护（方案 Z：引擎钩子同步）
-
-`DMChatPlugin extends PrivateChatPlugin`，override `onFlushDone`：
-
-```js
-async onFlushDone() {
-  try {
-    await this.toolManager.execute('Agent', {
-      subagent_type: 'Lore-Keeper',
-      prompt: '维护设定集：Read state.md 看已维护到第几轮 → Glob scene/round-*.md → '
-            + '对未维护的最新轮 Read 其 scene + 相关 lore → Edit/Write 更新 lore/ + 推进 state.md'
-    }, null, { agent: this._agent });
-  } catch (e) { /* 记日志 + notice，不阻断 */ }
-}
-```
-
-- `await` 保证维护完才放行下一轮 → **无竞态**（串行）。代价：玩家若在维护期输入下一条会排队等几秒（实现时验证 gateway 对同 room 消息串行化）。
-- Lore-Keeper 自驱：靠 `state.md` 的"已维护到 round-N"找未维护轮，不用主 agent 传参。首轮无 scene → no-op。
-- 复用 `Agent` 工具起子 agent，零额外构造代码。
-- `start.js` 场景注入加默认回退 `agent._scene = agent._scene || new PrivateChatPlugin(agent)`，让 `create_agent.js` 能注入 `DMChatPlugin`。
-
-## 9. 改动清单
+## 10. 改动清单
 
 | # | 文件 | 改动 |
 |---|---|---|
-| 1 | `agents/elf-018/` 新建 | `index.js`、`create_agent.js`（+注入 DMChatPlugin、文件索引注入器、lore/outline/scene 绝对路径）、`message_manager.js`（DNDMessageManager）、`DMChatPlugin.js`、`config/*`、`lore/` 种子+`state.md`、`outline/`、`scene/` |
-| 2 | `engine/tools/Roll.js` + `engine/tools/index.js` | 新增 d20 简版掷骰工具 + re-export |
-| 3 | `engine/subagents/registry.js` | 加 `DM-Reviewer`、`Lore-Keeper` |
-| 4 | `engine/tools/Agent.js` | `allowedNames` 支持具体白名单数组 |
-| 5 | `engine/start.js` | 场景注入加 `agent._scene = agent._scene || …` 回退 |
-| 6 | 文件索引注入器 | `useBeforeLastUser` 扫 `lore/`+`outline/`+`scene/` 产 `<system-reminder>` 索引 |
+| 1 | `agents/elf-018/` 新建 | `index.js`、`create_agent.js`（+文件索引注入器、各根目录绝对路径）、`message_manager.js`、`config/*`、`lore/`+`stats/` md 种子、`outline/`、`scene/` |
+| 2 | `engine/message_manager.js` 或 elf-018 子类 | `DNDMessageManager`：压缩按最近 user 切 |
+| 3 | `engine/agent.js` reasoning | 4-loop workflow 编码：loop 状态机 + 产出检测 + 注入循环 + prompt/context/工具视图切换 |
+| 4 | `engine/tools/Roll.js` + `index.js` | d20 掷骰工具 + re-export |
+| 5 | 文件索引注入器 | `useBeforeLastUser` 扫各目录产 `<system-reminder>` 索引 |
+
+去掉了：数值引擎、演算/落地数值工具、Agent 工具、子 agent registry、`Agent.js` 白名单扩展、`start.js`/`DMChatPlugin` 场景钩子。
+
+## 待决策
+
+- `rules.md` 具体规则（技能等级→roll 加成阶梯、hp/mp 公式、伤害骰来源）。
+- changes 序列的 md 格式。
+- reviewer "相关设定全文"的自动注入检索机制（按大纲实体从 metadata 抽取）。
+- 各 loop system prompt 文案。

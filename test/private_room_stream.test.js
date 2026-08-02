@@ -226,4 +226,92 @@ describe('private_room_stream 行为锚定（#8 修复点）', () => {
     assert.ok(uTurn, 'turns 含该 user 整轮');
     assert.ok(uTurn.assistantBubbles.some(b => b.content?.includes('答')), 'turn 含 assistant 答');
   });
+
+  // 8. _loop 落盘：tool_call 携带 loop 时，磁盘 assistant 记录带 _loop，刷新后前端可凭之折叠非 render 气泡
+  it('_loop 落盘：带 loop 的 tool_call 落盘 assistant 记录带 _loop', () => {
+    beginTurn('调查', null);
+    handlePrivateAgentEvent('tool_call', { _roomId: roomId, loop: 'main', tool_calls: [{ id: 'tc1', name: 'Read', args: {} }] }, history);
+    handlePrivateAgentEvent('tool_result', { _roomId: roomId, id: 'tc1', status: 'success', message: 'ok' }, history);
+    handlePrivateAgentEvent('done', { _roomId: roomId }, history);
+    const recs = fs.readFileSync(path.join(root, roomId, 'history.jsonl'), 'utf-8').trim().split('\n').map(l => JSON.parse(l));
+    const a = recs.find(r => r.role === 'assistant');
+    assert.equal(a._loop, 'main', `tool_call 带 loop=main 应落盘 _loop=main，实际 ${a._loop}`);
+  });
+
+  // 9. _loop 不污染：事件不带 loop 时（如普通 tool_result），不写 _loop（向后兼容旧数据）
+  it('_loop 缺省：事件不带 loop 时落盘记录无 _loop 字段', () => {
+    beginTurn('不带 loop', null);
+    handlePrivateAgentEvent('tool_call', { _roomId: roomId, tool_calls: [{ id: 'tc1', name: 'Read', args: {} }] }, history);
+    handlePrivateAgentEvent('tool_result', { _roomId: roomId, id: 'tc1', status: 'success', message: 'ok' }, history);
+    handlePrivateAgentEvent('done', { _roomId: roomId }, history);
+    const recs = fs.readFileSync(path.join(root, roomId, 'history.jsonl'), 'utf-8').trim().split('\n').map(l => JSON.parse(l));
+    const a = recs.find(r => r.role === 'assistant');
+    assert.equal(a._loop, undefined, '无 loop 时不写 _loop（旧断言不被破坏）');
+  });
+
+  // 10. 多 loop 切换：main bubble 落盘带 main，reviewer bubble 落盘带 reviewer
+  //     验证「新轮 flush 用旧 _currentLoop，capture 在 flush 之后」的时序正确
+  it('多 loop 切换：main/reviewer 各自 bubble 落盘带对应 _loop', () => {
+    beginTurn('多 loop', null);
+    // main：调工具
+    handlePrivateAgentEvent('tool_call', { _roomId: roomId, loop: 'main', tool_calls: [{ id: 'tc1', name: 'Edit', args: {} }] }, history);
+    handlePrivateAgentEvent('tool_result', { _roomId: roomId, id: 'tc1', status: 'success', message: 'ok' }, history);
+    // reviewer 首个 token 触发 main bubble flush（此时 _currentLoop 仍为 main）→ 落盘 _loop=main，随后才切 reviewer
+    handlePrivateAgentEvent('token', { _roomId: roomId, loop: 'reviewer', content: '审校中' }, history);
+    handlePrivateAgentEvent('tool_call', { _roomId: roomId, loop: 'reviewer', tool_calls: [{ id: 'tc2', name: 'Edit', args: {} }] }, history);
+    handlePrivateAgentEvent('tool_result', { _roomId: roomId, id: 'tc2', status: 'success', message: 'ok' }, history);
+    handlePrivateAgentEvent('done', { _roomId: roomId }, history);
+    const recs = fs.readFileSync(path.join(root, roomId, 'history.jsonl'), 'utf-8').trim().split('\n').map(l => JSON.parse(l));
+    const assistants = recs.filter(r => r.role === 'assistant');
+    assert.equal(assistants.length, 2, `应落两条 assistant（main + reviewer），实际 ${assistants.length}`);
+    assert.equal(assistants[0]._loop, 'main', '第1条（main 工具轮）_loop=main');
+    assert.equal(assistants[1]._loop, 'reviewer', '第2条（reviewer 轮）_loop=reviewer');
+  });
+
+  // 11. snapshot 重建带 _loop：done 后重连，snap.turns 的 bubble 保留磁盘的 _loop
+  it('snapshot 重建带 _loop：turns bubble 保留磁盘 _loop 供前端折叠', () => {
+    beginTurn('刷新折叠', null);
+    handlePrivateAgentEvent('tool_call', { _roomId: roomId, loop: 'main', tool_calls: [{ id: 'tc1', name: 'Read', args: {} }] }, history);
+    handlePrivateAgentEvent('tool_result', { _roomId: roomId, id: 'tc1', status: 'success', message: 'ok' }, history);
+    handlePrivateAgentEvent('done', { _roomId: roomId }, history);
+    const res = fakeRes({ writable: true });
+    subscribePrivateRoom(roomId, res, history);
+    const snap = parseSnapshot(res);
+    const bubble = snap.turns.flatMap(t => t.assistantBubbles).find(b => b.toolCalls?.length);
+    assert.ok(bubble, '应存在 toolCalls bubble');
+    assert.equal(bubble._loop, 'main', `snapshot 重建后 bubble._loop 应为 main，实际 ${bubble._loop}`);
+  });
+
+  // 12. streaming 中 snapshot 的 activeTurn 尾 bubble 带 _loop（刷新中断也能折叠）
+  it('streaming snapshot：activeTurn 尾 bubble 带 _loop', () => {
+    beginTurn('流式中刷新', null);
+    handlePrivateAgentEvent('tool_call', { _roomId: roomId, loop: 'main', tool_calls: [{ id: 'tc1', name: 'Read', args: {} }] }, history);
+    const res = fakeRes({ writable: true });
+    subscribePrivateRoom(roomId, res, history);
+    const snap = parseSnapshot(res);
+    assert.ok(snap.activeTurn, 'streaming 中有 activeTurn');
+    const tail = snap.activeTurn.assistantBubbles[snap.activeTurn.assistantBubbles.length - 1];
+    assert.ok(tail, '有尾 bubble');
+    assert.equal(tail._loop, 'main', `尾 bubble 应带 _loop=main，实际 ${tail._loop}`);
+  });
+
+  // 13. status 不提前拧 _currentLoop：loop 边界的 status（下一轮首个 token 前先到）不应把
+  //     还悬在内存的上一 bubble 错盖成新 loop。复盘 elf-018：reviewer 末尾 Skip 气泡跨到 render 时
+  //     被 status{render} 提前拧成 render。此处模拟 reviewer→render 边界。
+  it('status 不提前拧 loop：边界 status 不把上一工具气泡错盖成新 loop', () => {
+    beginTurn('边界 status', null);
+    // reviewer 末尾：调 Skip（reviewer 的 extraTool）→ success，气泡悬在内存（下一 flush 要等新轮 token）
+    handlePrivateAgentEvent('tool_call', { _roomId: roomId, loop: 'reviewer', tool_calls: [{ id: 'tc1', name: 'Skip', args: {} }] }, history);
+    handlePrivateAgentEvent('tool_result', { _roomId: roomId, id: 'tc1', status: 'success', message: 'skipped' }, history);
+    // render 开始：engine/agent.js _runLLMStream 在首个 token 前先发 status{render}
+    handlePrivateAgentEvent('status', { _roomId: roomId, state: 'thinking', loop: 'render' }, history);
+    // render 首个 token 触发新轮 flush，落盘上一 Skip 气泡
+    handlePrivateAgentEvent('token', { _roomId: roomId, loop: 'render', content: '正文' }, history);
+    handlePrivateAgentEvent('done', { _roomId: roomId }, history);
+    const recs = fs.readFileSync(path.join(root, roomId, 'history.jsonl'), 'utf-8').trim().split('\n').map(l => JSON.parse(l));
+    const assistants = recs.filter(r => r.role === 'assistant');
+    assert.equal(assistants.length, 2, `应落两条 assistant（reviewer Skip + render 正文），实际 ${assistants.length}`);
+    assert.equal(assistants[0]._loop, 'reviewer', `reviewer 末尾 Skip 气泡应 _loop=reviewer（不被 status{render} 提前拧），实际 ${assistants[0]._loop}`);
+    assert.equal(assistants[1]._loop, 'render', 'render 正文气泡应 _loop=render');
+  });
 });

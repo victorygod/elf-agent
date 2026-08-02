@@ -70,6 +70,7 @@ export class TurnStreamServer {
         toolCalls: [],           // 未落盘工具调用（含 status）
         streaming: false,
         _hasHistoryOutput: false, // 整回合是否已有 assistant 记录落盘
+        _currentLoop: null,      // 本轮当前 loop（main/reviewer/render），随 token/tool_call 的 data.loop 更新；落盘时写 bubble._loop 供前端刷新后折叠
       });
     }
     return this._rooms.get(roomId);
@@ -97,8 +98,9 @@ export class TurnStreamServer {
     const hasContent = st.assistantContent && st.assistantContent.length > 0;
     const hasTools = st.toolCalls.length > 0;
     if (!hasContent && !hasTools) return;
-    logger.info(`[history] room=${roomId} flushBubble content=${hasContent ? st.assistantContent.length : 0}chars toolCalls=${st.toolCalls.length}`);
-    this._historyStore.append(roomId, 'assistant', st.assistantContent || '', st.toolCalls.length ? st.toolCalls : undefined);
+    const extra = st._currentLoop ? { _loop: st._currentLoop } : undefined;
+    logger.info(`[history] room=${roomId} flushBubble content=${hasContent ? st.assistantContent.length : 0}chars toolCalls=${st.toolCalls.length} loop=${st._currentLoop || '-'}`);
+    this._historyStore.append(roomId, 'assistant', st.assistantContent || '', st.toolCalls.length ? st.toolCalls : undefined, extra);
     st._hasHistoryOutput = true;
     st.assistantContent = '';
     st.toolCalls = [];
@@ -120,6 +122,7 @@ export class TurnStreamServer {
     st.toolCalls = [];
     st.streaming = true;
     st._hasHistoryOutput = false;
+    st._currentLoop = null;
     // user 由调用方在路由层负责落盘（生产里 /say 路由 historyStore.append(roomId,'user',...) 单独写）
     // 此处只维护内存态 + streaming 标记，不重复落盘 user。
   }
@@ -140,6 +143,15 @@ export class TurnStreamServer {
       if (this._shouldStartNewBubble(this._snapshotForFlush(st), eventName, data)) {
         this._flushBubble(roomId);
       }
+    }
+
+    // ── loop 标记：仅随 token/tool_call 捕获 data.loop ──
+    //   只在这两种「累积事件」上捕获，且它们在新轮 flush 检查之后触发，保证上一 bubble 用旧 loop 落盘。
+    //   不捕获 status：status 在 loop 边界（下一轮首个 token/tool_call 前）单独先到，此刻上一 bubble
+    //   往往还悬在内存未 flush，若捕获会把上一 bubble 错盖成新 loop（elf-018 reviewer 末尾 Skip 气泡
+    //   被盖成 render 即此因）。
+    if ((eventName === 'token' || eventName === 'tool_call') && data?.loop) {
+      st._currentLoop = data.loop;
     }
 
     // ── content / 工具累积 ──
@@ -180,8 +192,9 @@ export class TurnStreamServer {
         const hasTools = st.toolCalls.length > 0;
         // content 与 tool 都空 → 不落盘（纯空回复不占历史行）；否则落盘保时序
         if (hasContent || hasTools) {
-          logger.info(`[history] room=${roomId} 空turn兜底 content=${hasContent ? st.assistantContent.length : 0}chars toolCalls=${st.toolCalls.length}`);
-          try { this._historyStore.append(roomId, 'assistant', st.assistantContent || '', st.toolCalls.length ? st.toolCalls : undefined); }
+          const extra = st._currentLoop ? { _loop: st._currentLoop } : undefined;
+          logger.info(`[history] room=${roomId} 空turn兜底 content=${hasContent ? st.assistantContent.length : 0}chars toolCalls=${st.toolCalls.length} loop=${st._currentLoop || '-'}`);
+          try { this._historyStore.append(roomId, 'assistant', st.assistantContent || '', st.toolCalls.length ? st.toolCalls : undefined, extra); }
           catch (e) { logger.error(`空 turn 兜底落盘失败 (${roomId}): ${e.message}`); }
           st._hasHistoryOutput = true;
         }
@@ -214,7 +227,7 @@ export class TurnStreamServer {
       }
       const hasPartial = st.assistantContent || st.toolCalls.length > 0;
       const tailBubble = hasPartial
-        ? [{ content: st.assistantContent || '', toolCalls: st.toolCalls.length ? st.toolCalls : undefined }]
+        ? [{ content: st.assistantContent || '', toolCalls: st.toolCalls.length ? st.toolCalls : undefined, ...(st._currentLoop ? { _loop: st._currentLoop } : {}) }]
         : [];
       activeTurn = {
         id: 'turn_active',

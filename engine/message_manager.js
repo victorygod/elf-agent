@@ -170,7 +170,7 @@ export class MessageManager {
     const msgs = this.messages
       .filter(m => m.metaTag !== 'skill_listing')
       .map(m => {
-        const { id, isMeta, metaTag, ...rest } = m;
+        const { id, isMeta, metaTag, _loop, ...rest } = m;
         return rest;
       });
     return [systemMsg, ...msgs];

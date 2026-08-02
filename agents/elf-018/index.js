@@ -1,0 +1,14 @@
+/**
+ * elf-018 启动入口 —— DND DM agent
+ */
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { startAgent } from '../../engine/start.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const configDir = path.join(__dirname, 'config');
+
+startAgent(configDir).catch((err) => {
+  console.error(`Agent 启动失败: ${err.message}`);
+  process.exit(1);
+});

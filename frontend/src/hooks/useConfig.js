@@ -54,44 +54,30 @@ export default function useConfig() {
     }
   }, [configDrawerOpen, configAgentId]);
 
+  // 仅更新本地 formData（不触发保存）。保存由 ConfigField 失焦时通过 handleFieldCommit 提交，
+  // 避免逐键 autosave 过于频繁 + 引发 avatar 等连带刷新。
   const handleFieldChange = useCallback((key, value) => {
-    setFormData(prev => ({ ...prev, [key]: value }));
+    setFormData(prev => (prev[key] === value ? prev : { ...prev, [key]: value }));
   }, []);
 
+  // 失焦提交（text/textarea/number/password）。checkbox/multiselect 在变更时即时 commit。
+  const handleFieldCommit = useCallback((key, value) => {
+    _saveField(configAgentId, key, value, refreshAgents);
+  }, [configAgentId, refreshAgents]);
+
   const handleSave = useCallback(async () => {
+    // 保留供手动触发（如 Enter 等场景），但不再有 UI 按钮
     if (!configAgentId) return;
     setIsSaving(true);
     try {
-      const update = {};
-
-      // 提示词字段
-      if (formData.systemPrompt !== undefined) update.systemPrompt = formData.systemPrompt;
-
-      // 模型字段
-      const modelUpdate = {};
-      if (formData.base_url !== undefined) modelUpdate.base_url = formData.base_url;
-      if (formData.auth_token !== undefined) modelUpdate.auth_token = formData.auth_token;
-      if (formData.model !== undefined) modelUpdate.model = formData.model;
-      if (Object.keys(modelUpdate).length > 0) update.model = modelUpdate;
-
-      // 其他字段
-      const skip = new Set(['systemPrompt', 'base_url', 'auth_token', 'model']);
-      for (const [k, v] of Object.entries(formData)) {
-        if (skip.has(k)) continue;
-        update[k] = v;
-      }
-
-      await api.updateConfig(configAgentId, update);
-      closeConfigStore();
-      // 刷新 agent 列表，使左侧栏的 name/avatar 等展示字段同步更新
+      await _saveAllFields(configAgentId, formData);
       await refreshAgents();
       useAgentStore.getState().showToast('配置已保存');
     } catch (e) {
-      alert('保存失败: ' + e.message);
-      api.log('ERROR', '配置保存失败: ' + e.message);
+      useAgentStore.getState().showToast('保存失败: ' + e.message);
     }
     setIsSaving(false);
-  }, [configAgentId, formData, closeConfigStore, refreshAgents]);
+  }, [configAgentId, formData, refreshAgents]);
 
   const handleStart = useCallback(async () => {
     if (!configAgentId) return;
@@ -148,10 +134,54 @@ export default function useConfig() {
   return {
     config, layout, formData, activeTab,
     isSaving, isStarting, isStopping,
-    setActiveTab, handleFieldChange,
+    setActiveTab, handleFieldChange, handleFieldCommit,
     handleSave, handleStart, handleStop,
-    handleClearAll,
+    handleClearAll, closeConfigStore,
   };
+}
+
+// 立即保存单字段（失焦提交用）
+async function _saveField(agentId, key, value, refreshAgents) {
+  if (!agentId) return;
+  try {
+    const update = _buildUpdate(key, value);
+    await api.updateConfig(agentId, update);
+    await refreshAgents();
+  } catch (e) {
+    useAgentStore.getState().showToast('保存失败: ' + e.message);
+  }
+}
+
+// 保存全部字段
+async function _saveAllFields(agentId, formData) {
+  const update = {};
+  if (formData.systemPrompt !== undefined) update.systemPrompt = formData.systemPrompt;
+  const modelUpdate = {};
+  if (formData.base_url !== undefined) modelUpdate.base_url = formData.base_url;
+  if (formData.auth_token !== undefined) modelUpdate.auth_token = formData.auth_token;
+  if (formData.model !== undefined) modelUpdate.model = formData.model;
+  if (Object.keys(modelUpdate).length > 0) update.model = modelUpdate;
+  const skip = new Set(['systemPrompt', 'base_url', 'auth_token', 'model']);
+  for (const [k, v] of Object.entries(formData)) {
+    if (skip.has(k)) continue;
+    update[k] = v;
+  }
+  await api.updateConfig(agentId, update);
+}
+
+// 构建单字段 update
+function _buildUpdate(key, value) {
+  const update = {};
+  if (key === 'systemPrompt') {
+    update.systemPrompt = value;
+  } else if (key === 'base_url' || key === 'auth_token' || key === 'model') {
+    const modelUpdate = {};
+    modelUpdate[key] = value;
+    update.model = modelUpdate;
+  } else {
+    update[key] = value;
+  }
+  return update;
 }
 
 function buildDefaultTabs() {

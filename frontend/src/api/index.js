@@ -4,6 +4,20 @@
  */
 
 export const API_BASE = '';
+
+export async function getGameState(agentId) {
+  const res = await fetch(`${API_BASE}/agents/${agentId}/game-state`);
+  return res.json();
+}
+
+export async function renameProtagonist(agentId, name) {
+  const res = await fetch(`${API_BASE}/agents/${agentId}/protagonist-name`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  return res.json();
+}
 export const HISTORY_PAGE_SIZE = 30;
 
 // ===== Agent 列表 =====

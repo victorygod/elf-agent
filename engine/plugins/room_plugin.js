@@ -166,7 +166,7 @@ export class RoomPlugin extends ScenePlugin {
     // 静态部分（规则 + 成员）；群名引导句、当前时间、关键词/窗口由 _formatDynamicReminder 每轮动态拼
     this._rosterStatic = (
       `发言使用Speak工具，否则别人看不到你说的话。\n` +
-      `@群员名字能使其回复你，别人@你你也需要回复别人\n` +
+      `@群员名字能使其回复你，别人@你你也需要回复别人。发言从简，没必要不发言，Skip掉。\n` +
       `群成员：\n` +
       `${lines.join('\n')}\n`
     );

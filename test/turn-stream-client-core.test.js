@@ -64,6 +64,26 @@ describe('turn-stream-client-core', () => {
       const out = applyToken(at, '分', { newBubbleId: fixedId() });
       assert.equal(out.assistantBubbles[0].typing, undefined);
     });
+    it('opts._loop 盖戳到新建 bubble（sealed 情形）', () => {
+      const at = { assistantBubbles: [{ id: 'b0', content: '上轮', sealed: true }] };
+      const out = applyToken(at, '完成了', { newBubbleId: () => 'nb', _loop: 'reviewer' });
+      assert.equal(out.assistantBubbles[1]._loop, 'reviewer', '新建文本 bubble 应被盖戳 _loop=reviewer');
+    });
+    it('opts._loop 盖戳到续接尾 bubble（无 _loop 时）', () => {
+      const at = { assistantBubbles: [{ id: 'b0', content: '部', sealed: false }] };
+      const out = applyToken(at, '分', { newBubbleId: fixedId(), _loop: 'render' });
+      assert.equal(out.assistantBubbles[0]._loop, 'render', '续接尾 bubble 无 _loop 时应被盖戳');
+    });
+    it('续接尾 bubble 已有 _loop 时不覆盖', () => {
+      const at = { assistantBubbles: [{ id: 'b0', content: '部', sealed: false, _loop: 'main' }] };
+      const out = applyToken(at, '分', { newBubbleId: fixedId(), _loop: 'render' });
+      assert.equal(out.assistantBubbles[0]._loop, 'main', '已有 _loop 应保留首帧 loop，不被覆盖');
+    });
+    it('不传 opts._loop 时文本 bubble 不写 _loop（向后兼容）', () => {
+      const at = { assistantBubbles: [{ id: 'b0', content: '上轮', sealed: true }] };
+      const out = applyToken(at, '新轮', { newBubbleId: () => 'nb' });
+      assert.equal(out.assistantBubbles[1]._loop, undefined, '未传 _loop 不应写入');
+    });
   });
 
   describe('applyToolCall', () => {
@@ -78,6 +98,21 @@ describe('turn-stream-client-core', () => {
       const out = applyToolCall(at, [{ id: 't1', name: 'Bash', args: {} }], { newBubbleId: () => 'nb' });
       assert.equal(out.assistantBubbles.length, 2);
       assert.equal(out.assistantBubbles[1].toolCalls[0].id, 't1');
+    });
+    it('opts._loop 盖戳到尾 bubble（续接情形，finalize/刷新后凭 _loop 折叠）', () => {
+      const at = { assistantBubbles: [{ id: 'b0', content: '大纲', toolCalls: [] }] };
+      const out = applyToolCall(at, [{ id: 't1', name: 'Read', args: {} }], { newBubbleId: () => 'nb', _loop: 'main' });
+      assert.equal(out.assistantBubbles[0]._loop, 'main', '续接尾 bubble 应被盖戳 _loop=main');
+    });
+    it('opts._loop 盖戳到新建 bubble（sealed 情形）', () => {
+      const at = { assistantBubbles: [{ id: 'b0', content: '上轮', toolCalls: [], sealed: true }] };
+      const out = applyToolCall(at, [{ id: 't1', name: 'Edit', args: {} }], { newBubbleId: () => 'nb', _loop: 'reviewer' });
+      assert.equal(out.assistantBubbles[1]._loop, 'reviewer', '新建 bubble 应被盖戳 _loop=reviewer');
+    });
+    it('不传 opts._loop 时不写 _loop（向后兼容）', () => {
+      const at = { assistantBubbles: [{ id: 'b0', content: '', toolCalls: [] }] };
+      const out = applyToolCall(at, [{ id: 't1', name: 'Read', args: {} }], { newBubbleId: () => 'nb' });
+      assert.equal(out.assistantBubbles[0]._loop, undefined, '未传 _loop 不应写入');
     });
   });
 

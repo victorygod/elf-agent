@@ -242,7 +242,7 @@ export class ChatHistory {
 
     // 压缩记录已在写入时按 compactId 就地更新（updateCompactRecord），
     // 每个压缩任务在 history 里只有一条记录，无需读取时合并。
-    const records = allRecords;
+    let records = allRecords;
 
     // afterId：返回 afterId 之后的所有消息（增量查询）
     if (afterId) {

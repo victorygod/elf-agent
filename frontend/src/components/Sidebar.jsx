@@ -180,6 +180,10 @@ export default function Sidebar({ onSelect }) {
         userName: result.userName,
         userAvatar: result.userAvatar,
       });
+      // 用户头像文件名固定(user_avatar.<ext>，覆盖写)：仅在头像真的变更/移除时 bump buster
+      if (pendingAvatarFile || avatarRemoved) {
+        useAgentStore.getState().bustAvatars();
+      }
       setShowSettings(false);
     } catch (e) {
       alert('保存失败: ' + e.message);

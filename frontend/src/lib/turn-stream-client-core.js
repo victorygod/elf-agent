@@ -43,7 +43,7 @@ export function rebuildFromSnapshot(snapshot) {
  * 纯计算，不碰 raf。pendingContent 由 React 层累积后一次性调本函数应用。
  * @param {object} activeTurn 当前 activeTurn（可 null）
  * @param {string} delta 待追加文本
- * @param {object} [opts] { newBubbleId }
+ * @param {object} [opts] { newBubbleId, _loop }
  * @returns {object} 新 activeTurn（含更新 bubble）；null 入参返回 null（调用方应已有 activeTurn）
  */
 export function applyToken(activeTurn, delta, opts = {}) {
@@ -53,11 +53,17 @@ export function applyToken(activeTurn, delta, opts = {}) {
   const last = bubbles[bubbles.length - 1];
   if (shouldStartNewBubble(last)) {
     const nb = { id: newBubbleId(), content: delta, toolCalls: [], ts: new Date().toISOString(), sealed: false };
+    // 盖戳 _loop：纯文本 bubble 也带 loop，避免后续 loop 切换（chat._currentLoop 被新 loop 的
+    //   status 轮换）后回退 currentLoop 误判——reviewer 文本被盖成 render 即此因。
+    if (opts._loop) nb._loop = opts._loop;
     return { ...activeTurn, assistantBubbles: [...bubbles, nb] };
   }
   // 续接：清掉 typing 标记，追加到尾 bubble
   const cleaned = last.typing ? { ...last, typing: undefined } : last;
   const updated = { ...cleaned, content: (cleaned.content || '') + delta };
+  // 续接情形同样盖戳 _loop（尾 bubble 尚未带 loop 时），与 applyToolCall 续接盖戳口径一致。
+  //   已有 _loop 不覆盖：续接可能是跨多帧的同一 bubble，保留首帧的 loop。
+  if (opts._loop && !updated._loop) updated._loop = opts._loop;
   const newBubbles = bubbles.map((b, i) => (i === bubbles.length - 1 ? updated : b));
   return { ...activeTurn, assistantBubbles: newBubbles };
 }
@@ -81,7 +87,10 @@ export function applyToolCall(activeTurn, toolCalls, opts = {}) {
     bubbles = [...bubbles, last];
   }
   const cleaned = last.typing ? { ...last, typing: undefined } : last;
+  // 盖戳 _loop：toolCalls 气泡是折叠判定的对象，带上当前 loop 后，
+  //   turn finalize（currentLoop 清空）与刷新重建都能凭 bubble._loop 继续折叠非 render 内容。
   const updated = { ...cleaned, toolCalls: [...(cleaned.toolCalls || []), ...tcs] };
+  if (opts._loop) updated._loop = opts._loop;
   const newBubbles = bubbles.map((b, i) => (i === bubbles.length - 1 ? updated : b));
   return { ...activeTurn, assistantBubbles: newBubbles };
 }

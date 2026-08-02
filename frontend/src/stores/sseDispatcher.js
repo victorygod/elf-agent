@@ -83,7 +83,7 @@ function _formatCompactError(data) {
 
 // ===== rAF batching（模块级，agent 级隔离）=====
 // token 高频，累积 pendingContent，每帧 flush 一次写 store。
-const _rafState = new Map(); // agentId → { rafId, pendingContent, pendingUpdate }
+const _rafState = new Map(); // agentId → { rafId, pendingContent, pendingLoop }
 
 function _patchChat(agentId, updates) {
   useAgentStore.getState()._patchChat(agentId, updates);
@@ -96,14 +96,22 @@ function _flushRaf(agentId) {
     cancelAnimationFrame(st.rafId);
     st.rafId = null;
   }
-  const at = st.pendingUpdate?.activeTurn;
   const delta = st.pendingContent;
+  const loop = st.pendingLoop;
   st.pendingContent = '';
-  st.pendingUpdate = null;
-  if (!at || !delta) return;
-  // content 续接走 client-core（sealed 契约决定续接/新建）
+  st.pendingLoop = null;
+  if (!delta) return;
+  // ↑ 关键：flush 时直接读 store 里【最新】activeTurn，不再用 token 到达时缓存的陈旧快照。
+  //   rAF 是异步帧，在「上一次 token」与「flush」之间活跃 activeTurn 可能被 tool_call/tool_result
+  //   改动（loop 边界尤甚）。若用陈旧快照 applyToken 后 _patchChat 整体覆盖，会把中间改动连同刚
+  //   累积的文本一起冲掉——render 流式不出来、刷新才有，即此覆盖丢失。读最新态续接则不会丢。
+  const at = useAgentStore.getState().chats.get(agentId)?.activeTurn;
+  if (!at) return;   // activeTurn 已被 finalize 收走（done 后）→ 丢弃残留 pending
+  // content 续接走 client-core（sealed 契约决定续接/新建）；带 _loop 给纯文本 bubble 盖戳，
+  //   防止后续 loop 切换后回退 currentLoop 误判（reviewer 文本被盖成 render 即此因）。
   const newAt = applyToken(at, delta, {
     newBubbleId: () => `local_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    _loop: loop,
   });
   _patchChat(agentId, { activeTurn: newAt });
 }
@@ -176,10 +184,13 @@ export function handleSSEEvent(agentId, event, data) {
       if (!at) return;
       // raf 批处理：pendingContent 累加 delta；flush 时调 applyToken 一次应用（写 store）。
       //   applyToken 内部按 shouldStartNewBubble（sealed 契约）决定续接尾 bubble / 新建。
+      //   同时缓存本批 token 的 loop（与后端 turn-stream-server 捕获口径一致：随 token），
+      //   flush 时盖戳到文本 bubble，避免后续 loop 切换后回退 currentLoop 误判。
+      //   注意：不缓存 activeTurn 快照——flush 时直接读 store 最新态，避免陈旧快照覆盖丢文本。
       let st = _rafState.get(agentId);
-      if (!st) { st = { rafId: null, pendingContent: '', pendingUpdate: null }; _rafState.set(agentId, st); }
+      if (!st) { st = { rafId: null, pendingContent: '', pendingLoop: null }; _rafState.set(agentId, st); }
       st.pendingContent += data.content;
-      st.pendingUpdate = { activeTurn: at };
+      if (data.loop) st.pendingLoop = data.loop;
       if (!st.rafId) {
         st.rafId = requestAnimationFrame(() => _flushRaf(agentId));
       }
@@ -187,13 +198,17 @@ export function handleSSEEvent(agentId, event, data) {
     }
 
     case 'tool_call': {
+      // 先把 rAF 里悬着的 token 落到 activeTurn：紧跟文本到达的 tool_call 若读到「陈旧 activeTurn」，
+      //   会把上一段文本与 tool 拆进两个 bubble（elf-018 reviewer「完成了」文本 + Skip 即此 race）。
+      _flushRaf(agentId);
       const chat2 = getState().chats.get(agentId);
       const at = chat2?.activeTurn;
       if (!at) return;
       const newAt = applyToolCall(at, data.tool_calls, {
         newBubbleId: () => `local_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        _loop: data.loop,   // 盖戳到 toolCalls 气泡：finalize/刷新后凭 bubble._loop 继续折叠
       });
-      _patchChat(agentId, { activeTurn: newAt });
+      _patchChat(agentId, { activeTurn: newAt, _currentLoop: data.loop });
       break;
     }
 
@@ -207,6 +222,7 @@ export function handleSSEEvent(agentId, event, data) {
     }
 
     case 'status':
+      if (data.loop) _patchChat(agentId, { _currentLoop: data.loop });
       break;
 
     case 'compact_start': {

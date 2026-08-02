@@ -251,161 +251,91 @@ export class Agent {
    * @param {object} [opts]
    * @param {boolean} [opts.skipAddUser=false] - 跳过开头 addUserMessage（RoomMiddleware 已在 preReceive 累积,防双份）。
    */
+  /** 效中间件 = agent-level + 场景插件（无状态就地展开）。 */
+  _effectiveMiddlewares() {
+    return [...this.middlewares, ...(this._scene ? [this._scene] : [])];
+  }
+
+  /**
+   * Reasoning 层 / Agent Loop（默认单 loop 实现；可被子类 override 编排多 loop workflow，复用下方段方法）。
+   *
+   * @param {*} message - 用户消息（string）。群聊 RoomMiddleware 已在 preReceive 累积过时传 null/undefined。
+   * @param {object} [opts]
+   * @param {boolean} [opts.skipAddUser=false] - 跳过开头 addUserMessage（RoomMiddleware 已在 preReceive 累积,防双份）。
+   */
   async reasoning(message, opts = {}) {
     const emit = opts.emit || (() => {});
     const logger = createLogger('agent', logFileName);
     this._aborted = false;
-    // 场景插件是 agent 属性（this._scene），效中间件就地展开 agent-level + 场景（无状态）。
-    //   所有 call site（receive 内联 flush 循环/reasoning 直调）自动一致——场景总在，无漏设/覆盖。
 
-    // 1. skill 清单注入（opt-in + 门控 + 热更新：每轮入口重扫，纯新增推增量、删除/改动推修正清单）。
-    //    位置：在用户输入之前（对齐 CC：isMeta 消息位于用户输入之前、历史之后）。
+    // 1. skill 清单注入 + preReason middleware + addUserMessage（入口一次）。
     this.skillLister?.inject();
-
-    // preReason 注入型 middleware 点：每轮入口顺序执行（addUserMessage 之前，位于上一轮 tool_result 与本轮 user 之间）。
-    await this.harness.runInjection([...this.middlewares, ...(this._scene ? [this._scene] : [])], 'preReason', this.messageManager);
-
-    // 2. 将消息追加到历史（RoomMiddleware 已在 preReceive 累积过则跳过,防双份）。
+    await this.harness.runInjection(this._effectiveMiddlewares(), 'preReason', this.messageManager);
     if (!opts.skipAddUser && message != null) {
       this.messageManager.addUserMessage(message);
     }
 
+    // 2. Agent Loop
     const maxIterations = this.config.get('maxIterations') ?? 5;
-    let iteration = 0;
+    const loopR = await this._runAgentLoop(emit, maxIterations);
+    if (loopR.aborted) return;
+    if (loopR.maxReached) this.abortFlow.emitError(emit, 'Max iterations reached');
 
-    // 2. Agent Loop（maxIterations ≤ 0 时无限迭代）
+    // 3. 兜底压缩 + done
+    const br = await this._runCompactOnce(emit, { bottom: true });
+    if (br.aborted) {
+      logger.info('用户中断了请求（兜底压缩期间）');
+      return;
+    }
+    this.abortFlow.emitDone(emit, { promptTokens: this.messageManager.estimateTokens() });
+  }
+
+  // ============ Reasoning 段方法（protected，供 reasoning 与子类多 loop workflow 复用） ============
+
+  /**
+   * 单个 Agent Loop：每轮 compact → assemble → LLM stream → tool-exec/pure-text，直到纯文本 break 或达 maxIterations。
+   * 不含入口 preReason/addUserMessage 与收尾兜底压缩（归 reasoning/调用方）。返回 { aborted, maxReached }。
+   */
+  async _runAgentLoop(emit, maxIterations) {
+    const logger = createLogger('agent', logFileName);
+    let iteration = 0;
     while (maxIterations <= 0 || iteration < maxIterations) {
       iteration++;
 
-      // a. 记忆压缩（循环内，对齐 Claude Code）：在构建 LLM 请求前先压，
-      //    保证本轮请求用短历史、不发爆。仅 AbortError 抛出走中断流程；其他失败已被断路器吃掉。
-      //    不再调用 getCompactHappened()，改由监听 compact 事件（与后台模式统一）。
-      const cr = await this.abortFlow.runAborable(
-        { reason: 'compact', onError: 'continue' },
-        (signal, ev) => this.messageManager.runCompact(this.model, {
-          signal,
-          onEvent: ev,
-          onDone: () => this.skillLister?.reinvokeAfterCompact(),
-        }),
-        emit,
-      );
+      // a. 记忆压缩（每轮顶部，对齐 CC）
+      const cr = await this._runCompactOnce(emit);
       if (cr.aborted) {
         logger.info('用户中断了请求（压缩期间）');
-        return;
+        return { aborted: true };
       }
-      // cr.errored=true 时续循环（不 return）——内部已 log，落 LLM 请求构建
 
-      // b. 构建 LLM 请求：base（mm 产）→ PromptAssembler 三点位拼装（prefix/suffix/roster/listing/群聊行为）
-      const messages = this.promptAssembler.assemble(this.messageManager.getBaseForLLM(), { agent: this, messageManager: this.messageManager });
-      const tools = this.toolManager.getAll();
-
-      // 记录发送给 LLM 的 messages
-      logger.info(`LLM Request [第${iteration}轮] messages: ${JSON.stringify(messages, null, 2)}`);
-
-      // b. 调用 LLM（流式）——chatStream 经 onChunk 推 chunk，reasoning onChunk 内转 emit
-      //   await onChunk 传递背压（chatStream 内 await onChunk；emit 主流写 SSE 未 drain 则等）
-      emit({ event: 'status', data: { state: 'thinking' } });
-
-      // LLM 流段经 runAborable（与 compact/tool-exec 段同构）：中断 → chatStream 抛 AbortError（带 partial）
-      //   → runAborable catch → finishAborted（含类型B 已生成内容保留）。非 abort 异常外层 catch 出 error+done。
-      // onChunk 纯传输：只 emit token，不累加（content/toolCalls 由 model 聚合、随 return 带出，对齐 LangChain on_llm_end）。
-      let fullContent = '';
-      let toolCallsResult = null;
-      // LLM 流段：不可恢复异常（API 错误）由 runAborable 原样上抛 → receive 顶层统一兜底 emit error+done。
-      // 中断 → runAborable catch → finishAborted（含类型B 内容保留）。本段不写 try/catch。
-      const r = await this.abortFlow.runAborable(
-        { reason: 'llm-stream' },
-        async (signal) => {
-          const res = await this.model.chatStream(messages, tools, {
-            signal,
-            onChunk: (chunk) => {
-              if (chunk.type === 'token') emit({ event: 'token', data: { content: chunk.content } });
-            },
-            onRetry: (info) => sendNotice(
-              { emit, runContext: this.runContext },
-              {
-                kind: info.final ? 'error' : 'retry',
-                agentId: this.runContext?.agentId,
-                memberName: this.runContext?.memberName,
-                attempt: info.attempt,
-                maxRetries: info.maxRetries,
-                error: String(info.error?.message || info.error || ''),
-                final: info.final === true,
-              },
-            ),
-          });
-          return res;   // { content, toolCalls } —— model 聚合
-        },
-        emit,
-      );
-      if (r.aborted) {
+      // b. 构建请求 + 调 LLM
+      const { messages, tools } = this._buildLLMRequest();
+      const lr = await this._runLLMStream(messages, tools, emit, { iteration });
+      if (lr.aborted) {
         logger.info('用户中断了请求（LLM 流期间）');
-        return;
-      }
-      fullContent = r.value.content;
-      toolCallsResult = r.value.toolCalls && r.value.toolCalls.length > 0 ? r.value.toolCalls : null;
-
-      // 记录 LLM 返回结果
-      if (toolCallsResult && toolCallsResult.length > 0) {
-        logger.info(`LLM Response [第${iteration}轮] tool_calls: ${JSON.stringify(toolCallsResult, null, 2)}`);
-      } else {
-        logger.info(`LLM Response [第${iteration}轮] content: ${fullContent}`);
+        return { aborted: true };
       }
 
       // c. 解析响应
-      if (toolCallsResult && toolCallsResult.length > 0) {
-        this.messageManager.addAssistantToolCalls(toolCallsResult);
-
-        // 发出 tool_call 事件（前端用于渲染工具调用标记）— 摘要由 toolManager.summarize 生成
-        // （从工具元数据读 callSummary；与 executeBatch 共享解析，调用参数容错逻辑单一来源）
-        emit({ event: 'tool_call', data: { tool_calls: this.toolManager.summarize(toolCallsResult) } });
-
-        // 工具执行：委托 toolManager.executeBatch（CC processQueue 语义——只读并发上限 10、写串行、
-        // status/tool_result 经 emit 推）。executeBatch 中断时抛 AbortError，由 abortFlow.runAborable
-        // 的 catch 接管收尾（与 compact 段同构）；signal 透传工具（杀 Bash 子进程），abort() abort _currentAbortController。
-        const r = await this.abortFlow.runAborable(
-          { reason: 'tool-exec' },
-          (signal, ev) => this.toolManager.executeBatch(toolCallsResult, {
-            signal,
-            emit: ev,
-            isAborted: () => this._aborted,
-            ctx: { agent: this },
-          }),
-          emit,
-        );
-        if (r.aborted) {
-          logger.info('用户中断了请求（工具执行后）');
-          return;
-        }
-
-        // 门控 shouldBreakAfterTools：任一 middleware 返回 true → break（OR 合并）。
-        if (await this.harness.dispatchGate([...this.middlewares, ...(this._scene ? [this._scene] : [])], 'shouldBreakAfterTools', null, toolCallsResult) === true) {
-          break;
-        }
-
+      if (lr.toolCalls) {
+        const te = await this._runToolExec(lr.toolCalls, emit);
+        if (te.aborted) return { aborted: true };
+        if (te.break) break;
         continue;
       } else {
-        this.messageManager.addAssistantMessage(fullContent);
-        // 门控 onAssistantContent：返回 {break:true} → break；{break:false, injectReminder} → 注入提醒 continue。
-        const r = await this.harness.dispatchGate([...this.middlewares, ...(this._scene ? [this._scene] : [])], 'onAssistantContent', null, fullContent);
-        if (r && r.injectReminder) {
-          this.messageManager.addMetaMessage(r.injectReminder, 'speak_reminder');
-          continue;   // 注入提醒，再来一轮给 LLM 调 Speak 的机会
-        }
-        break;   // 默认 / r.break / 已达阈值放弃 → 退出 loop
+        const pt = await this._handlePureText(lr.content, emit);
+        if (pt.injectReminder) continue;   // 注入提醒，再来一轮
+        break;                              // 纯文本回复 → 退出 loop
       }
     }
+    return { aborted: false, maxReached: maxIterations > 0 && iteration >= maxIterations };
+  }
 
-    if (maxIterations > 0 && iteration >= maxIterations) {
-      this.abortFlow.emitError(emit, 'Max iterations reached');
-    }
-
-    // d. 循环后兜底压缩：loop 退出（break 纯文本回复 / 达 maxIterations）后，
-    //    若最后一轮累积的消息超阈值而循环内没压到（如纯文本长回复 break 前顶部不超、回复后超），
-    //    在 done 前补压一次。compactIfNeeded 内部不超阈值即 return，无副作用。
-    // d. 循环后兜底压缩：可恢复异常 onError:'continue'（内部 log、续到 done）。
+  /** 记忆压缩段（compact / compact-bottom）。返回 { aborted }。 */
+  async _runCompactOnce(emit, { bottom = false } = {}) {
     const r = await this.abortFlow.runAborable(
-      { reason: 'compact-bottom', onError: 'continue' },
+      { reason: bottom ? 'compact-bottom' : 'compact', onError: 'continue' },
       (signal, ev) => this.messageManager.runCompact(this.model, {
         signal,
         onEvent: ev,
@@ -413,14 +343,93 @@ export class Agent {
       }),
       emit,
     );
-    if (r.aborted) {
-      logger.info('用户中断了请求（兜底压缩期间）');
-      return;
-    }
+    return { aborted: r.aborted };
+  }
 
-    // e. done
-    const tokenEstimate = this.messageManager.estimateTokens();
-    this.abortFlow.emitDone(emit, { promptTokens: tokenEstimate });
+  /** 构建 LLM 请求：base → PromptAssembler 拼装 + 工具列表。 */
+  _buildLLMRequest() {
+    const messages = this.promptAssembler.assemble(this.messageManager.getBaseForLLM(), { agent: this, messageManager: this.messageManager });
+    const tools = this.toolManager.getAll();
+    return { messages, tools };
+  }
+
+  /** LLM 流式调用段。返回 { aborted, content, toolCalls }。 */
+  async _runLLMStream(messages, tools, emit, { iteration } = {}) {
+    const logger = createLogger('agent', logFileName);
+    logger.info(`LLM Request [第${iteration || '?'}轮] messages: ${JSON.stringify(messages, null, 2)}`);
+    emit({ event: 'status', data: { state: 'thinking', loop: this._currentLoop } });
+
+    const r = await this.abortFlow.runAborable(
+      { reason: 'llm-stream' },
+      async (signal) => {
+        const res = await this.model.chatStream(messages, tools, {
+          signal,
+          onChunk: (chunk) => {
+            if (chunk.type === 'token') emit({ event: 'token', data: { content: chunk.content, loop: this._currentLoop } });
+          },
+          onRetry: (info) => sendNotice(
+            { emit, runContext: this.runContext },
+            {
+              kind: info.final ? 'error' : 'retry',
+              agentId: this.runContext?.agentId,
+              memberName: this.runContext?.memberName,
+              attempt: info.attempt,
+              maxRetries: info.maxRetries,
+              error: String(info.error?.message || info.error || ''),
+              final: info.final === true,
+            },
+          ),
+        });
+        return res;   // { content, toolCalls } —— model 聚合
+      },
+      emit,
+    );
+    if (r.aborted) return { aborted: true };
+    const content = r.value.content;
+    const toolCalls = r.value.toolCalls && r.value.toolCalls.length > 0 ? r.value.toolCalls : null;
+    if (toolCalls) {
+      logger.info(`LLM Response [第${iteration || '?'}轮] tool_calls: ${JSON.stringify(toolCalls, null, 2)}`);
+    } else {
+      logger.info(`LLM Response [第${iteration || '?'}轮] content: ${content}`);
+    }
+    return { aborted: false, content, toolCalls };
+  }
+
+  /** 工具执行段：addAssistantToolCalls + executeBatch + shouldBreakAfterTools 门控。返回 { aborted, break }。 */
+  async _runToolExec(toolCallsResult, emit) {
+    const logger = createLogger('agent', logFileName);
+    this.messageManager.addAssistantToolCalls(toolCallsResult);
+    emit({ event: 'tool_call', data: { tool_calls: this.toolManager.summarize(toolCallsResult), loop: this._currentLoop } });
+    const r = await this.abortFlow.runAborable(
+      { reason: 'tool-exec' },
+      (signal, ev) => this.toolManager.executeBatch(toolCallsResult, {
+        signal,
+        emit: ev,
+        isAborted: () => this._aborted,
+        ctx: { agent: this },
+      }),
+      emit,
+    );
+    if (r.aborted) {
+      logger.info('用户中断了请求（工具执行后）');
+      return { aborted: true };
+    }
+    const breakLoop = await this.harness.dispatchGate(this._effectiveMiddlewares(), 'shouldBreakAfterTools', null, toolCallsResult) === true;
+    return { aborted: false, break: breakLoop };
+  }
+
+  /**
+   * 纯文本响应处理：addAssistantMessage + onAssistantContent 门控。
+   * 返回 { break, injectReminder }：injectReminder 非空时调用方应 continue（注入提醒再跑一轮），否则 break。
+   */
+  async _handlePureText(fullContent, emit) {
+    this.messageManager.addAssistantMessage(fullContent);
+    const r = await this.harness.dispatchGate(this._effectiveMiddlewares(), 'onAssistantContent', null, fullContent);
+    if (r && r.injectReminder) {
+      this.messageManager.addMetaMessage(r.injectReminder, 'speak_reminder');
+      return { break: false, injectReminder: r.injectReminder };
+    }
+    return { break: true };
   }
 
   // ============================================================

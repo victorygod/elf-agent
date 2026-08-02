@@ -6,7 +6,6 @@
  *   profiles/agents/<id>/memory/checkpoints/<checkpointId>/
  *     meta.json          { id, createdAt, prompt, restoredPrompt }
  *     context.json       快照时刻整份
- *     history.jsonl      快照时刻整份（agent 记忆内的紧凑历史，已废用，保留兼容）
  *     room-history.jsonl 私聊房 SSE 历史快照（profiles/rooms/chat-<id>/history.jsonl）
  *     tool-results/      快照时刻整份（仅 Elf-002 等落盘 tool-result 的 agent 才有）
  *
@@ -62,7 +61,7 @@ function _rmDir(dir) {
 /**
  * 在用户发消息前打一个快照包（说话前状态）
  * 必须在写 user 进 history.jsonl 之前调用。
- * 记忆源 = profiles/agents/<id>/memory（context/history(tool-results）。
+ * 记忆源 = profiles/agents/<id>/memory（context/tool-results）。
  * @param {string} agentId
  * @param {string} prompt - 本轮用户消息全文（菜单标题 + 回填输入框）
  * @param {string} [roomHistoryPath] - 私聊房 history 路径（profiles/rooms/chat-<id>/history.jsonl），
@@ -72,35 +71,33 @@ function _rmDir(dir) {
 export function snapshotBeforeSend(agentId, prompt, roomHistoryPath) {
   const dataDir = _dataDir(agentId);
   const contextFile = path.join(dataDir, 'context.json');
-  const jsonlFile = path.join(dataDir, 'history.jsonl');
   const toolResultsDir = path.join(dataDir, 'tool-results');
 
-  // 【改动1】首次对话也打快照：如果文件不存在，先创建空文件再 snapshot
+  // 【改动1】首次对话也打快照：如果 context.json 不存在，先创建空文件再 snapshot
+  //   （agent 记忆的 history.jsonl 已废用——room 模式聊天内容落 profiles/rooms/<id>/history.jsonl，
+  //    memory 内不再有 history 这条腿，snapshot/rewind 不再触碰它。）
   const hasContext = fs.existsSync(contextFile);
-  const hasJsonl = fs.existsSync(jsonlFile);
   if (!hasContext) {
     fs.writeFileSync(contextFile, '[]', 'utf-8');
     logger.info(`[snapshot ${agentId}] 首次创建空 context.json`);
-  }
-  if (!hasJsonl) {
-    // history.jsonl 将在 gateway/room_routes.js 的 /say 路由中写入第一条 user 记录；
-    // 此处创建空文件仅确保 checkpoint 有对应的源文件。
-    fs.writeFileSync(jsonlFile, '', 'utf-8');
-    logger.info(`[snapshot ${agentId}] 首次创建空 history.jsonl`);
   }
 
   const beforeCount = listCheckpoints(agentId).length;
   const cpId = `cp_${Date.now()}_${_rand4()}`;
   const cpDir = path.join(_checkpointsDir(agentId), cpId);
   fs.mkdirSync(cpDir, { recursive: true });
-  logger.info(`[snapshot 开始 ${agentId}] 打快照前磁盘 ${beforeCount} 个；新建 ${cpId}；源存在 context=${hasContext} jsonl=${hasJsonl} tool-results=${fs.existsSync(toolResultsDir)}；prompt="${(prompt || '').slice(0, 30)}"`);
+  logger.info(`[snapshot 开始 ${agentId}] 打快照前磁盘 ${beforeCount} 个；新建 ${cpId}；源存在 context=${hasContext} tool-results=${fs.existsSync(toolResultsDir)}；prompt="${(prompt || '').slice(0, 30)}"`);
 
   try {
-    // 文件此时一定存在（首次对话已在上方创建空文件）
+    // context.json 此时一定存在（首次对话已在上方创建空文件）
     fs.copyFileSync(contextFile, path.join(cpDir, 'context.json'));
-    fs.copyFileSync(jsonlFile, path.join(cpDir, 'history.jsonl'));
     if (fs.existsSync(toolResultsDir) && fs.statSync(toolResultsDir).isDirectory()) {
       _copyDir(toolResultsDir, path.join(cpDir, 'tool-results'));
+    }
+    // 运行时文档（dataDir/runtime：lore/stats/outline/scene 等 DM 产物）一并快照，rewind 时整份覆盖回退
+    const runtimeDir = path.join(dataDir, 'runtime');
+    if (fs.existsSync(runtimeDir) && fs.statSync(runtimeDir).isDirectory()) {
+      _copyDir(runtimeDir, path.join(cpDir, 'runtime'));
     }
     // 私聊房 history（profiles/rooms/chat-<id>/history.jsonl）一并快照（单独命名 room-history.jsonl 与 memory history 区分）
     if (roomHistoryPath && fs.existsSync(roomHistoryPath)) {
@@ -230,20 +227,16 @@ export function rewindTo(agentId, checkpointId, roomHistoryPathOpt) {
     if (fs.existsSync(cpContext)) {
       fs.copyFileSync(cpContext, path.join(dataDir, 'context.json'));
     }
-    // 2. 整份覆盖 history.jsonl
-    const cpJsonl = path.join(targetCpDir, 'history.jsonl');
-    const liveJsonl = path.join(dataDir, 'history.jsonl');
-    if (fs.existsSync(cpJsonl)) {
-      fs.copyFileSync(cpJsonl, liveJsonl);
-    } else {
-      // 快照里没有 jsonl（首次对话前打的），清空当前 jsonl
-      if (fs.existsSync(liveJsonl)) fs.writeFileSync(liveJsonl, '', 'utf-8');
-    }
-    // 3. 整份覆盖 tool-results/（先清空再拷入，保证删掉快照后的产物）
+    // 2. 整份覆盖 tool-results/（先清空再拷入，保证删掉快照后的产物）
     const cpToolResults = path.join(targetCpDir, 'tool-results');
     const liveToolResults = path.join(dataDir, 'tool-results');
     if (fs.existsSync(liveToolResults)) _rmDir(liveToolResults);
     if (fs.existsSync(cpToolResults)) _copyDir(cpToolResults, liveToolResults);
+    // 3. 整份覆盖运行时文档 runtime/（lore/stats/outline/scene 等 DM 产物，rewind 整份回退）
+    const cpRuntime = path.join(targetCpDir, 'runtime');
+    const liveRuntime = path.join(dataDir, 'runtime');
+    if (fs.existsSync(liveRuntime)) _rmDir(liveRuntime);
+    if (fs.existsSync(cpRuntime)) _copyDir(cpRuntime, liveRuntime);
     // 4. 整份覆盖私聊房 room-history.jsonl
     //    快照里有 → 直接覆盖；快照里无（agent-side mid-turn checkpoint）→ 从 context.json 重建
     const cpRoomHistory = path.join(targetCpDir, 'room-history.jsonl');
@@ -281,7 +274,7 @@ export function rewindTo(agentId, checkpointId, roomHistoryPathOpt) {
       }
     }
 
-    // 4. 删掉 target 之后（不含 target）的快照包
+    // 5. 删掉 target 之后（不含 target）的快照包
     //    保留 target 本身，这样用户可以重复回退到同一 checkpoint。
     const deletedIds = [];
     const keptIds = [];

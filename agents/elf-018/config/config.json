@@ -1,0 +1,50 @@
+{
+  "agentId": "elf-018",
+  "name": "DND DM",
+  "port": 8098,
+  "provider": "llm",
+  "systemPrompt": {
+    "type": "path",
+    "content": "system_prompt.md"
+  },
+  "loop_outline_prompt": {
+    "type": "path",
+    "content": "loop_outline_prompt.md"
+  },
+  "loop_reviewer_prompt": {
+    "type": "path",
+    "content": "loop_reviewer_prompt.md"
+  },
+  "loop_render_prompt": {
+    "type": "path",
+    "content": "loop_render_prompt.md"
+  },
+  "renderExamples": {
+    "type": "path",
+    "content": "render_examples.md"
+  },
+  "compactPrompt": {
+    "type": "path",
+    "content": "compact_prompt.md"
+  },
+  "compactSystemPrompt": {
+    "type": "path",
+    "content": "compact_system_prompt.md"
+  },
+  "compactMode": "async",
+  "memoryTokenLimit": 40000,
+  "maxIterations": 30,
+  "messageManagerClass": "dnd_message_manager",
+  "interaction": {
+    "strategy": "observe"
+  },
+  "tools": [
+    "Read",
+    "Grep",
+    "Glob",
+    "Write",
+    "Edit",
+    "Roll"
+  ],
+  "avatar": "avatar.webp"
+}

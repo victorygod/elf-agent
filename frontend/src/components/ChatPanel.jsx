@@ -23,11 +23,38 @@ function PrivateToast() {
 /**
  * 渲染一个 assistant bubble（Turn 内的一条记录）
  */
-function AssistantBubble({ bubble, isStreaming, isLastInTurn, onToggleTime, showTime }) {
+const LOOP_LABELS = { main: '大纲', reviewer: '审校', render: '渲染' };
+
+function AssistantBubble({ bubble, isStreaming, isLastInTurn, onToggleTime, showTime, currentLoop }) {
+  const [expanded, setExpanded] = useState(false);
   const handleBubbleClick = useCallback(() => {
     if (window.getSelection()?.toString()) return;
     if (onToggleTime) onToggleTime(bubble.id);
   }, [bubble.id, onToggleTime]);
+
+  // 非 render loop（main/reviewer）折叠为一行，展开看完整
+  const loop = bubble._loop || (bubble.toolCalls?.length ? currentLoop : null);
+  if (loop && loop !== 'render') {
+    const label = LOOP_LABELS[loop] || loop;
+    const summary = bubble.toolCalls?.length
+      ? bubble.toolCalls.map((tc) => tc.name || tc.function?.name).join(', ')
+      : (bubble.content || '').slice(0, 60) || '执行中…';
+    return (
+      <div className={styles.bubble} style={{ opacity: 0.55 }}>
+        <div onClick={() => setExpanded(v => !v)} style={{ cursor: 'pointer', fontSize: '12px', color: '#888', display: 'flex', alignItems: 'center' }}>
+          <span style={{ marginRight: '4px' }}>{expanded ? '▼' : '▶'}</span>
+          <strong style={{ marginRight: '4px' }}>{label}</strong>
+          <span>{summary}</span>
+        </div>
+        {expanded && (
+          <div style={{ marginTop: '4px', padding: '8px', background: '#f5f5f5', borderRadius: '4px', fontSize: '13px' }}>
+            {bubble.toolCalls?.map((tc, i) => <ToolCallBadge key={i} toolCall={tc} />)}
+            {bubble.content && <MarkdownContent content={bubble.content} />}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className={styles.bubble} onClick={handleBubbleClick}>
@@ -60,7 +87,7 @@ function AssistantBubble({ bubble, isStreaming, isLastInTurn, onToggleTime, show
  * 渲染一个 Turn（用户消息 + Agent 回复气泡组）
  * React.memo：已完成的 turn（isStreamingActiveTurn=false）不会因 activeTurn 变化而重渲染
  */
-const TurnView = React.memo(function TurnView({ turn, agentId, agent, isStreamingActiveTurn, showTimes, toggleTime, userAvatar }) {
+const TurnView = React.memo(function TurnView({ turn, agentId, agent, isStreamingActiveTurn, showTimes, toggleTime, userAvatar, currentLoop }) {
   const { userMessage, assistantBubbles } = turn;
   const userShowTime = userMessage && showTimes.has(userMessage.id);
   const assistantShowTime = assistantBubbles[0] && showTimes.has(assistantBubbles[0].id);
@@ -110,6 +137,7 @@ const TurnView = React.memo(function TurnView({ turn, agentId, agent, isStreamin
                     isLastInTurn={bi === assistantBubbles.length - 1}
                     onToggleTime={toggleTime}
                     showTime={showTimes.has(bubble.id)}
+                    currentLoop={currentLoop}
                   />
                 </React.Fragment>
               ))}
@@ -129,6 +157,7 @@ export default function ChatPanel({ agentId }) {
   const draft = useAgentStore(useCallback(state => state.chats.get(agentId)?.draft ?? '', [agentId]));
   const _savedScrollTop = useAgentStore(useCallback(state => state.chats.get(agentId)?._savedScrollTop ?? 0, [agentId]));
   const isActive = useAgentStore(useCallback(state => state.chats.get(agentId)?._isActive ?? false, [agentId]));
+  const currentLoop = useAgentStore(useCallback(state => state.chats.get(agentId)?._currentLoop ?? null, [agentId]));
 
   const agent = useAgentStore(useCallback(state => state.getAgent(agentId), [agentId]));
   const loadHistory = useAgentStore(s => s.loadHistory);
@@ -533,6 +562,7 @@ export default function ChatPanel({ agentId }) {
                 showTimes={showTimes}
                 toggleTime={toggleTime}
                 userAvatar={userAvatar}
+                currentLoop={null}
               />
             ))}
             {/* 当前流式回合 */}
@@ -545,6 +575,7 @@ export default function ChatPanel({ agentId }) {
                 showTimes={showTimes}
                 toggleTime={toggleTime}
                 userAvatar={userAvatar}
+                currentLoop={currentLoop}
               />
             )}
           </>

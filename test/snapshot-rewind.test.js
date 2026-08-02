@@ -86,7 +86,7 @@ function readJson(filePath) {
 
 describe('snapshotBeforeSend — 首次对话 checkpoint', () => {
 
-  it('首次调用时应自动创建空 context.json 和 history.jsonl 并成功打快照', () => {
+  it('首次调用时应自动创建空 context.json 并成功打快照', () => {
     const aid = agentId('first');
     const dataDir = ensureAgentDir(aid);
 
@@ -100,16 +100,14 @@ describe('snapshotBeforeSend — 首次对话 checkpoint', () => {
     // checkpoint 内文件应存在
     const cpDir = path.join(checkpointsDir, cpId);
     assert.ok(fs.existsSync(path.join(cpDir, 'context.json')), '应有 context.json');
-    assert.ok(fs.existsSync(path.join(cpDir, 'history.jsonl')), '应有 history.jsonl');
     assert.ok(fs.existsSync(path.join(cpDir, 'meta.json')), '应有 meta.json');
+    // agent 记忆的 history.jsonl 已废用：checkpoint 不再包含它（聊天内容落 rooms/<id>/history.jsonl）
+    assert.ok(!fs.existsSync(path.join(cpDir, 'history.jsonl')), '不应再有 history.jsonl（已废）');
 
-    // context.json 和 history.jsonl 应为空（首次对话，无消息）
+    // context.json 应为空（首次对话，无消息）
     const ctx = readJson(path.join(cpDir, 'context.json'));
     assert.ok(Array.isArray(ctx), 'context.json 应为数组');
     assert.equal(ctx.length, 0, '首次 checkpoint 的 context.json 应为空数组');
-
-    const history = readFileOrNull(path.join(cpDir, 'history.jsonl'));
-    assert.equal(history, '', '首次 checkpoint 的 history.jsonl 应为空');
 
     // meta.json 应包含 prompt 信息
     const meta = readJson(path.join(cpDir, 'meta.json'));
@@ -155,9 +153,8 @@ describe('snapshotBeforeSend — 首次对话 checkpoint', () => {
     const aid = agentId('non-first');
     const dataDir = ensureAgentDir(aid);
 
-    // 预先创建 context.json 和 history.jsonl
+    // 预先创建 context.json
     fs.writeFileSync(path.join(dataDir, 'context.json'), JSON.stringify([{ id: 'm1', role: 'user', content: 'pre' }]), 'utf-8');
-    fs.writeFileSync(path.join(dataDir, 'history.jsonl'), JSON.stringify({ id: 'm1', role: 'user', content: 'pre', seq: 1 }) + '\n', 'utf-8');
 
     const cpId = snapshotBeforeSend(aid, '第一条');
     assert.ok(cpId, '应返回 checkpointId');
@@ -186,7 +183,6 @@ describe('rewindTo — 删除逻辑（保留目标 checkpoint）', () => {
     // 模拟已有若干 checkpoint
     // 先写入 context.json 使后续 snapshotBeforeSend 不会创建空文件
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
-    fs.writeFileSync(path.join(dataDir, 'history.jsonl'), '', 'utf-8');
 
     const cp1 = snapshotBeforeSend(aid, '第一条');
 
@@ -227,7 +223,6 @@ describe('rewindTo — 删除逻辑（保留目标 checkpoint）', () => {
     const dataDir = dataDirFor(aid);
 
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
-    fs.writeFileSync(path.join(dataDir, 'history.jsonl'), '', 'utf-8');
 
     const cp1 = snapshotBeforeSend(aid, '第一条');
 
@@ -261,7 +256,6 @@ describe('rewindTo — 删除逻辑（保留目标 checkpoint）', () => {
     const dataDir = dataDirFor(aid);
 
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
-    fs.writeFileSync(path.join(dataDir, 'history.jsonl'), '', 'utf-8');
 
     snapshotBeforeSend(aid, '第一条');
 
@@ -304,9 +298,6 @@ describe('rewindTo — room-history.jsonl 重建', () => {
     // 设置 agent context
     fs.writeFileSync(path.join(dataDir, 'context.json'),
       JSON.stringify([{ id: 'm1', role: 'user', content: '旧消息' }]), 'utf-8');
-    fs.writeFileSync(path.join(dataDir, 'history.jsonl'),
-      JSON.stringify({ id: 'm1', seq: 1, role: 'user', content: '旧消息', ts: new Date().toISOString() }) + '\n',
-      'utf-8');
 
     const cpId = snapshotBeforeSend(aid, '新消息');
 
@@ -341,7 +332,6 @@ describe('listCheckpoints & latestCheckpointId', () => {
     const dataDir = dataDirFor(aid);
 
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
-    fs.writeFileSync(path.join(dataDir, 'history.jsonl'), '', 'utf-8');
 
     const cp1 = snapshotBeforeSend(aid, '第一条');
     // 等一小会儿确保时间戳不同
@@ -363,7 +353,6 @@ describe('listCheckpoints & latestCheckpointId', () => {
     const dataDir = dataDirFor(aid);
 
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
-    fs.writeFileSync(path.join(dataDir, 'history.jsonl'), '', 'utf-8');
 
     snapshotBeforeSend(aid, '第一条');
 
@@ -390,7 +379,6 @@ describe('listCheckpoints & latestCheckpointId', () => {
     const dataDir = dataDirFor(aid);
 
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
-    fs.writeFileSync(path.join(dataDir, 'history.jsonl'), '', 'utf-8');
 
     const cp1 = snapshotBeforeSend(aid, '第一条');
 
@@ -425,7 +413,6 @@ describe('snapshotBeforeSend — 滑窗淘汰', () => {
     const dataDir = dataDirFor(aid);
 
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
-    fs.writeFileSync(path.join(dataDir, 'history.jsonl'), '', 'utf-8');
 
     const cpIds = [];
     for (let i = 0; i < 12; i++) {

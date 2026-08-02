@@ -14,11 +14,22 @@ import { loadGatewayConfig, saveGatewayConfig } from './config.js';
 import { handleAvatarUpload } from './avatar.js';
 import { registerRoomRoutes } from './room_routes.js';
 import { createAgentFromTemplate } from './agent_scaffold.js';
+import { agentMemory } from '../shared/profiles_paths.js';
+import { buildMetadata } from '../shared/agents/elf-018/buildMetadata.js';
 import {
   listSkills, getSkillDetail, deleteSkill, installSkill, browseDirs, skillRoot,
 } from './skill_store.js';
 
 const logger = createLogger('gateway-server', 'gateway.log');
+
+/** 解析 md frontmatter → { name, description }，无 frontmatter 返回 null。 */
+function _parseFm(txt) {
+  const fm = txt.match(/^---\n([\s\S]*?)\n---/);
+  if (!fm) return null;
+  const name = fm[1].match(/^name:\s*(.+)$/m)?.[1]?.trim();
+  const desc = fm[1].match(/^description:\s*(.+)$/m)?.[1]?.trim();
+  return name ? { name, description: desc || '' } : null;
+}
 
 /**
  * 创建 Gateway Express 应用
@@ -134,6 +145,61 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
       res.json(raw);
     } catch (err) {
       res.status(500).json({ error: `Failed to read config: ${err.message}` });
+    }
+  });
+
+  // GET /agents/:id/game-state — DM agent 游戏状态（主角全文 + lore 条目含全文 + metadata）
+  app.get('/agents/:id/game-state', checkAgentExists, (req, res) => {
+    const loreDir = path.join(agentMemory(req.params.id), 'runtime', 'lore');
+    const readFull = (p) => { try { return fs.readFileSync(p, 'utf-8'); } catch { return ''; } };
+    const scan = (sub, exclude) => {
+      const dir = path.join(loreDir, sub);
+      const out = [];
+      try {
+        for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.md') && !x.endsWith('.prev.md') && (!exclude || !exclude.includes(x)))) {
+          const txt = readFull(path.join(dir, f));
+          const e = _parseFm(txt);
+          if (e) out.push({ ...e, content: txt, path: path.join(dir, f) });
+        }
+      } catch {}
+      return out;
+    };
+    // 主角单独读全文（固定 lore/user_profile.md）
+    const protPath = path.join(loreDir, 'user_profile.md');
+    const protTxt = readFull(protPath);
+    const protagonist = protTxt ? { ...(_parseFm(protTxt) || {}), content: protTxt, path: protPath } : null;
+    // characters 只含 NPC（主角已在 lore 根）
+    const characters = scan('characters');
+    const locations = scan('locations');
+    const quests = scan('quests');
+    const items = scan('items');
+    const skills = scan('skills');
+    const state = (() => { const p = path.join(loreDir, 'state.md'); const t = readFull(p); const e = _parseFm(t); return e ? { ...e, content: t, path: p } : null; })();
+
+    // metadata 与 agent.js _buildMetadata() 共用同一实现（shared/agents/elf-018/buildMetadata.js）
+    const metadata = buildMetadata(loreDir);
+
+    res.json({ protagonist, characters, locations, quests, items, skills, state, metadata });
+  });
+
+  // PUT /agents/:id/protagonist-name — 改主角名（写 runtime/lore/user_profile.md 的 frontmatter name + 正文标题）
+  app.put('/agents/:id/protagonist-name', checkAgentExists, (req, res) => {
+    const name = (req.body?.name || '').toString().trim();
+    if (!name) return res.status(400).json({ error: '名字不能为空' });
+    const protPath = path.join(agentMemory(req.params.id), 'runtime', 'lore', 'user_profile.md');
+    try {
+      if (!fs.existsSync(protPath)) return res.status(404).json({ error: '主角面板不存在' });
+      let txt = fs.readFileSync(protPath, 'utf-8');
+      const fmMatch = txt.match(/^---\n[\s\S]*?\n---/);
+      if (fmMatch) {
+        const fm = fmMatch[0].replace(/^name:.*$/m, `name: ${name}`);
+        txt = fm + txt.slice(fmMatch[0].length);
+      }
+      txt = txt.replace(/^(# ).+$/m, `$1${name}`);
+      fs.writeFileSync(protPath, txt, 'utf-8');
+      res.json({ ok: true, name });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
     }
   });
 

@@ -3,8 +3,13 @@ import * as api from '../api/index.js';
 import useAgentStore from '../stores/agentStore';
 import styles from './ConfigField.module.css';
 
-export default function ConfigField({ field, agentId, value, currentAvatar, options, onChange }) {
+export default function ConfigField({ field, agentId, value, currentAvatar, options, onChange, onCommit }) {
   const fileRef = useRef(null);
+  // 头像预览 cache-buster：订阅全局 _avatarBuster（仅在 bustAvatars 即真上传后变），
+  // 避免在配置抽屉里敲字（formData 重渲染）时用 Date.now() 导致头像预览被反复重拉。
+  const avatarBuster = useAgentStore(s => s._avatarBuster);
+  // 文本类字段失焦时提交保存；checkbox/multiselect 变更即提交。未传 onCommit 时退化为 onChange。
+  const commit = onCommit || onChange;
 
   const handleFileChange = async (e, fieldName) => {
     const file = e.target.files?.[0];
@@ -23,6 +28,7 @@ export default function ConfigField({ field, agentId, value, currentAvatar, opti
           onChange?.(filename);
         }
         useAgentStore.getState().refreshAgents();
+        useAgentStore.getState().bustAvatars();
       } catch (err) {
         alert('上传失败: ' + err.message);
       }
@@ -34,7 +40,7 @@ export default function ConfigField({ field, agentId, value, currentAvatar, opti
 
   if (type === 'avatar') {
     const avatarSrc = currentAvatar
-      ? `/agents/${agentId}/config/${currentAvatar}?t=${Date.now()}`
+      ? `/agents/${agentId}/config/${currentAvatar}?v=${avatarBuster || 0}`
       : null;
 
     return (
@@ -81,6 +87,7 @@ export default function ConfigField({ field, agentId, value, currentAvatar, opti
                         if (i >= 0) next.splice(i, 1);
                       }
                       onChange(next);
+                      commit(next);
                     }}
                   />
                   {opt}
@@ -99,18 +106,41 @@ export default function ConfigField({ field, agentId, value, currentAvatar, opti
           </div>
         </div>
       ) : type === 'textarea' ? (
-        <textarea data-key={key} value={value} onChange={(e) => onChange(e.target.value)} />
+        <textarea
+          data-key={key}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={() => commit(value)}
+        />
       ) : type === 'checkbox' ? (
         <label className={styles.checkboxLabel}>
-          <input type="checkbox" data-key={key} checked={!!value} onChange={(e) => onChange(e.target.checked)} />
+          <input type="checkbox" data-key={key} checked={!!value} onChange={(e) => { onChange(e.target.checked); commit(e.target.checked); }} />
           {label}
         </label>
       ) : type === 'password' ? (
-        <input type="password" data-key={key} placeholder={value ? '*** (未修改)' : ''} onChange={(e) => onChange(e.target.value)} />
+        <input
+          type="password"
+          data-key={key}
+          placeholder={value ? '*** (未修改)' : ''}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={() => commit(value)}
+        />
       ) : type === 'number' ? (
-        <input type="number" data-key={key} value={value} onChange={(e) => onChange(Number(e.target.value))} />
+        <input
+          type="number"
+          data-key={key}
+          value={value}
+          onChange={(e) => onChange(Number(e.target.value))}
+          onBlur={() => commit(value)}
+        />
       ) : (
-        <input type="text" data-key={key} value={value} onChange={(e) => onChange(e.target.value)} />
+        <input
+          type="text"
+          data-key={key}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={() => commit(value)}
+        />
       )}
       {hint && type !== 'checkbox' && <div className={styles.hint}>{hint}</div>}
     </div>

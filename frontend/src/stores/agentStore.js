@@ -83,7 +83,9 @@ const useAgentStore = create((set, get) => ({
     try {
       const agents = await api.rediscoverAgents();
       if (agents) {
-        set({ agents, _avatarBuster: Date.now() });
+        // 不在此 bump _avatarBuster：autosave/start/stop 刷列表时不应触发全量头像重拉。
+        // 头像 cache-buster 仅由 bustAvatars() 在真正上传头像时递增。
+        set({ agents });
       } else {
         await get().loadAgents();
       }
@@ -91,6 +93,10 @@ const useAgentStore = create((set, get) => ({
       await get().loadAgents();
     }
   },
+
+  // 头像 cache-buster：仅在 agent 头像上传(ConfigField)/用户头像保存(Sidebar)成功后调用，
+  // 强制浏览器重拉新图（头像文件名固定 avatar.webp/user_avatar.webp，覆盖写须靠 ?v= 破缓存）。
+  bustAvatars: () => set({ _avatarBuster: Date.now() }),
 
   selectAgent: async (agentId) => {
     const { activeAgentId, chats } = get();

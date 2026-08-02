@@ -4,6 +4,7 @@ import useConfig from '../hooks/useConfig';
 import * as api from '../api/index.js';
 import ConfigField from './ConfigField';
 import SkillManager from './SkillManager';
+import GameStatePanel from './GameStatePanel';
 import ConfirmModal from './ConfirmModal';
 import styles from './ConfigDrawer.module.css';
 
@@ -14,9 +15,9 @@ export default function ConfigDrawer({ onClose }) {
   const {
     config, layout, formData, activeTab,
     isSaving, isStarting, isStopping,
-    setActiveTab, handleFieldChange,
+    setActiveTab, handleFieldChange, handleFieldCommit,
     handleSave, handleStart, handleStop,
-    handleClearAll,
+    handleClearAll, closeConfigStore,
   } = useConfig();
 
   // 可用工具列表（用于 tools 字段的多选）
@@ -76,6 +77,7 @@ export default function ConfigDrawer({ onClose }) {
               currentAvatar={field.key === 'avatar' ? (agent?.avatar || null) : null}
               options={field.options ?? (field.type === 'multiselect' ? availableTools : null)}
               onChange={(val) => handleFieldChange(field.key, val)}
+              onCommit={(val) => handleFieldCommit(field.key, val)}
             />
           );
           return (
@@ -85,6 +87,8 @@ export default function ConfigDrawer({ onClose }) {
           >
             {tab.type === 'skill-manager' ? (
               <SkillManager agentId={configAgentId} />
+            ) : tab.type === 'game-state' ? (
+              <GameStatePanel agentId={configAgentId} />
             ) : (
               <>
                 {editableFields.map(renderField)}
@@ -106,10 +110,6 @@ export default function ConfigDrawer({ onClose }) {
       <div className={styles.footer}>
         <button className={`${styles.btn} ${styles.btnWarning} ${styles.btnSm}`} onClick={() => setClearConfirmOpen(true)}>清空聊天与记忆</button>
         <span style={{ flex: 1 }} />
-        <button className={styles.btn} onClick={onClose}>取消</button>
-        <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleSave} disabled={isSaving}>
-          {isSaving ? '保存中...' : '保存'}
-        </button>
       </div>
 
       <ConfirmModal

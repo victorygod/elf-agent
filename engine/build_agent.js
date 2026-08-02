@@ -31,7 +31,7 @@ export function setBuildAgentLogFileName(name) { logFileName = name; }
  * @param {string} [opts.dataDir] - 数据目录，缺省 config.configDir/..
  * @returns {Promise<Agent>}
  */
-export async function buildAgentFromConfig({ messageManager, runContext = null, model, toolManager, extraMiddleware = [], dataDir, config } = {}) {
+export async function buildAgentFromConfig({ messageManager, runContext = null, model, toolManager, extraMiddleware = [], dataDir, config, agentClass = null } = {}) {
   const logger = createLogger('agent-init', logFileName);
   if (!messageManager) throw new Error('buildAgentFromConfig: messageManager 必填（create_agent.js 显式 new 后传入）');
   if (!config) throw new Error('buildAgentFromConfig: config 必填（由 create_agent.js new 后传入，全链路单实例）');
@@ -64,7 +64,7 @@ export async function buildAgentFromConfig({ messageManager, runContext = null, 
   if (messageManager.dataDir == null) messageManager.dataDir = mmDataDir;
 
   // 4. new Agent（_eventSink 桥接/harness 在 constructor 内接线）
-  const agent = new Agent({ config, model, toolManager, messageManager, middleware: [], runContext });
+  const agent = new (agentClass || Agent)({ config, model, toolManager, messageManager, middleware: [], runContext });
 
   // 5. agent-level 固有定制（非场景）：skillLister（skills=true）+ detectChangedFiles middleware
   if (config.get('skills') === true) {
