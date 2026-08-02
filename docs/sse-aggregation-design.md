@@ -94,14 +94,14 @@ gateway 是 node `http` 模块起的 **HTTP/1.1** 服务(`curl -w "%{http_versio
 
 | # | 类型 | 前端入口 | 后端路由 | 传输 | 生命周期 |
 |---|---|---|---|---|---|
-| 1 | 私聊 | `useAgentSubscriptions.js:34` → `api/index.js:129-166` | `GET /rooms/chat-<id>/subscribe` | **fetch + getReader**(fetch-SSE,带 AbortController,自解析 `event:`/`data:`) | App 顶层常驻,每个 running agent 一条,切 tab 不断,2s 重连 |
+| 1 | 私聊 | `useAgentSubscriptions.js:34` → `api/index.js:143-184` | `GET /rooms/chat-<id>/subscribe` | **fetch + getReader**(fetch-SSE,带 AbortController,自解析 `event:`/`data:`) | App 顶层常驻,每个 running agent 一条,切 tab 不断,2s 重连 |
 | 2 | 群聊 | `useRoomChat.js:27` | `GET /rooms/<rid>/subscribe` | 原生 `EventSource`(浏览器自重连) | 随 `RoomChatPanel` 挂载,切房断旧连新 |
 
 后端是**同一条路由** `GET /rooms/:rid/subscribe`(`gateway/room_routes.js:201`),按 `rid.startsWith('chat-')` 分流:
 - 私聊 → `subscribePrivateRoom`(`private_room_stream.js:69`,TurnStreamServer 单例 + 模块级 `_sseSubs:Map<roomId, Set<res>>`)。
 - 群聊 → `RoomManager.getBroadcaster(rid).add(res, snapshot)`(`room_bus.js` RoomBroadcaster,per-room)。
 
-### 2.2 私聊 SSE 事件全集(`sseDispatcher.js:128-334` handleSSEEvent)
+### 2.2 私聊 SSE 事件全集(`sseDispatcher.js:136-351` handleSSEEvent)
 
 13 种,按 agentId(来自订阅 URL)路由写 `agentStore`:
 
@@ -238,7 +238,7 @@ onEvent(event, data) {
 
 ### 4.6 传输层:统一到 fetch-SSE
 
-- 沿用 `api/index.js:129-166` 的 fetch-SSE 骨架(带 AbortController、自解析)。
+- 沿用 `api/index.js:143-184` 的 fetch-SSE 骨架(带 AbortController、自解析)。
 - **群聊放弃 `EventSource`**:无法主动 abort、不能 POST body、切房需重建连接。统一到 fetch-SSE 后,切群聊房纯前端换渲染目标,连接不动(见 §4.2)。
 - 重连策略沿用私聊现有 2s 退避 + 后续 snapshot 全量对齐。
 
@@ -269,11 +269,11 @@ onEvent(event, data) {
 
 **现状缺失**:`RoomChatPanel` 只有滚到底,无滚到顶加载;群聊 history 一次性拿最新 50 条(`room_routes.js` /history 群聊分支),消息多了看不到更早的。
 
-**后端已就绪**:`room_bus.getRecent(limit, beforeId, afterId)` 已支持 `beforeId` 向前翻 + `hasMore`,与私聊 `chat_history.getRecent` 对齐;前端 api 层 `getRoomHistory(roomId, limit, beforeId)`(`api/index.js:372`)也已存在;`roomStore` 预留了 `loadingHistory` 字段(roomStore.js:173)。**只差 store 补 hasMore + RoomChatPanel 接 scroll 监听**。
+**后端已就绪**:`room_bus.getRecent(limit, beforeId, afterId)` 已支持 `beforeId` 向前翻 + `hasMore`,与私聊 `chat_history.getRecent` 对齐;前端 api 层 `getRoomHistory(roomId, limit, beforeId)`(`api/index.js:386`)也已存在;`roomStore` 预留了 `loadingHistory` 字段(roomStore.js:173)。**只差 store 补 hasMore + RoomChatPanel 接 scroll 监听**。
 
 **改动**:
 - `roomStore` chat 对象补 `hasMore: false` 字段(与私聊对齐)。
-- `RoomChatPanel` 加 scroll 顶监听 + `loadMore`:- `scrollTop <= 阈值` → `getRoomHistory(roomId, limit, messages[0].id)`(`api/index.js:372`)→ prepend 到 messages、更新 hasMore。
+- `RoomChatPanel` 加 scroll 顶监听 + `loadMore`:- `scrollTop <= 阈值` → `getRoomHistory(roomId, limit, messages[0].id)`(`api/index.js:386`)→ prepend 到 messages、更新 hasMore。
 - snapshot 时设 `hasMore`(initFromSnapshot 接收 hasMore,或订阅响应里带)。
 - 这与私聊 `ChatPanel.handleScroll`/`loadMoreHistory` 同构,可基本复用思路。
 
@@ -315,7 +315,7 @@ onEvent(event, data) {
 | 文件 | 改动 |
 |---|---|
 | **新增** `frontend/src/hooks/useAggregatedSubscription.js` | App 顶层调一次,fetch-SSE 连 `/subscribe`,onEvent 按 `roomType` 分发到 sseDispatcher / roomDispatch;2s 重连 |
-| `frontend/src/api/index.js` | 新增 `subscribeAggregate({onEvent, signal})`,复用 129-166 的 fetch-SSE 解析骨架。`addRoom`/`dropRoom` 为二期,暂不加 |
+| `frontend/src/api/index.js` | 新增 `subscribeAggregate({onEvent, signal})`,复用 143-184 的 fetch-SSE 解析骨架。`addRoom`/`dropRoom` 为二期,暂不加 |
 | `frontend/src/hooks/useAgentSubscriptions.js` | 删除(或保留空壳),私聊订阅由聚合订阅接管 |
 | `frontend/src/hooks/useRoomChat.js` | 去掉 `EventSource`;事件处理逻辑抽出为纯 `roomDispatch(roomId, event, data)` 供聚合 dispatcher 复用。切房纯前端换激活 roomId,不动 SSE |
 | `frontend/src/components/RoomChatPanel.jsx` | 加 scroll 顶监听 + `loadMore`(滚到顶 → `getRoomHistory(roomId,{before})` prepend、更新 hasMore),与私聊 `ChatPanel.handleScroll` 同构(§4.9) |
@@ -367,7 +367,7 @@ onEvent(event, data) {
 
 ## 附:关键文件索引
 
-- 前端私聊 SSE:`frontend/src/hooks/useAgentSubscriptions.js`、`frontend/src/api/index.js:129-166`、`frontend/src/stores/sseDispatcher.js`
+- 前端私聊 SSE:`frontend/src/hooks/useAgentSubscriptions.js`、`frontend/src/api/index.js:143-184`、`frontend/src/stores/sseDispatcher.js`
 - 前端群聊 SSE:`frontend/src/hooks/useRoomChat.js`、`frontend/src/components/RoomChatPanel.jsx:72`
 - 后端统一路由:`gateway/room_routes.js:200-285`
 - 后端私聊流:`gateway/private_room_stream.js`、`gateway/turn-stream-server.js`
