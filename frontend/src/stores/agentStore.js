@@ -23,7 +23,9 @@ function historyToTurns(messages) {
   let current = null;
   for (const msg of messages) {
     if (msg.role === 'user') {
-      current = { id: msg.id, userMessage: msg, assistantBubbles: [] };
+      // turn.id 对齐后端 messagesToTurns(`turn_${msg.id}`),保证 loadHistory(REST)与
+      //   snapshot(SSE)的 turn 关键 id 一致——snapshot merge 按此去重,否则会翻倍。
+      current = { id: `turn_${msg.id}`, userMessage: msg, assistantBubbles: [] };
       turns.push(current);
     } else if (msg.role === 'assistant') {
       if (!current) {
@@ -126,6 +128,7 @@ const useAgentStore = create((set, get) => ({
         historyLoaded: false,
         streaming: false,
         draft: '',
+        noticeQueue: [],
         _isActive: true,
         _savedScrollTop: 0,
       });
@@ -157,7 +160,7 @@ const useAgentStore = create((set, get) => ({
   _patchChat: (agentId, updates) => {
     const chats = new Map(get().chats);
     const chat = chats.get(agentId);
-    const defaults = { streaming: false, activeTurn: null, turns: [], historyLoaded: false, hasMore: false };
+    const defaults = { streaming: false, activeTurn: null, turns: [], historyLoaded: false, hasMore: false, noticeQueue: [] };
     // SSE subscribe 可能在 ChatPanel mount 前就收到 snapshot——chat 不存在时懒创建，防止事件被丢弃。
     chats.set(agentId, chat ? { ...chat, ...updates } : { ...defaults, ...updates });
     set({ chats });

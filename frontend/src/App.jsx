@@ -7,12 +7,12 @@ import RoomConfigDrawer from './components/RoomConfigDrawer';
 import useAgentStore from './stores/agentStore';
 import { useRoomStore } from './stores/roomStore';
 import useAgents from './hooks/useAgents';
-import { useAgentSubscriptions } from './hooks/useAgentSubscriptions';
+import { useAggregatedSubscription } from './hooks/useAggregatedSubscription';
 import styles from './App.module.css';
 
 export default function App() {
   const { agents } = useAgents(); // initializes loading
-  useAgentSubscriptions(); // app 级常驻 SSE，切 tab 不断（见 docs/subscribe-app-resident-design.md）
+  useAggregatedSubscription(); // app 级聚合 SSE(全程 1 条,解 6 连接上限;见 docs/sse-aggregation-design.md)
   const activeAgentId = useAgentStore(s => s.activeAgentId);
   const configDrawerOpen = useAgentStore(s => s.configDrawerOpen);
   const configAgentId = useAgentStore(s => s.configAgentId);

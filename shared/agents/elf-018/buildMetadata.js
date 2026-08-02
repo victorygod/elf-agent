@@ -34,16 +34,16 @@ export function buildMetadata(loreDir) {
   };
 
   const groups = [
-    scanDir('characters', 'lore/characters/<角色名>.md'),
-    scanDir('locations', 'lore/locations/<地点名>.md'),
-    scanDir('quests', 'lore/quests/<任务名>.md'),
-    scanDir('items', 'lore/items/<物品名>.md'),
-    scanDir('skills', 'lore/skills/<技能名>.md'),
+    scanDir('characters', path.join(loreDir, 'characters', '<角色名>.md')),
+    scanDir('locations', path.join(loreDir, 'locations', '<地点名>.md')),
+    scanDir('quests', path.join(loreDir, 'quests', '<任务名>.md')),
+    scanDir('items', path.join(loreDir, 'items', '<物品名>.md')),
+    scanDir('skills', path.join(loreDir, 'skills', '<技能名>.md')),
   ];
 
   const single = (file) => {
     const e = parseMd(read(path.join(loreDir, file)));
-    return e ? { pattern: `lore/${file}`, items: [e] } : null;
+    return e ? { pattern: path.join(loreDir, file), items: [e] } : null;
   };
   const prot = single('user_profile.md');
   const st = single('state.md');

@@ -75,6 +75,7 @@ export default function RoomChatPanel({ roomId }) {
 
   const messages = chat?.messages || [];
   const members = chat?.members || [];
+  const noticeQueue = chat?.noticeQueue || [];
 
   // 用户是否主动上滑离开底部 — 置 true 后新消息不自动滚底,直到用户滚回底部附近
   const userScrolledAwayRef = useRef(false);
@@ -93,9 +94,27 @@ export default function RoomChatPanel({ roomId }) {
   }, []);
 
   const handleScroll = useCallback(() => {
+    // 上翻到顶 → 加载更早历史(与私聊 ChatPanel.handleScroll 同构,锚定滚动位置)
+    if (listRef.current && listRef.current.scrollTop <= 50) {
+      const prevHeight = listRef.current.scrollHeight;
+      useRoomStore.getState().loadMoreHistory(roomId).then((res) => {
+        if (res && listRef.current) {
+          requestAnimationFrame(() => {
+            listRef.current.scrollTop = listRef.current.scrollHeight - prevHeight;
+          });
+        }
+      });
+    }
     // 用户向上滚离开底部后停止自动滚底;滚回底部附近则恢复跟随
     userScrolledAwayRef.current = !isNearBottom();
-  }, [isNearBottom]);
+  }, [roomId, isNearBottom]);
+
+  // notice 按房:本面板挂载即激活(互斥渲染),把该房积压 notice promote 到 roomToastList 显示,清 queue。
+  useEffect(() => {
+    if (!noticeQueue.length) return;
+    for (const n of noticeQueue) useRoomStore.getState().showRoomToast(n);
+    useRoomStore.getState()._patchChat(roomId, { noticeQueue: [] });
+  }, [noticeQueue, roomId]);
 
   /** 点击 @mention 跳转到指定 Agent 私聊 */
   const handleMentionClick = useCallback((name) => {

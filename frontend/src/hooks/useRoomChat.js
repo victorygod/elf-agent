@@ -1,81 +1,18 @@
 /**
- * useRoomChat — 群聊 SSE 订阅 hook
+ * useRoomChat — 群聊发言 hook(事件订阅已由 useAggregatedSubscription 聚合接管)。
  *
- * 订阅 /rooms/:rid/subscribe（EventSource），处理事件：
- *   - snapshot: 初始化 messages + members
- *   - speak:     追加一条整块消息（speaker + content）
- *   - member_status: 更新成员在线状态
- *   - error:    错误提示
- *
- * 与私聊 useChat 不同：群聊只整块消息（非流式 token），无 tool_call/badge/rewind。
- * 卸载时关 EventSource 避泄漏；群切换时断旧连新。
+ * 群聊 SSE 事件(snapshot/speak/member_status/notice)经聚合 SSE 到达,
+ * 由 roomStore.roomDispatch 处理(见 stores/roomStore.js)。本 hook 只保留发言动作。
  */
-import { useEffect, useRef, useCallback } from 'react';
-import { roomSubscribeUrl, sendRoomMessage } from '../api/index.js';
-import { useRoomStore } from '../stores/roomStore.js';
+import { useCallback } from 'react';
+import { sendRoomMessage } from '../api/index.js';
 
 export function useRoomChat(roomId) {
-  const esRef = useRef(null);
-  const appendMessage = useRoomStore(s => s.appendMessage);
-  const updateMemberStatus = useRoomStore(s => s.updateMemberStatus);
-  const initFromSnapshot = useRoomStore(s => s.initFromSnapshot);
-
-  useEffect(() => {
-    if (!roomId) return;
-    // 建立 SSE 连接
-    const url = roomSubscribeUrl(roomId);
-    const es = new EventSource(url);
-    esRef.current = es;
-
-    es.addEventListener('snapshot', (ev) => {
-      try {
-        const data = JSON.parse(ev.data);
-        initFromSnapshot(roomId, { messages: data.messages || [], members: data.members || [] });
-      } catch (e) { /* ignore */ }
-    });
-
-    es.addEventListener('speak', (ev) => {
-      try {
-        const data = JSON.parse(ev.data);
-        appendMessage(roomId, {
-          speaker: data.speaker,          // name 版（显示用）
-          speakerUid: data.speakerUid,     // uid（查 avatar/agentId 用）
-          content: data.content,           // name 版（@ 已改写）
-          ts: data.ts, id: data.id,
-        });
-      } catch (e) { /* ignore */ }
-    });
-
-    es.addEventListener('member_status', (ev) => {
-      try {
-        const data = JSON.parse(ev.data);
-        updateMemberStatus(roomId, data.agentId, data.status);
-      } catch (e) { /* ignore */ }
-    });
-
-    es.addEventListener('notice', (ev) => {
-      // LLM 重试/最终失败等居中瞬态通知（agent 经 roomBusUrl 直推 → broadcast）
-      try {
-        const data = JSON.parse(ev.data);
-        useRoomStore.getState().showRoomToast(data);
-      } catch (e) { /* ignore */ }
-    });
-
-    es.onerror = () => {
-      // EventSource 自动重连；这里仅记录，不手动处理
-    };
-
-    return () => {
-      es.close();
-      esRef.current = null;
-    };
-  }, [roomId, appendMessage, updateMemberStatus, initFromSnapshot]);
-
-  /** 发送群消息（用户发言） */
+  /** 发送群消息(用户发言) */
   const send = useCallback(async (message) => {
     if (!roomId || !message.trim()) return;
     await sendRoomMessage(roomId, message);
-    // 自己的消息由 SSE speak 事件回显（经 group-history 广播），不本地乐观追加，避免重复。
+    // 自己的消息由聚合 SSE speak 事件回显(经 group-history 广播),不本地乐观追加,避免重复。
   }, [roomId]);
 
   return { send };

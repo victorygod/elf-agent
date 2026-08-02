@@ -89,6 +89,19 @@ function _patchChat(agentId, updates) {
   useAgentStore.getState()._patchChat(agentId, updates);
 }
 
+/** 入该房 noticeQueue(按房隔离:激活时 ChatPanel effect 显示,切房显积压,不全局串房)。 */
+function _pushNotice(agentId, fields) {
+  const chats = new Map(useAgentStore.getState().chats);
+  const chat = chats.get(agentId);
+  if (chat) {
+    chats.set(agentId, { ...chat, noticeQueue: [...(chat.noticeQueue || []), fields] });
+  } else {
+    // chat 尚未建(notice 先于 snapshot 到达):懒创建带 noticeQueue
+    chats.set(agentId, { streaming: false, activeTurn: null, turns: [], historyLoaded: false, hasMore: false, noticeQueue: [fields] });
+  }
+  useAgentStore.setState({ chats });
+}
+
 function _flushRaf(agentId) {
   const st = _rafState.get(agentId);
   if (!st) return;
@@ -169,8 +182,13 @@ export function handleSSEEvent(agentId, event, data) {
 
       // 状态构建走 client-core 纯函数（sealed 契约 + bubble 补 id；输出形状与旧逻辑逐行等价）
       const rebuilt = rebuildFromSnapshot(data);
+      // 重连 merge:保留已上翻的 olderTurns(snapshot 只含最新窗口),按 turn.id 去重,
+      //   不丢上翻历史(§4.7)。activeTurn 由 snapshot 直接覆盖(optimistic local_ id 被真实版替代)。
+      const existing = useAgentStore.getState().chats.get(agentId)?.turns || [];
+      const snapIds = new Set((rebuilt.turns || []).map(t => t.id));
+      const olderTurns = existing.filter(t => !snapIds.has(t.id));
       _patchChat(agentId, {
-        turns: rebuilt.turns,
+        turns: [...olderTurns, ...(rebuilt.turns || [])],
         activeTurn: rebuilt.activeTurn,
         historyLoaded: rebuilt.historyLoaded,
         hasMore: rebuilt.hasMore,
@@ -331,7 +349,7 @@ export function handleSSEEvent(agentId, event, data) {
         }
       }
       finalizeActiveTurn(agentId);
-      getState().showToast('已停止生成');
+      _pushNotice(agentId, { text: '已停止生成' });
       break;
     }
 
@@ -343,8 +361,8 @@ export function handleSSEEvent(agentId, event, data) {
     }
 
     case 'notice': {
-      // LLM 重试/最终失败的居中瞬态气泡（含 agent 名/重试次数）。toast 内部管 3s 计时淡出。
-      getState().showToast(data);
+      // 入该房 noticeQueue,激活时 ChatPanel effect 显示(按房隔离不串房,切房显积压)。
+      _pushNotice(agentId, data);
       break;
     }
   }

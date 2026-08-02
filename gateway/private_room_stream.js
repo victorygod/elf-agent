@@ -29,10 +29,10 @@ function _sseChunk(event, data) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-function _stripRoomId(data) {
-  if (!data || typeof data !== 'object') return data;
-  const { _roomId, ...rest } = data;
-  return rest;
+/** 注入 roomId/roomType 供聚合 dispatcher 路由。_roomId 保留(_onAgentEvent 路由靠它,前端多收无害)。 */
+function _injectRoomMeta(data, roomId) {
+  if (!data || typeof data !== 'object') return { roomId, roomType: 'chat' };
+  return { ...data, roomId, roomType: 'chat' };
 }
 
 /** 多轮分块判定（原 isNewRound 逻辑原样注入模块）。 */
@@ -95,7 +95,7 @@ export function handlePrivateAgentEvent(eventName, data, history) {
   if (!roomId || !roomId.startsWith('chat-')) return false; // 非私聊房：交群聊 broadcaster
   const hasSubs = _sseSubs.has(roomId) && _sseSubs.get(roomId).size > 0;
   // 记录 eventLog（模块无此概念；广播转发即等价于"订阅者收到事件"）
-  _broadcast(roomId, _sseChunk(eventName, _stripRoomId(data)));
+  _broadcast(roomId, _sseChunk(eventName, _injectRoomMeta(data, roomId)));
   // 给单例装上本次 historyStore，落盘走它
   if (history) _server._historyStore = _makeHistoryStore(history);
   _server.handleEvent(roomId, eventName, data);
@@ -106,6 +106,40 @@ export function handlePrivateAgentEvent(eventName, data, history) {
 /** 供 _onAgentEvent 判定 + 路由用：返回是否为私聊房事件。 */
 export function isPrivateRoom(data) {
   return !!data?._roomId?.startsWith?.('chat-');
+}
+
+// ===== 聚合订阅用：注册/注销订阅者 + 逐房构造快照(聚合端点统一 writeHead,这里不写头) =====
+
+/** 注册一个聚合订阅者 res 到某私聊房(只加 _sseSubs,不 writeHead 不发 snapshot)。 */
+export function registerPrivateSubscriber(roomId, res) {
+  if (!_sseSubs.has(roomId)) _sseSubs.set(roomId, new Set());
+  _sseSubs.get(roomId).add(res);
+}
+
+/** 注销某私聊房的一个订阅者。 */
+export function removePrivateSubscriber(roomId, res) {
+  _sseSubs.get(roomId)?.delete(res);
+}
+
+/** 构造某私聊房的 snapshot 数据(已注入 roomId/roomType:'chat'),供聚合端点逐房发。 */
+export function buildPrivateSnapshot(roomId, history) {
+  if (history) _server._historyStore = _makeHistoryStore(history);
+  const snap = _server.buildSnapshot(roomId);
+  return { ...snap, roomId, roomType: 'chat' };
+}
+
+/**
+ * 强制结束本私聊房回合(abort 兜底):复位 streaming + 空 turn 兜底落盘 + 广播 aborted。
+ * 用于 agent 侧不回 aborted(孤儿 streaming:agent 重启 / 回合异常终止未发终结事件)时,
+ * gateway 侧强制清状态,避免 streaming 卡 true、前端一直"生成中"且 abort 无效。
+ * 已结束(streaming=false)时 no-op,不重复广播。
+ */
+export function forceFinishPrivateTurn(roomId) {
+  const st = _server._rooms.get(roomId);
+  if (!st || !st.streaming) return false;
+  _server.handleEvent(roomId, 'aborted', {});   // 复位 streaming + flush 空 turn 兜底
+  _broadcast(roomId, _sseChunk('aborted', _injectRoomMeta({}, roomId)));  // 通知前端收尾
+  return true;
 }
 
 export function _testReset() {

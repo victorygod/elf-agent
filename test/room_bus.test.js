@@ -63,7 +63,11 @@ describe('RoomBroadcaster', () => {
     bc.broadcast('speak', { speaker: 'elf-001', content: 'hello' });
     const last = res._writes[res._writes.length - 1];
     assert.match(last, /event: speak\n/);
-    assert.match(last, /data: \{"speaker":"elf-001","content":"hello"\}\n\n$/);
+    assert.match(last, /"speaker":"elf-001"/);
+    assert.match(last, /"content":"hello"/);
+    assert.match(last, /"roomId":"roomA"/);
+    assert.match(last, /"roomType":"room"/);
+    assert.match(last, /\n\n$/);
   });
 
   it('多订阅者都收到广播', () => {

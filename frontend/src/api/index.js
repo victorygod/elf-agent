@@ -179,6 +179,44 @@ export async function subscribe(agentId, { onEvent, signal } = {}) {
   }
 }
 
+/**
+ * 聚合 SSE 订阅:前端全程 1 条,收所有私聊房 + 群聊房事件。
+ * 事件 data 带 {roomId, roomType},调用方按此路由。见 docs/sse-aggregation-design.md。
+ */
+export async function subscribeAggregate({ onEvent, signal } = {}) {
+  const res = await fetch(`${API_BASE}/subscribe`, { method: 'POST', signal });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw Object.assign(new Error(err.error || res.statusText), {
+      status: res.status,
+      data: err,
+      retry: err.retry || false,
+    });
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let currentEvent = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('event: ')) {
+        currentEvent = trimmed.slice(7).trim();
+      } else if (trimmed.startsWith('data: ')) {
+        try { onEvent?.(currentEvent, JSON.parse(trimmed.slice(6))); } catch (e) { /* ignore parse errors */ }
+        currentEvent = '';
+      } else if (trimmed === '') {
+        currentEvent = '';
+      }
+    }
+  }
+}
+
 // ===== 聊天历史 =====
 
 /** 获取聊天历史（分页 + 增量）— v3 私聊走 /rooms/chat-<id>/history */

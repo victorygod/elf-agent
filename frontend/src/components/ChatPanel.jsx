@@ -158,6 +158,7 @@ export default function ChatPanel({ agentId }) {
   const _savedScrollTop = useAgentStore(useCallback(state => state.chats.get(agentId)?._savedScrollTop ?? 0, [agentId]));
   const isActive = useAgentStore(useCallback(state => state.chats.get(agentId)?._isActive ?? false, [agentId]));
   const currentLoop = useAgentStore(useCallback(state => state.chats.get(agentId)?._currentLoop ?? null, [agentId]));
+  const noticeQueue = useAgentStore(useCallback(state => state.chats.get(agentId)?.noticeQueue ?? [], [agentId]));
 
   const agent = useAgentStore(useCallback(state => state.getAgent(agentId), [agentId]));
   const loadHistory = useAgentStore(s => s.loadHistory);
@@ -197,6 +198,14 @@ export default function ChatPanel({ agentId }) {
   // ★ 历史加载 single source：agent running 时由常驻 SSE snapshot 提供（snapshot 设 historyLoaded=true），
   //   本组件不再调 loadHistory——避免 REST 路径与 SSE snapshot 竞态覆盖导致的 user 翻倍/历史错乱。
   //   仅 agent 未运行（无 SSE）时 force 拉一次磁盘历史兜底。
+  // notice 按房:激活房把积压的 notice promote 到全局 toastList 显示,清该房 queue。
+  //   未激活房 notice 安静积压,切回时本 effect 触发——切房显积压(§4.8)。
+  useEffect(() => {
+    if (!isActive || !noticeQueue.length) return;
+    for (const n of noticeQueue) useAgentStore.getState().showToast(n);
+    useAgentStore.getState()._patchChat(agentId, { noticeQueue: [] });
+  }, [isActive, noticeQueue, agentId]);
+
   const initDoneRef = useRef(false);
   useEffect(() => {
     if (!isActive || !agent) return;

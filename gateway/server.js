@@ -43,6 +43,7 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
   app.use(express.json({ limit: '5mb' }));
 
   const privateRoomHistory = opts.privateRoomHistory || null; // v3 私聊房历史（room 模式 ChatHistory）
+  const aggregator = opts.aggregator || null; // 聚合 SSE(前端常驻 1 条,解 6 连接上限)
   // 私聊房需要调 agent /observe——pm 经 roomManager 持有，或直接 pm 引用。
   if (roomManager && !roomManager.pm) roomManager.pm = pm;
 
@@ -334,6 +335,13 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
   if (roomManager) {
     registerRoomRoutes(app, roomManager, { pm, privateRoomHistory });
   }
+
+  // POST /subscribe — 聚合 SSE:前端全程 1 条,收所有私聊房 + 群聊房事件(带 {roomId,roomType})。
+  //   见 docs/sse-aggregation-design.md。旧 GET /rooms/:rid/subscribe 保留过渡。
+  app.post('/subscribe', (req, res) => {
+    if (!aggregator) return res.status(503).json({ error: '聚合订阅未启用' });
+    aggregator.attach(res);
+  });
 
   // 全局设置（用户名、用户头像等）
   // 问题3：同时返回 userUid（稳定身份，默认 default_userid），改名不影响历史归属。

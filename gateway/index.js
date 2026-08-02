@@ -10,6 +10,7 @@ import { ProcessManager } from './process_manager.js';
 import { ChatHistory } from './chat_history.js';
 import { createGatewayApp } from './server.js';
 import { RoomManager } from './room_bus.js';
+import { AggregatedBroadcaster } from './aggregated_stream.js';
 import { createLogger } from '../shared/logger.js';
 import { profilesRoot, roomsRoot } from '../shared/profiles_paths.js';
 
@@ -50,6 +51,8 @@ async function main() {
   // 私聊房历史（room 模式 ChatHistory：写 profiles/rooms/chat-<id>/history.jsonl，schema 与私聊同）。
   const privateRoomHistory = new ChatHistory(roomsRootDir, roomsRootDir, { roomMode: true, roomsDir: roomsRootDir });
   pm.privateRoomHistory = privateRoomHistory;
+  // 聚合 SSE broadcaster:前端全程 1 条收所有私聊+群聊房,解 6 连接上限。
+  const aggregator = new AggregatedBroadcaster({ pm, roomManager, privateRoomHistory });
 
   // 6. 恢复已有房间的成员副本（gateway 重启后，探活并拉起之前注册在 run.json 中的 agent）
   //    这一步让 B 阶段的真实 spawn 进程在 gateway 重启后自动恢复
@@ -63,7 +66,7 @@ async function main() {
   pm._gatewayUrl = `http://127.0.0.1:${config.port}`;
 
   // 7. 启动 HTTP 服务
-  const app = createGatewayApp(pm, roomManager, { privateRoomHistory });
+  const app = createGatewayApp(pm, roomManager, { privateRoomHistory, aggregator });
   app.listen(config.port, () => {
     logger.info(`Gateway 监听端口: ${config.port}`);
     logger.info(`可用 Agent: ${pm.listAgents().map(a => `${a.agentId} (${a.status})`).join(', ')}`);

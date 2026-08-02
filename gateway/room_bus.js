@@ -81,6 +81,20 @@ export class RoomBroadcaster {
     return sub;
   }
 
+  /** 聚合订阅者只注册(不 writeHead、不发 snapshot),返回 sub 句柄;close 自动注销。 */
+  registerSubscriber(res) {
+    const sub = { res };
+    this._sseSubscribers.push(sub);
+    res.on('close', () => this.removeSubscriber(sub));
+    return sub;
+  }
+
+  /** 注销一个聚合订阅者。 */
+  removeSubscriber(sub) {
+    const idx = this._sseSubscribers.indexOf(sub);
+    if (idx !== -1) this._sseSubscribers.splice(idx, 1);
+  }
+
   // ────────────── agent 订阅者（副本）──────────────
 
   /** agent 副本加入广播 */
@@ -99,7 +113,8 @@ export class RoomBroadcaster {
    * SSE-only 广播（member_status 等不需要推给 agent 的事件）
    */
   broadcast(event, data) {
-    const chunk = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    const payload = { ...(data || {}), roomId: this.roomId, roomType: 'room' };
+    const chunk = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
     this._sseSubscribers = this._sseSubscribers.filter(sub => {
       try {
         if (sub.res.writable) {
@@ -121,8 +136,9 @@ export class RoomBroadcaster {
    * @param {{speakerUid,speakerName,contentNames,ts,id,seq,mentions}} data
    */
   notifyAll(event, data) {
-    // SSE 给前端（name 版）
+    // SSE 给前端（name 版），注入 roomId/roomType 供聚合 dispatcher 路由
     const sseData = {
+      roomId: this.roomId, roomType: 'room',
       speaker: data.speakerName,
       speakerUid: data.speakerUid,
       content: data.contentNames,
@@ -935,6 +951,15 @@ export class RoomManager {
   /** 取某群历史（路由用） */
   getHistory(roomId) {
     return this._ensureRoom(roomId).history;
+  }
+
+  /** 构造某群聊房的 snapshot 数据(注入 roomId/roomType:'room' + hasMore),供聚合端点逐房发。 */
+  buildRoomSnapshotData(roomId) {
+    const recent = this.getHistory(roomId).getRecent(50);
+    const room = this.getRoom(roomId);
+    const { membersWithNames, user } = this._rosterForRewrite(roomId);
+    const messages = recent.messages.map(m => this._renderMessageForSend(m, membersWithNames, user, false));
+    return { roomId, roomType: 'room', members: room?.members || [], messages, hasMore: recent.hasMore };
   }
 
   /**

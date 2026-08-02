@@ -12,7 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import { loadGatewayConfig } from './config.js';
 import { RoomManager } from './room_bus.js';
-import { subscribePrivateRoom, startPrivateTurn } from './private_room_stream.js';
+import { subscribePrivateRoom, startPrivateTurn, forceFinishPrivateTurn } from './private_room_stream.js';
 import { rewindTo, listCheckpoints, snapshotBeforeSend } from './snapshot.js';
 import { agentMemory } from '../shared/profiles_paths.js';
 
@@ -319,14 +319,20 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
     if (!isPrivateRoom(rid)) return res.status(400).json({ error: '仅私聊房支持此端点' });
     const agentId = privateAgentId(rid);
     const port = pm?.getAgentPort?.(agentId);
-    if (!port) return res.status(503).json({ error: 'Agent 未运行' });
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/abort/${rid}`, { method: 'POST', signal: AbortSignal.timeout(5000) });
-      const data = await r.json().catch(() => ({}));
-      res.json(data);
-    } catch (err) {
-      res.status(500).json({ error: err.message });
+    let agentOk = false;
+    if (port) {
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}/abort/${rid}`, { method: 'POST', signal: AbortSignal.timeout(5000) });
+        await r.json().catch(() => ({}));
+        agentOk = true;
+      } catch (err) {
+        // agent 调用失败不阻塞:下面 gateway 兜底仍会清状态(孤儿 streaming 场景 agent 可能已无回合)
+      }
     }
+    // gateway 兜底:若 streaming 仍 true(agent 未回 aborted / 孤儿状态),强制复位 + 广播 aborted。
+    //   防 streaming 卡 true → 前端一直"生成中"、abort 无效。
+    const forced = forceFinishPrivateTurn(rid);
+    res.json({ status: 'ok', agentOk, forced });
   });
 
   // GET /rooms/:rid/checkpoints — 私聊房可回退的快照包

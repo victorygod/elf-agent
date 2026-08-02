@@ -41,7 +41,6 @@
   "tools": [
     "Read",
     "Grep",
-    "Glob",
     "Write",
     "Edit",
     "Roll"

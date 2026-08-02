@@ -14,7 +14,7 @@ import useAgentStore from './agentStore.js';
 export const useRoomStore = create((set, get) => ({
   rooms: [],          // [{roomId,name,members,createdAt}]
   activeRoomId: null,
-  roomChats: new Map(), // roomId → {messages:[], members:[], loadingHistory:false}
+  roomChats: new Map(), // roomId → {messages:[], members:[], hasMore:false, loadingHistory:false, noticeQueue:[]}
   userName: 'user',   // 全局用户名(gateway.json)
   userAvatar: null,   // 全局用户头像文件名 (gateway.json)
   userUid: 'default_userid',  // 全局用户稳定身份 uid(gateway.json)
@@ -148,6 +148,28 @@ export const useRoomStore = create((set, get) => ({
     if (room) get()._patchChat(roomId, { members: room.members });
   },
 
+  /** 上翻加载更早的群历史(滚到顶触发),与私聊 loadMoreHistory 同构 */
+  loadMoreHistory: async (roomId) => {
+    const chat = get().roomChats.get(roomId);
+    if (!chat || chat.loadingHistory || !chat.hasMore || !chat.messages?.length) return;
+    get()._patchChat(roomId, { loadingHistory: true });
+    try {
+      const beforeId = chat.messages[0].id;
+      const data = await api.getRoomHistory(roomId, undefined, beforeId); // limit 默认 50
+      const older = data.messages || [];
+      get()._patchChat(roomId, {
+        messages: [...older, ...chat.messages],          // prepend 更旧
+        hasMore: data.hasMore ?? false,
+        loadingHistory: false,
+      });
+      return older.length > 0;
+    } catch (e) {
+      api.log('ERROR', '群聊上翻加载失败: ' + e.message);
+      get()._patchChat(roomId, { loadingHistory: false });
+      return false;
+    }
+  },
+
   /** SSE 推来一条新消息 → 追加 */
   appendMessage: (roomId, msg) => {
     const chat = get().roomChats.get(roomId);
@@ -164,13 +186,15 @@ export const useRoomStore = create((set, get) => ({
   },
 
   /** SSE snapshot 初始化 */
-  initFromSnapshot: (roomId, { messages, members }) => {
-    get()._patchChat(roomId, { messages, members }, /* createIfMissing */ true);
+  initFromSnapshot: (roomId, { messages, members, hasMore } = {}) => {
+    const updates = { messages: messages || [], members: members || [] };
+    if (hasMore !== undefined) updates.hasMore = hasMore;
+    get()._patchChat(roomId, updates, /* createIfMissing */ true);
   },
 
   _patchChat: (roomId, updates, createIfMissing = true) => {
     const chats = new Map(get().roomChats);
-    const existing = chats.get(roomId) || { messages: [], members: [], loadingHistory: false };
+    const existing = chats.get(roomId) || { messages: [], members: [], hasMore: false, loadingHistory: false, noticeQueue: [] };
     if (!chats.has(roomId) && !createIfMissing) return;
     chats.set(roomId, { ...existing, ...updates });
     set({ roomChats: chats });
@@ -188,5 +212,40 @@ export const useRoomStore = create((set, get) => ({
     }));
   },
 }));
+
+/**
+ * 群聊 SSE 事件分发(纯函数,供 useAggregatedSubscription 复用,从 useRoomChat 抽出)。
+ * 事件 data 带 {roomId, roomType:'room'}(聚合注入);roomType 已在聚合层分流,此处只按 event 分发。
+ */
+export function roomDispatch(roomId, event, data) {
+  const store = useRoomStore.getState();
+  switch (event) {
+    case 'snapshot':
+      store.initFromSnapshot(roomId, {
+        messages: data.messages || [],
+        members: data.members || [],
+        hasMore: data.hasMore ?? false,
+      });
+      break;
+    case 'speak':
+      store.appendMessage(roomId, {
+        speaker: data.speaker,
+        speakerUid: data.speakerUid,
+        content: data.content,
+        ts: data.ts, id: data.id,
+      });
+      break;
+    case 'member_status':
+      store.updateMemberStatus(roomId, data.agentId, data.status);
+      break;
+    case 'notice': {
+      // 入该房 noticeQueue,激活时 RoomChatPanel effect 显示(按房隔离,切房显积压)。
+      const chat = store.roomChats.get(roomId);
+      store._patchChat(roomId, { noticeQueue: [...(chat?.noticeQueue || []), data] });
+      break;
+    }
+    default: break;
+  }
+}
 
 export default useRoomStore;
