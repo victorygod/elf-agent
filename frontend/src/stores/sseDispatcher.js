@@ -240,7 +240,31 @@ export function handleSSEEvent(agentId, event, data) {
     }
 
     case 'status':
-      if (data.loop) _patchChat(agentId, { _currentLoop: data.loop });
+      // loop 边界封盘：新 loop 的 status 在首个 token 前先到，先把 rAF 里悬着的上一 loop 尾文本 flush 成
+      //   旧 loop 气泡（pendingLoop 是上一 loop token 缓存的，applyToken 盖旧 loop 戳），再切 _currentLoop。
+      //   复盘 elf-018：reviewer 末尾「完成了」token 缓存了 pendingLoop=reviewer，render 首 token 到达时
+      //   pendingLoop 被覆盖成 render、pendingContent 累加成「完成了正文…」合成一个 render bubble。此处
+      //   status 边界先 flush，让「完成了」成独立 reviewer bubble（前端按 _loop 折叠非 render）。
+      //   仅 loop 切换时封盘（cur 与 data.loop 不同且 cur 存在）；同 loop 内多轮 status 不改气泡粒度，
+      //   工具执行 status（tool_manager.js:194，不带 loop）不入此分支。
+      if (data.loop) {
+        const cur = useAgentStore.getState().chats.get(agentId)?._currentLoop;
+        if (cur && cur !== data.loop) {
+          _flushRaf(agentId);
+          // flush 后再把上一 loop 的尾 bubble seal 掉——否则下一 loop 的 token 因尾 bubble 未 sealed
+          //   被 applyToken 判定续接，render 正文会续进 outline 尾文本气泡、继承 _loop=outline 被折叠。
+          //   （服务端 turn-stream-server 的 status 切换 _flushBubble 落盘即 sealed；前端 LIVE 须对齐。）
+          const atSeal = useAgentStore.getState().chats.get(agentId)?.activeTurn;
+          const lastB = atSeal?.assistantBubbles?.[atSeal.assistantBubbles.length - 1];
+          api.log('INFO', `[loop-switch] agent=${agentId} ${cur}→${data.loop} lastBubble._loop=${lastB?._loop} sealed=${lastB?.sealed}`);
+          if (atSeal && lastB && !lastB.sealed) {
+            const newBubbles = atSeal.assistantBubbles.map((b, i) => i === atSeal.assistantBubbles.length - 1 ? { ...b, sealed: true } : b);
+            _patchChat(agentId, { activeTurn: { ...atSeal, assistantBubbles: newBubbles } });
+            api.log('INFO', `[loop-switch] sealed last bubble (_loop=${lastB._loop || '-'}) so ${data.loop} token starts a new bubble`);
+          }
+        }
+        _patchChat(agentId, { _currentLoop: data.loop });
+      }
       break;
 
     case 'compact_start': {

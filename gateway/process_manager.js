@@ -11,8 +11,8 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { createLogger } from '../shared/logger.js';
 import { probePort, findPidFromPort as probe_findPidFromPort, waitForReady as probe_waitForReady, httpShutdown as probe_httpShutdown, waitForPortFree as probe_waitForPortFree, PROBE_INTERVAL, STOP_PROBE_INTERVAL } from '../shared/agent_probe.js';
-import { connectAgentEvents, disconnectAgentEvents } from './agent_events.js';
-import { handlePrivateAgentEvent } from './private_room_stream.js';
+import { connectAgentEvents, disconnectAgentEvents, hasAgentEventsConnection } from './agent_events.js';
+import { handlePrivateAgentEvent, forceFinishPrivateTurn } from './private_room_stream.js';
 import { agentMemory } from '../shared/profiles_paths.js';
 
 const logger = createLogger('process-manager', 'gateway.log');
@@ -31,6 +31,9 @@ export class ProcessManager {
     this.agentsDir = path.join(process.cwd(), 'agents');
     // v3：privateRoomHistory 由 gateway/index.js 注入，供 _onAgentEvent 路由私聊房事件落 history。
     this.privateRoomHistory = null;
+    // 端口整体偏移（测试用 ELF_PORT_OFFSET 注入）：agent.port = config.port + offset，
+    //   与真实 gateway 端口隔离。真实 gateway 不设 → offset 0 → 端口不变。
+    this.portOffset = Number(process.env.ELF_PORT_OFFSET) || 0;
   }
 
   /**
@@ -107,7 +110,7 @@ export class ProcessManager {
         const rawConfig = fs.readFileSync(configPath, 'utf-8');
         const config = JSON.parse(rawConfig);
         this.agents.set(agentId, {
-          port: config.port,
+          port: config.port + this.portOffset,
           pid: null,
           status: 'stopped',
           config
@@ -128,7 +131,7 @@ export class ProcessManager {
         const agent = this.agents.get(id);
         // 保留 pid/status，仅更新 config 和 port
         agent.config = config;
-        agent.port = config.port;
+        agent.port = config.port + this.portOffset;
       } catch (err) {
         logger.warn(`Rediscover: 无法重新读取 Agent ${id} 配置: ${err.message}`);
       }
@@ -152,6 +155,14 @@ export class ProcessManager {
       agent.status = 'running';
       agent.pid = r.pid ?? agent.pid;
       logger.info(`Agent ${id} 探活成功 (port: ${agent.port}, pid: ${agent.pid})`);
+      // 通道跟随存活：probe 把 agent 拉回 running，但它的 SSE /events 通道可能在上一次
+      //   探活失败时已被 disconnectAgentEvents 拆掉。此时 agent 越健康（继续 probe 成功），
+      //   它后续回合的 done 事件越会发进一条没人接的 SSE，沦为孤儿 streaming。故 probe
+      //   成功时若通道不在，立即重建（幂等：已有活连接则 connectAgentEvents 内部 no-op）。
+      if (!hasAgentEventsConnection(id)) {
+        connectAgentEvents(id, agent.port, this._makeEventHandler(id), this._makeDisconnectHandler(id));
+        logger.info(`Agent ${id} SSE /events 通道已重建`);
+      }
       return true;
     }
 
@@ -251,9 +262,7 @@ export class ProcessManager {
 
       // 建立到 Agent /events 的长连接（后台压缩完成等异步事件通道）
       if (agent.status === 'running') {
-        agent._eventsConn = connectAgentEvents(id, agent.port, (event, data) => {
-          this._onAgentEvent(id, event, data);
-        });
+        agent._eventsConn = connectAgentEvents(id, agent.port, this._makeEventHandler(id), this._makeDisconnectHandler(id));
       }
 
       return { agentId: id, status: agent.status, pid: agent.pid };
@@ -400,6 +409,31 @@ export class ProcessManager {
   }
 
   // ─── 私有方法 ───────────────────────────────────────────
+
+  /**
+   * 构造 /events 事件转发回调（统一抽出来，供 startAgent 与 probeAgent 重建复用）
+   * @param {string} id
+   * @returns {(event: string, data: object) => void}
+   */
+  _makeEventHandler(id) {
+    return (event, data) => this._onAgentEvent(id, event, data);
+  }
+
+  /**
+   * 构造 /events 通道断开兜底回调：SSE 断开 → 该 agent 名下私聊房（chat-<id>）若仍
+   *   streaming=true，强制结束回合（forceFinishPrivateTurn 对非 streaming 房 no-op）。
+   *   防「agent 进程活着但 SSE 通道静默断开，done 事件发进无人接的连接」沦为孤儿 streaming。
+   * @param {string} id
+   * @returns {() => void}
+   */
+  _makeDisconnectHandler(id) {
+    return () => {
+      const roomId = `chat-${id}`;
+      if (forceFinishPrivateTurn(roomId)) {
+        logger.warn(`[events] Agent ${id} SSE 断开，强制结束孤儿 streaming room=${roomId}`);
+      }
+    };
+  }
 
   /**
    * 发送 HTTP /shutdown 请求

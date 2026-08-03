@@ -1,71 +1,56 @@
 /**
- * DNDAgent —— DND DM agent（elf-018），3-loop workflow：main（大纲）→ reviewer（审校+维护）→ render。
+ * DNDAgent —— DND DM agent（elf-018），2-loop workflow：outline（产大纲+维护）→ render。
  *
- * main loop：回归普通 agent——用主 MM 跨轮累积（Uₙ + tool + assistant 大纲），DNDMM.getBaseForLLM
- *   剪裁"最近 user 之前"的超长 tool_result（<persisted-output> 占位），canon/面板/任务由 create_agent
- *   注册的注入器（useSystemReplace/useAppend）在 _currentLoop='main' 时注入。不 override _buildLLMRequest。
- * reviewer loop：override _buildLLMRequest 自建 messages（摘要+最近2历史大纲+待review大纲+面板+任务reminder），
- *   合并原 lore_keeper：改大纲 + 更新 lore + 据面板造新主角卡（user_profile.md）。改前 _backupPanel 备份旧面板。
- * render loop：隔离 _buildRenderMessages（历史大纲+上一轮正文+本轮大纲+新旧面板+语言风格reminder）。
- *
- * 本轮 tool 隔离：_loopStartMsgIdx 记 loop 开始 MM 偏移，reviewer 重建历史不带 main 的 tool。
- * Skip 后直接 break（_runToolExec override）。
+ * outline loop：回归普通 agent——用主 MM 跨轮累积（Uₙ + tool + 各轮 render 正文），base compactIfNeeded
+ *   异步压缩（DNDMM._doCompact lastUser：摘要"最近 user 之前"全部，保留最近 user 及之后）+ getBaseForLLM
+ *   剪裁"最近 user 之前"的超长 tool_result（<persisted-output> 占位）；canon/全局进度(state.md)/面板/任务由
+ *   create_agent 注入器在 _currentLoop='outline' 时注入（基线预载 → 提示词不要求先 Read）。不 override _buildLLMRequest。
+ *   职责：WriteOutline 落本轮大纲（含「剧情发展」节）+ 据 changes 维护 lore/面板/state.md。
+ *   detect 只看本轮大纲 mtime 是否更新——产大纲是唯一 completion 信号，维护为衍生 best-effort。
+ *   改前 _backupPanel 备份旧面板（供 render 新旧对比）。
+ * render loop：隔离 _buildRenderMessages（MM 压缩摘要 + fresh outline 文件 + 上一轮正文 + 本轮大纲+新旧面板 + 语言风格reminder）。
+ *   历史不再单列 outline 摘要文件：render 直接取 outline loop MM 里的压缩摘要 + 压缩后仍在 MM 的轮的 outline 文件。
  */
 import fs from 'fs';
 import path from 'path';
 import { Agent } from '../../engine/agent.js';
-import { Skip } from '../../engine/tools/Skip.js';
+import { sendNotice } from '../../engine/notice.js';
 import { createLogger } from '../../shared/logger.js';
 import { buildMetadata } from '../../shared/agents/elf-018/buildMetadata.js';
+import { SUMMARY_PREAMBLE, CONTINUATION_CLAUSE } from '../../engine/message_manager.js';
 
 const logger = createLogger('dnd-agent');
 
 // ===== 提示词文案（统一管理；注释标明使用位置）=====
 
-// runFourLoopWorkflow 内 detect 失败时 addMetaMessage 注入的提醒（main / reviewer loop）
-const REMINDER_MAIN = '尚未产出本轮大纲，请用 Write 把大纲写到 outline/round-N.md（含 剧情节拍 + 数值结算 initial/changes/final）后再结束。';
-const REMINDER_REVIEWER = '尚未完成审校/维护：请改大纲、更新 lore、或据面板造新主角卡；若全无需改动，调用 Skip。';
+// runFourLoopWorkflow 内 detect 失败时 addMetaMessage 注入的提醒（outline loop）
+const REMINDER_OUTLINE = '本轮尚未产出大纲（outline/round-N.md 未更新）。请用 WriteOutline 写本轮大纲（含 情节弧 + 剧情发展 + 数值结算 initial/changes/final）；落完大纲后据 changes 用 Write/Edit 维护 lore（角色卡/设定）、user_profile.md（面板）、state.md（故事态）。';
 
-// _mainContext 末尾的写大纲任务指令（main loop 的 useAppend 注入）
-const MAIN_TASK_INSTR = (N, outlineAbs) => `本轮轮次 N=${N}。请把大纲写到 ${outlineAbs}（含 剧情节拍 + 数值结算 initial/changes/final），需判定时调 Roll。`;
+// _outlineContext 末尾的任务指令（outline loop 的 useAppend 注入）
+const MAIN_TASK_INSTR = (N) =>
+  `本轮轮次 N=${N}。请调用 WriteOutline 写本轮大纲（content 含 情节弧 + 剧情发展 + 数值结算 initial/changes/final），需判定时调 Roll；` +
+  `落完大纲后据 changes 用 Write/Edit 维护 lore（角色卡/设定）、user_profile.md（面板）、state.md（故事态）。` +
+  `全部落盘后对话只回一句"大纲已完成"——本阶段不渲染正文，正文由后续 render loop 产出，不要在回复里写正文/叙事/选项。`;
 
-// _buildReviewerMessages 末尾的 <system-reminder> 任务（改大纲/更新lore/造新角色卡）
-const REVIEWER_REMINDER = (task, outlineAbs, loreAbs, panelPath) =>
-  `<system-reminder>\n${task}\n\n大纲路径: ${outlineAbs}（Edit/Write 改）；lore 根: ${loreAbs}（Write/Edit 更新设定）；角色卡路径: ${panelPath}（Write 输出整份 JSON 造新角色卡）。\n</system-reminder>`;
-
-// 角色卡（面板）消息体：_mainContext / _buildReviewerMessages / _buildRenderMessages 的面板注入
+// 角色卡（面板）消息体：_outlineContext / _buildRenderMessages 的面板注入
 const PANEL_MSG = (tag, panelPath, content) => `## ${tag}（路径: ${panelPath}）\n\`\`\`json\n${content}\n\`\`\``;
 
-// _historyMerged 的每轮历史对 + 分隔（reviewer 与 render 共用）
-const HIST_PAIR = (u, i, o) => `玩家指令：${u}\nRound ${i} 大纲：${o}`;
+// fresh outline 文件之间的分隔（render 历史块共用）
 const HIST_SEP = '\n---\n';
-
-// _doHistoryCompact 的压缩指令前缀
-const COMPACT_INSTR = '把以下更早的历史（玩家指令/大纲）压缩成剧情脉络摘要（保留伏笔/关键状态/NPC/玩家行动，丢弃数值演算细节）：\n\n';
 
 const LOOPS = [
   {
-    name: 'main',
-    reminderTag: 'main_reminder',
+    name: 'outline',
+    reminderTag: 'outline_reminder',
+    // 全工具开启：WriteOutline/EditOutline 写本轮大纲（落 outline 目录），Write/Edit 维护 lore/面板/state.md。
+    //   专版 Write/Edit 是 lore 作用域，物理碰不到 outline 目录，故无需禁用即可保大纲只能经 WriteOutline 落盘。
     disableTools: [],
-    detect: async (agent) => fs.existsSync(path.join(agent._roots.outline, agent._roundFile())),
-    reminder: REMINDER_MAIN,
-  },
-  {
-    name: 'reviewer',
-    reminderTag: 'reviewer_reminder',
-    disableTools: ['Roll'],
-    extraTools: [Skip],
     detect: async (agent) => {
-      if (agent._loopCalledSkip()) return true;
-      const outline = path.join(agent._roots.outline, agent._roundFile());
-      const char = path.join(agent._roots.lore, agent._protagonistFile);
+      const f = path.join(agent._roots.outline, agent._roundFile());
       const start = agent._loopStartMs || 0;
-      const oChanged = fs.existsSync(outline) && fs.statSync(outline).mtimeMs > start;
-      const cChanged = fs.existsSync(char) && fs.statSync(char).mtimeMs > start;
-      return oChanged || cChanged;
+      return fs.existsSync(f) && fs.statSync(f).mtimeMs > start;
     },
-    reminder: REMINDER_REVIEWER,
+    reminder: REMINDER_OUTLINE,
   },
   {
     name: 'render',
@@ -91,14 +76,12 @@ export class DNDAgent extends Agent {
   async runFourLoopWorkflow({ emit, skipAddUser }) {
     const maxIterations = this.config.get('maxIterations') ?? 5;
     this._roundNumber = this._countRounds() + 1;
-    this._triggerHistoryCompact();
 
     for (const loop of LOOPS) {
       this._currentLoop = loop.name;
       this.messageManager._currentLoop = loop.name;   // 传给 MM，add* 方法记 _loop
-      this._loopStartMsgIdx = this.messageManager.messages.length;
       this._loopStartMs = Date.now();
-      if (loop.name === 'reviewer') this._backupPanel();   // 改面板前备份旧（供 render 新旧对比）
+      if (loop.name === 'outline') this._backupPanel();   // 改面板前备份旧（供 render 新旧对比）
 
       if (loop.isRender) {
         const aborted = await this._runRenderLoop(loop, emit);
@@ -113,11 +96,29 @@ export class DNDAgent extends Agent {
         toolManager: this.toolManager, middlewares: this.middlewares, disableTools, tools: loop.extraTools,
       });
       try {
+        // 提醒上限：detect 失败（未产出大纲）最多重注入 REMINDER_OUTLINE MAX_OUTLINE_REMINDERS 次。
+        //   上游偶发空回复时，_handlePureText('') 立即 break、detect 失败，若无上限这个 while 会无限重入
+        //   （每轮重新从「第1轮」起，反复空回 + 注入提醒，刷爆日志/烧 token）。超限即放弃本轮、不进 render。
+        const MAX_OUTLINE_REMINDERS = 3;
+        let reminders = 0;
         while (true) {
           const loopR = await this._runAgentLoop(emit, maxIterations);
           if (loopR.aborted) { restore(); return; }
           const ok = await loop.detect(this);
           if (ok) break;
+          if (++reminders > MAX_OUTLINE_REMINDERS) {
+            logger.error(`[outline] 提醒 ${MAX_OUTLINE_REMINDERS} 次仍未产出大纲（round ${this._roundNumber}），放弃本轮，不进 render`);
+            sendNotice({ emit, runContext: this.runContext }, {
+              kind: 'error',
+              agentId: this.runContext?.agentId,
+              memberName: this.runContext?.memberName,
+              text: `连续 ${MAX_OUTLINE_REMINDERS} 次未产出大纲，已中止本轮；可点 ⟲ 回退后重试`,
+            });
+            this._discardCurrentRoundArtifacts();   // 清本轮半成品，让 rewind+重发能重玩
+            this._currentLoop = null;
+            this.abortFlow.emitDone(emit, { promptTokens: this.messageManager.estimateTokens() });
+            return;   // 直接退出 runFourLoopWorkflow，不进 render loop
+          }
           this.messageManager.addMetaMessage(loop.reminder, loop.reminderTag);
         }
       } finally {
@@ -131,70 +132,25 @@ export class DNDAgent extends Agent {
 
   // ============ messages 构建 ============
 
-  /** reviewer 自建 messages；main 用 base assemble（super）。 */
-  _buildLLMRequest() {
-    if (this._currentLoop === 'reviewer') {
-      return { messages: this._buildReviewerMessages(), tools: this.toolManager.getAll() };
-    }
-    return super._buildLLMRequest();
-  }
-
-  /** 本轮调了 Skip → 直接 break（不再请求纯文本轮）。 */
-  async _runToolExec(toolCallsResult, emit) {
-    const r = await super._runToolExec(toolCallsResult, emit);
-    if (r.aborted) return r;
-    if (this._loopCalledSkip()) return { aborted: false, break: true };
-    return r;
-  }
-
-  /** main 的 system（总纲 + canon + file_index），由 create_agent 注入器调用。 */
-  _mainSystem() {
+  /** outline 的 system（总纲 + canon + file_index），由 create_agent 注入器调用。 */
+  _outlineSystem() {
     let sys = this.config.get('systemPrompt') || '';
     const md = buildMetadata(this._roots.lore);
     if (md) sys += '\n\n' + md;
     return sys;
   }
 
-  /** main 的 append（当前面板 + 写大纲任务），由 create_agent 注入器调用。 */
-  _mainContext() {
+  /** outline 的 append（全局进度 state.md + 当前面板 + 写大纲任务），由 create_agent 注入器调用。
+   *   state.md 全文 + 主角面板全文预注入上下文 → 提示词无需要求先 Read 即可据基线写大纲/维护设定。 */
+  _outlineContext() {
     const read = (p) => { try { return p && fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : ''; } catch { return ''; } };
     const N = this._roundNumber;
+    const statePath = path.join(this._roots.lore, 'state.md');
     const panelPath = path.join(this._roots.lore, this._protagonistFile);
-    const outlineAbs = path.join(this._roots.outline, this._roundFile());
     const task = this.config.get('loop_outline_prompt') || '';
-    return `${PANEL_MSG('当前面板', panelPath, read(panelPath))}\n\n${task}\n\n${MAIN_TASK_INSTR(N, outlineAbs)}`;
-  }
-
-  /** reviewer messages：system(总纲+canon+file_index) + 摘要 + 最近2历史大纲 + 待review大纲 + 当前面板 + 任务reminder。 */
-  _buildReviewerMessages() {
-    const read = (p) => { try { return p && fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : ''; } catch { return ''; } };
-    const N = this._roundNumber;
-    const msgs = [{ role: 'system', content: this._mainSystem() }];
-
-    const summary = read(path.join(this._roots.outline, 'history-summary.md'));
-    if (summary) msgs.push({ role: 'user', content: `## 历史摘要\n${summary}` });
-
-    const users = this._extractUserMessages();
-    const hist = this._historyMerged(read, users);
-    if (hist) msgs.push({ role: 'user', content: hist });
-
-    const outline = read(path.join(this._roots.outline, this._roundFile()));
-    msgs.push({ role: 'user', content: `玩家当前指令：${users[N - 1] || ''}\n待review大纲：\n${outline || ''}` });
-
-    const panelPath = path.join(this._roots.lore, this._protagonistFile);
-    msgs.push({ role: 'user', content: PANEL_MSG('当前面板', panelPath, read(panelPath)) });
-
-    const outlineAbs = path.join(this._roots.outline, this._roundFile());
-    const loreAbs = this._roots.lore;
-    const task = this.config.get('loop_reviewer_prompt') || '';
-    msgs.push({ role: 'user', content: REVIEWER_REMINDER(task, outlineAbs, loreAbs, panelPath) });
-
-    // 本轮 tool 过程（仅本 loop）
-    for (const m of this.messageManager.messages.slice(this._loopStartMsgIdx || 0)) {
-      const { id, isMeta, metaTag, isCompactSummary, ...rest } = m;
-      msgs.push(rest);
-    }
-    return msgs;
+    const stateBlock = PANEL_MSG('全局进度', statePath, read(statePath));
+    const panelBlock = PANEL_MSG('当前面板', panelPath, read(panelPath));
+    return `${stateBlock}\n\n${panelBlock}\n\n${task}\n\n${MAIN_TASK_INSTR(N)}`;
   }
 
   // ============ render loop（隔离） ============
@@ -203,10 +159,33 @@ export class DNDAgent extends Agent {
     const messages = this._buildRenderMessages();
     const allTools = this.toolManager.getAll().map((t) => t.name);
     const restore = this.harness.withRunLevel({ toolManager: this.toolManager, middlewares: this.middlewares, disableTools: allTools });
+    // render 空内容自愈：上游偶发返回空流（无 content delta），原地重试同一份 messages，
+    //   最多重试 MAX_RENDER_RETRIES 次（总 MAX+1 次尝试）。仍空则放弃本轮：不入空 assistant
+    //   消息、不落空 scene、删本轮 outline+scene 半成品（让 ⟲ rewind + 重发能重玩本轮而非推进到 N+1）、
+    //   推 notice 提示玩家回退。abort 不重试——立即交回 abort 收尾。
+    const MAX_RENDER_RETRIES = 3;
     try {
-      const lr = await this._runLLMStream(messages, [], emit, { iteration: 'render' });
-      if (lr.aborted) return true;
-      const content = lr.content || '';
+      let content = '';
+      for (let attempt = 1; attempt <= 1 + MAX_RENDER_RETRIES; attempt++) {
+        const lr = await this._runLLMStream(messages, [], emit, { iteration: 'render' });
+        if (lr.aborted) return true;            // 用户中断 → 走 finishAborted，不重试
+        content = lr.content || '';
+        if (content.trim()) break;              // 非空即成功
+        if (attempt <= MAX_RENDER_RETRIES) logger.warn(`[render] 第 ${attempt} 次返回空 content，重试…`);
+      }
+
+      if (!content.trim()) {
+        logger.error(`[render] 重试 ${MAX_RENDER_RETRIES} 次仍为空，放弃本轮（round ${this._roundNumber}）`);
+        sendNotice({ emit, runContext: this.runContext }, {
+          kind: 'error',
+          agentId: this.runContext?.agentId,
+          memberName: this.runContext?.memberName,
+          text: `渲染连续 ${MAX_RENDER_RETRIES} 次返回空，已中止本轮；可点 ⟲ 回退到上一轮后重试`,
+        });
+        this._discardCurrentRoundArtifacts();   // 删 outline/round-N.md + scene/round-N.md
+        return false;                           // 正常 emitDone，turn 封棺
+      }
+
       this.messageManager.addAssistantMessage(content);
       try {
         fs.mkdirSync(this._roots.scene, { recursive: true });
@@ -220,7 +199,18 @@ export class DNDAgent extends Agent {
     }
   }
 
-  /** render messages：system总纲 + 历史大纲(摘要+最近) + 上一轮正文 + 本轮大纲+新旧面板 + 语言风格reminder。 */
+  /** render 重试耗尽后删本轮半成品：outline/round-N.md + scene/round-N.md。
+   *  目的：_countRounds() 数 outline 文件，删掉后计数回到 N-1，配合 ⟲ rewind（恢复 MM 到轮前）
+   *    + 重发，本轮从大纲重算重渲；否则 rewind+重发会跳到 N+1、留一条无 scene 的孤儿大纲。 */
+  _discardCurrentRoundArtifacts() {
+    for (const dir of [this._roots.outline, this._roots.scene]) {
+      const f = path.join(dir, this._roundFile());
+      try { if (fs.existsSync(f)) fs.rmSync(f, { force: true }); }
+      catch (e) { logger.warn(`删 ${f} 失败: ${e.message}`); }
+    }
+  }
+
+  /** render messages：system总纲 + 历史(MM压缩摘要+fresh outline文件) + 上一轮正文 + 本轮大纲+新旧面板 + 语言风格reminder。 */
   _buildRenderMessages() {
     const read = (p) => { try { return p && fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : ''; } catch { return ''; } };
     const N = this._roundNumber;
@@ -229,38 +219,50 @@ export class DNDAgent extends Agent {
     const examples = this.config.get('renderExamples') || '';
     const msgs = [{ role: 'system', content: examples ? sysPrompt + '\n\n' + examples : sysPrompt }];
 
-    // render 不含 metadata（不读 lore，所需设定由大纲抄录）
-    const summary = read(path.join(this._roots.outline, 'history-summary.md'));
-    if (summary) msgs.push({ role: 'user', content: `## 历史摘要\n${summary}` });
+    // render 不含 metadata（不读 lore，所需设定由大纲抄录）。
+    // 历史 = outline loop MM 的压缩摘要（去 preamble）+ 压缩后仍在 MM 的轮（fresh）的 outline 文件全文。
+    //   fresh 轮范围 K..N-1：K = N - freshUserCount + 1（freshUserCount = MM 里非 meta/非 summary 的 user 数，
+    //   即最近一次压缩后留存下来的轮；本轮 N 单独在下方给，不进此块）。
+    const summaryText = this._compactSummaryText();
+    const freshUserCount = users.length;
+    const K = N - freshUserCount + 1;
+    const freshParts = [];
+    for (let i = K; i < N; i++) {
+      const o = read(path.join(this._roots.outline, `round-${i}.md`));
+      if (o) freshParts.push(`Round ${i} 大纲：\n${o}`);
+    }
+    const histBlock = [summaryText ? `## 历史摘要\n${summaryText}` : '', freshParts.join(HIST_SEP)]
+      .filter(Boolean).join(HIST_SEP);
+    if (histBlock) msgs.push({ role: 'user', content: histBlock });
 
-    const hist = this._historyMerged(read, users);
-    if (hist) msgs.push({ role: 'user', content: hist });
+    // 上一轮正文（scene/round-(N-1).md）以 assistant 角色注入，衔接叙事语气与断章钩
+    if (N > 1) {
+      const prevScene = read(path.join(this._roots.scene, `round-${N - 1}.md`));
+      if (prevScene) msgs.push({ role: 'assistant', content: prevScene });
+    }
 
     const outline = read(path.join(this._roots.outline, this._roundFile()));
     const panelPath = path.join(this._roots.lore, this._protagonistFile);
     const prevPanelPath = path.join(this._roots.lore, this._prevFile());
     const panelBlock = `${PANEL_MSG('旧面板(initial)', prevPanelPath, read(prevPanelPath))}\n\n${PANEL_MSG('新面板(final)', panelPath, read(panelPath))}`;
-    msgs.push({ role: 'user', content: `玩家当前指令：${users[N - 1] || ''}\n本轮大纲：\n${outline || ''}\n\n${panelBlock}` });
-
+    // 语言风格 reminder 不单独成消息、不裹 system-reminder 标签，直接拼到当前指令消息尾部
+    //   当前轮玩家输入 = MM 里最后一条 fresh user（压缩后老轮 user 已进摘要，不能按下标 users[N-1] 取）
     const rem = this.config.get('loop_render_prompt') || '';
-    if (rem) msgs.push({ role: 'user', content: `<system-reminder>\n${rem}\n</system-reminder>` });
+    const currentUser = users.length ? users[users.length - 1] : '';
+    msgs.push({ role: 'user', content: `玩家当前指令：${currentUser}\n本轮大纲：\n${outline || ''}\n\n${panelBlock}${rem ? `\n\n${rem}` : ''}` });
+
     return msgs;
   }
 
-  /** 历史轮合并一条 user：每轮"玩家指令：U_i\nRound i 大纲：outline_i"，用 --- 分隔（最近 2 轮，被压的进摘要）。 */
-  _historyMerged(read, users) {
-    const N = this._roundNumber;
-    const startI = Math.max(1, N - 2);
-    const parts = [];
-    for (let i = startI; i < N; i++) {
-      const u = users[i - 1] != null ? users[i - 1] : '';
-      const o = read(path.join(this._roots.outline, `round-${i}.md`)) || '';
-      parts.push(HIST_PAIR(u, i, o));
-    }
-    return parts.join(HIST_SEP);
+  /** outline loop MM 里最近一次压缩的摘要正文（剥除 SUMMARY_PREAMBLE+CONTINUATION_CLAUSE 前缀）；无则空串。 */
+  _compactSummaryText() {
+    const m = this.messageManager.messages.find((mm) => mm.isCompactSummary);
+    if (!m) return '';
+    const pre = SUMMARY_PREAMBLE + CONTINUATION_CLAUSE;
+    return m.content && m.content.startsWith(pre) ? m.content.slice(pre.length) : (m.content || '');
   }
 
-  // ============ skip / 历史压缩 / clearRuntime / helpers ============
+  // ============ clearRuntime / helpers ============
 
   /** 清空运行时文档（rm runtime + re-seed 回种子态）——clearRoom 调。 */
   clearRuntime() {
@@ -291,64 +293,13 @@ export class DNDAgent extends Agent {
     }
   }
 
-  _loopCalledSkip() {
-    for (const m of this.messageManager.messages.slice(this._loopStartMsgIdx || 0)) {
-      if (m.role === 'assistant' && m.tool_calls) {
-        for (const tc of m.tool_calls) {
-          if ((tc.function?.name || tc.name) === 'Skip') return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  _triggerHistoryCompact() {
-    const N = this._roundNumber;
-    if (N < 3) return;   // 保最近 2，需 N>=3
-    const summaryPath = path.join(this._roots.outline, 'history-summary.md');
-    const read = (p) => { try { return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : ''; } catch { return ''; } };
-    let total = read(summaryPath).length;
-    for (let i = 1; i < N; i++) total += read(path.join(this._roots.outline, `round-${i}.md`)).length;
-    const limit = this.config.get('historyOutlineLimit') ?? 16000;
-    if (total <= limit) return;
-    void this._doHistoryCompact().catch((e) => logger.warn(`历史大纲压缩失败: ${e.message}`));
-  }
-
-  // 压 round-1..N-3 + user_1..N-3（保最近 2：round-(N-2), round-(N-1)）
-  async _doHistoryCompact() {
-    const N = this._roundNumber;
-    if (N < 3) return;
-    const summaryPath = path.join(this._roots.outline, 'history-summary.md');
-    const read = (p) => { try { return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : ''; } catch { return ''; } };
-    const parts = [];
-    const old = read(summaryPath);
-    if (old) parts.push(`## 历史摘要\n${old}`);
-    const users = this._extractUserMessages();
-    for (let i = 1; i <= N - 3; i++) {
-      if (users[i - 1] != null) parts.push(`## 玩家 round-${i}\n${users[i - 1]}`);
-      const c = read(path.join(this._roots.outline, `round-${i}.md`));
-      if (c) parts.push(`## 大纲 round-${i}\n${c}`);
-    }
-    if (!parts.length) return;
-    const compactSystemPrompt = this.config.get('compactSystemPrompt') || '';
-    const compactPrompt = this.config.get('compactPrompt') || COMPACT_INSTR;
-    const req = [];
-    if (compactSystemPrompt) req.push({ role: 'system', content: compactSystemPrompt });
-    req.push({ role: 'user', content: compactPrompt + parts.join('\n\n') });
-    const summary = (await this.model.chat(req, { enable_thinking: false })) || '';
-    if (summary.trim()) {
-      fs.writeFileSync(summaryPath, summary, 'utf-8');
-      logger.info(`历史大纲压缩完成，摘要写入 ${summaryPath}`);
-    }
-  }
-
   _extractUserMessages() {
     return this.messageManager.messages
       .filter((m) => m.role === 'user' && !m.isMeta && !m.isCompactSummary)
       .map((m) => m.content);
   }
 
-  /** reviewer 改面板前备份旧 → 主角.prev.json，供 render 读"旧面板"。 */
+  /** outline loop 改面板前备份旧 → 主角.prev.json，供 render 读"旧面板"。 */
   _backupPanel() {
     try {
       const charPath = path.join(this._roots.lore, this._protagonistFile);

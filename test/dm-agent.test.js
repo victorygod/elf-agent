@@ -6,15 +6,26 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { Roll } from '../engine/tools/Roll.js';
+import { fileURLToPath } from 'url';
+import { Roll } from '../agents/elf-018/tools/Roll.js';
+import { makeWriteOutline } from '../agents/elf-018/tools/WriteOutline.js';
+import { makeEditOutline } from '../agents/elf-018/tools/EditOutline.js';
+import { makeRead } from '../agents/elf-018/tools/Read.js';
+import { makeWrite } from '../agents/elf-018/tools/Write.js';
+import { makeEdit } from '../agents/elf-018/tools/Edit.js';
 import { reset as resetReadState } from '../engine/tools/read_state.js';
 import { MockModel } from '../engine/models/index.js';
 import { ToolManager } from '../engine/tools/tool_manager.js';
-import { Read, Write, Edit, Grep, Glob } from '../engine/tools/index.js';
+import { Read, Write, Edit, Grep } from '../engine/tools/index.js';
 import { Config } from '../engine/config_loader.js';
-import { MessageManager } from '../engine/message_manager.js';
+import { MessageManager, SUMMARY_PREAMBLE, CONTINUATION_CLAUSE } from '../engine/message_manager.js';
 import { MessageManager as DNDMessageManager } from '../agents/elf-018/message_manager.js';
 import { DNDAgent } from '../agents/elf-018/agent.js';
+import { Agent } from '../engine/agent.js';
+import { LLMModel } from '../engine/models/index.js';
+
+// 带 frontmatter 的角色卡内容（lore 文件须符合此规范，专版 Write 后置校验）
+const charProfile = (body) => `---\nname: 勇者\ndescription: 玩家角色（主角）\n---\n${body}`;
 
 // ========================
 // Roll 工具
@@ -89,12 +100,12 @@ describe('DNDMessageManager', () => {
 });
 
 // ========================
-// DNDAgent 4-loop workflow
+// DNDAgent 2-loop workflow
 // ========================
-describe('DNDAgent 4-loop workflow', () => {
+describe('DNDAgent 2-loop workflow', () => {
   beforeEach(() => resetReadState());
 
-  it('4 loop 顺序跑通：写大纲 → 审校改 → 维护面板 → 渲染落盘', async () => {
+  it('2 loop 顺序跑通：写大纲+维护面板 → 渲染落盘', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-dnd-'));
     const roots = {
       lore: path.join(tmp, 'lore'),
@@ -111,15 +122,14 @@ describe('DNDAgent 4-loop workflow', () => {
     const outlinePath = path.join(roots.outline, 'round-1.md');
     const charPath = path.join(roots.lore, 'user_profile.md');
     const write = (fp, c) => ({ id: `c_${fp}`, type: 'function', function: { name: 'Write', arguments: JSON.stringify({ file_path: fp, content: c }) } });
+    const writeOutline = (c) => ({ id: 'c_wo', type: 'function', function: { name: 'WriteOutline', arguments: JSON.stringify({ content: c }) } });
     const read = (fp) => ({ id: `c_r_${fp}`, type: 'function', function: { name: 'Read', arguments: JSON.stringify({ file_path: fp }) } });
 
     const responses = [
-      { tool_calls: [write(outlinePath, '大纲初稿')] },      // main: Write outline
-      { content: '大纲完成' },                                 // main: 纯文本 break
-      { tool_calls: [read(charPath)] },                        // reviewer: Read char（hasRead 后才可覆盖写）
-      { tool_calls: [write(charPath, '主角面板-final')] },     // reviewer: Write char（新面板，mtime 变）
-      { content: '审校维护完成' },                             // reviewer: 纯文本 break
-      { content: '剧情正文内容' },                             // render: 纯文本
+      { tool_calls: [writeOutline('大纲初稿')] },                       // outline: WriteOutline（无需指定路径）
+      { tool_calls: [write(charPath, charProfile('主角面板-final'))] }, // outline: Write char（无需先 Read，带 frontmatter 维护面板到 final）
+      { content: '完成' },                                              // outline: 纯文本 break
+      { content: '剧情正文内容' },                                      // render: 纯文本
     ];
     const model = new MockModel({ responses });
 
@@ -127,21 +137,26 @@ describe('DNDAgent 4-loop workflow', () => {
     config.data = {
       maxIterations: 10, systemPrompt: '', memoryTokenLimit: 40000,
       compactPrompt: '总结', compactSystemPrompt: '压缩器', compactMode: 'async',
-      loop_outline_prompt: 'outline prompt', loop_reviewer_prompt: 'reviewer prompt',
+      loop_outline_prompt: 'outline prompt',
       loop_render_prompt: 'render prompt',
     };
     const tm = new ToolManager();
-    [Read, Write, Edit, Grep, Glob, Roll].forEach((t) => tm.register(t));
+    [Read, Write, Edit, Grep, Roll].forEach((t) => tm.register(t));
 
     const mm = new MessageManager({ systemPrompt: '', memoryTokenLimit: 40000, dataDir: path.join(tmp, 'mm'), config });
     const agent = new DNDAgent({ config, model, toolManager: tm, messageManager: mm });
     agent._roots = roots;
     agent._protagonistFile = 'user_profile.md';
+    tm.register(makeWriteOutline(agent));   // 本轮大纲专用工具（持 agent 实例，建后注册）
+    tm.register(makeEditOutline(agent));
+    tm.register(makeRead(agent));            // lore 作用域 Read/Write/Edit 专版（同名覆盖通用版）
+    tm.register(makeWrite(agent));
+    tm.register(makeEdit(agent));
 
     await agent.runFourLoopWorkflow({ emit: () => {}, skipAddUser: true });
 
     assert.equal(fs.readFileSync(outlinePath, 'utf-8'), '大纲初稿', 'outline 由 main 写入');
-    assert.equal(fs.readFileSync(charPath, 'utf-8'), '主角面板-final', 'char 经 reviewer 更新到 final');
+    assert.equal(fs.readFileSync(charPath, 'utf-8'), charProfile('主角面板-final'), 'char 经 reviewer 更新到 final（带 frontmatter）');
     assert.equal(fs.readFileSync(path.join(roots.lore, 'user_profile.prev.md'), 'utf-8'), '主角面板-初始', 'reviewer 备份旧面板');
     assert.equal(fs.readFileSync(path.join(roots.scene, 'round-1.md'), 'utf-8'), '剧情正文内容', 'render 落盘 scene');
     const lastAssistant = [...mm.messages].reverse().find((m) => m.role === 'assistant');
@@ -165,13 +180,12 @@ describe('DNDAgent 4-loop workflow', () => {
     const outlinePath = path.join(roots.outline, 'round-1.md');
     const charPath = path.join(roots.lore, 'user_profile.md');
     const write = (fp, c) => ({ id: `c_${fp}`, type: 'function', function: { name: 'Write', arguments: JSON.stringify({ file_path: fp, content: c }) } });
+    const writeOutline = (c) => ({ id: 'c_wo', type: 'function', function: { name: 'WriteOutline', arguments: JSON.stringify({ content: c }) } });
     const read = (fp) => ({ id: `c_r_${fp}`, type: 'function', function: { name: 'Read', arguments: JSON.stringify({ file_path: fp }) } });
     const responses = [
-      { tool_calls: [write(outlinePath, '大纲初稿')] },
-      { content: '大纲完成' },
-      { tool_calls: [read(charPath)] },
-      { tool_calls: [write(charPath, '主角面板-final')] },
-      { content: '审校维护完成' },
+      { tool_calls: [writeOutline('大纲初稿')] },
+      { tool_calls: [write(charPath, charProfile('主角面板-final'))] },
+      { content: '完成' },
       { content: '剧情正文内容' },
     ];
     const model = new MockModel({ responses });
@@ -179,15 +193,20 @@ describe('DNDAgent 4-loop workflow', () => {
     config.data = {
       maxIterations: 10, systemPrompt: '', memoryTokenLimit: 40000,
       compactPrompt: '总结', compactSystemPrompt: '压缩器', compactMode: 'async',
-      loop_outline_prompt: 'outline prompt', loop_reviewer_prompt: 'reviewer prompt',
+      loop_outline_prompt: 'outline prompt',
       loop_render_prompt: 'render prompt',
     };
     const tm = new ToolManager();
-    [Read, Write, Edit, Grep, Glob, Roll].forEach((t) => tm.register(t));
+    [Read, Write, Edit, Grep, Roll].forEach((t) => tm.register(t));
     const mm = new MessageManager({ systemPrompt: '', memoryTokenLimit: 40000, dataDir: path.join(tmp, 'mm'), config });
     const agent = new DNDAgent({ config, model, toolManager: tm, messageManager: mm });
     agent._roots = roots;
     agent._protagonistFile = 'user_profile.md';
+    tm.register(makeWriteOutline(agent));
+    tm.register(makeEditOutline(agent));
+    tm.register(makeRead(agent));
+    tm.register(makeWrite(agent));
+    tm.register(makeEdit(agent));
     agent._scene = {};   // 走 override 的 runFourLoopWorkflow 分支（私聊场景）
 
     // 模拟「上一轮被用户中断」遗留的 _aborted=true（harness.abort 设、本轮入口应收尾重置）
@@ -201,5 +220,306 @@ describe('DNDAgent 4-loop workflow', () => {
     assert.equal(agent._aborted, false, 'reasoning 入口须重置 _aborted=false');
     assert.equal(abortedEmitted, false, '残留 _aborted 不应触发本轮 aborted 事件');
     assert.equal(fs.readFileSync(path.join(roots.scene, 'round-1.md'), 'utf-8'), '剧情正文内容', '本轮应跑完到 render 落盘');
+  });
+
+  it('render 历史：MM 压缩摘要 + fresh outline 文件（被摘要覆盖的老轮不进 fresh）', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-render-hist-'));
+    const roots = {
+      lore: path.join(tmp, 'lore'),
+      outline: path.join(tmp, 'outline'),
+      scene: path.join(tmp, 'scene'),
+    };
+    for (const r of Object.values(roots)) fs.mkdirSync(r, { recursive: true });
+    fs.mkdirSync(path.join(roots.lore, 'characters'), { recursive: true });
+    fs.writeFileSync(path.join(roots.lore, 'metadata.md'), 'metadata');
+    fs.writeFileSync(path.join(roots.lore, 'user_profile.md'), charProfile('面板'));
+    // round-1 被 MM 摘要覆盖；round-2 = fresh；round-3 = 本轮（进 msg3）
+    fs.writeFileSync(path.join(roots.outline, 'round-1.md'), 'R1大纲');
+    fs.writeFileSync(path.join(roots.outline, 'round-2.md'), 'R2大纲');
+    fs.writeFileSync(path.join(roots.outline, 'round-3.md'), 'R3大纲');
+    fs.writeFileSync(path.join(roots.scene, 'round-2.md'), 'R2正文');
+
+    const config = new Config(tmp);
+    config.data = {
+      maxIterations: 10, systemPrompt: '', memoryTokenLimit: 40000,
+      compactPrompt: '总结', compactSystemPrompt: '压缩器', compactMode: 'async',
+      loop_outline_prompt: '', loop_render_prompt: 'RENDER',
+    };
+    const tm = new ToolManager();
+    [Read, Write, Edit, Grep, Roll].forEach((t) => tm.register(t));
+    const mm = new MessageManager({ systemPrompt: '', memoryTokenLimit: 40000, dataDir: path.join(tmp, 'mm'), config });
+    const agent = new DNDAgent({ config, model: new MockModel({ responses: [] }), toolManager: tm, messageManager: mm });
+    agent._roots = roots;
+    agent._protagonistFile = 'user_profile.md';
+    tm.register(makeWriteOutline(agent));
+    tm.register(makeEditOutline(agent));
+    tm.register(makeRead(agent));
+    tm.register(makeWrite(agent));
+    tm.register(makeEdit(agent));
+
+    agent._roundNumber = 3;
+    // MM = [摘要(盖 round-1), user2, render正文2, user3] → fresh users = round2/3
+    const pre = SUMMARY_PREAMBLE + CONTINUATION_CLAUSE;
+    mm.messages.push(
+      { id: 's1', role: 'user', content: pre + 'round1 摘要正文', isCompactSummary: true },
+      { id: 'u2', role: 'user', content: '玩家R2指令' },
+      { id: 'a2', role: 'assistant', content: 'R2正文' },
+      { id: 'u3', role: 'user', content: '玩家R3指令' },
+    );
+
+    const msgs = agent._buildRenderMessages();
+    // [system, hist(user), assistant(上一轮正文), user(本轮)]
+    assert.equal(msgs.length, 4, '应 4 条消息');
+    assert.equal(msgs[1].role, 'user');
+    assert.match(msgs[1].content, /## 历史摘要/);
+    assert.match(msgs[1].content, /round1 摘要正文/, 'MM 摘要正文进历史块');
+    assert.doesNotMatch(msgs[1].content, /This session is being continued/, 'preamble 须剥除');
+    assert.match(msgs[1].content, /Round 2 大纲：\nR2大纲/, 'fresh round-2 进历史块');
+    assert.doesNotMatch(msgs[1].content, /R1大纲/, '被摘要覆盖的 round-1 不进 fresh');
+    assert.equal(msgs[2].role, 'assistant');
+    assert.equal(msgs[2].content, 'R2正文', '上一轮 render 正文作 assistant');
+    assert.match(msgs[3].content, /玩家当前指令：玩家R3指令/);
+    assert.match(msgs[3].content, /本轮大纲：\nR3大纲/);
+    assert.match(msgs[3].content, /RENDER$/, '语言风格提示词拼在末尾');
+  });
+});
+
+// ========================
+// render 空内容自愈（重试 + 兜底）+ reloadConfig modelKey 守卫
+// ========================
+describe('render 空内容自愈 + reloadConfig', () => {
+  beforeEach(() => resetReadState());
+
+  // 复用 workflow describe 的装配样板，返回 { agent, mm, roots, model }
+  function buildAgent(tmp, responses) {
+    const roots = {
+      lore: path.join(tmp, 'lore'),
+      outline: path.join(tmp, 'outline'),
+      scene: path.join(tmp, 'scene'),
+    };
+    fs.mkdirSync(path.join(roots.lore, 'characters'), { recursive: true });
+    for (const r of Object.values(roots)) fs.mkdirSync(r, { recursive: true });
+    fs.writeFileSync(path.join(roots.lore, 'metadata.md'), 'metadata');
+    fs.writeFileSync(path.join(roots.lore, 'user_profile.md'), '主角面板-初始');
+
+    const charPath = path.join(roots.lore, 'user_profile.md');
+    const write = (fp, c) => ({ id: `c_${fp}`, type: 'function', function: { name: 'Write', arguments: JSON.stringify({ file_path: fp, content: c }) } });
+    const writeOutline = (c) => ({ id: 'c_wo', type: 'function', function: { name: 'WriteOutline', arguments: JSON.stringify({ content: c }) } });
+
+    const model = new MockModel({ responses });
+    const config = new Config(tmp);
+    config.data = {
+      maxIterations: 10, systemPrompt: '', memoryTokenLimit: 40000,
+      compactPrompt: '总结', compactSystemPrompt: '压缩器', compactMode: 'async',
+      loop_outline_prompt: 'outline prompt', loop_render_prompt: 'render prompt',
+    };
+    const tm = new ToolManager();
+    [Read, Write, Edit, Grep, Roll].forEach((t) => tm.register(t));
+    const mm = new MessageManager({ systemPrompt: '', memoryTokenLimit: 40000, dataDir: path.join(tmp, 'mm'), config });
+    const agent = new DNDAgent({ config, model, toolManager: tm, messageManager: mm });
+    agent._roots = roots;
+    agent._protagonistFile = 'user_profile.md';
+    tm.register(makeWriteOutline(agent));
+    tm.register(makeEditOutline(agent));
+    tm.register(makeRead(agent));
+    tm.register(makeWrite(agent));
+    tm.register(makeEdit(agent));
+    return { agent, mm, roots, model, charPath };
+  }
+
+  // outline 段固定三步响应：WriteOutline 落大纲 → Write 维护面板 → 纯文本 '完成' break
+  const outlineResponses = (charPath) => [
+    { tool_calls: [writeOutlineFor('大纲初稿')] },
+    { tool_calls: [writeFor(charPath, charProfile('主角面板-final'))] },
+    { content: '完成' },
+  ];
+  const writeOutlineFor = (c) => ({ id: 'c_wo', type: 'function', function: { name: 'WriteOutline', arguments: JSON.stringify({ content: c }) } });
+  const writeFor = (fp, c) => ({ id: `c_${fp}`, type: 'function', function: { name: 'Write', arguments: JSON.stringify({ file_path: fp, content: c }) } });
+
+  it('render 空内容重试：前两次空、第三次非空 → 落盘非空、不入空消息', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-render-retry-'));
+    const charPath = path.join(tmp, 'lore', 'user_profile.md');
+    const { agent, mm, roots } = buildAgent(tmp, [
+      ...outlineResponses(charPath),
+      { content: '' },            // render 第 1 次空
+      { content: '' },            // render 第 2 次空
+      { content: '剧情正文' },     // render 第 3 次非空 → 成功
+    ]);
+    await agent.runFourLoopWorkflow({ emit: () => {}, skipAddUser: true });
+
+    assert.equal(fs.readFileSync(path.join(roots.scene, 'round-1.md'), 'utf-8'), '剧情正文', '第三次重试成功,scene 落非空');
+    const lastAssistant = [...mm.messages].reverse().find((m) => m.role === 'assistant');
+    assert.equal(lastAssistant.content, '剧情正文', '入 MM 的 render 正文为非空');
+    assert.ok(!mm.messages.some((m) => m.role === 'assistant' && m.content === ''), '不应有任何空 assistant 消息');
+  });
+
+  it('render 连续 4 次空 → 兜底：删本轮 outline+scene、不入空消息、推 error notice、emitDone', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-render-exhaust-'));
+    const charPath = path.join(tmp, 'lore', 'user_profile.md');
+    const { agent, mm, roots } = buildAgent(tmp, [
+      ...outlineResponses(charPath),
+      { content: '' }, { content: '' }, { content: '' }, { content: '' },   // render 1+3 次皆空
+    ]);
+    const events = [];
+    const emit = (e) => events.push(e);
+    await agent.runFourLoopWorkflow({ emit, skipAddUser: true });
+
+    assert.ok(!fs.existsSync(path.join(roots.outline, 'round-1.md')), 'exhaust 后 outline/round-1.md 应被删（让 rewind+重发重玩本轮）');
+    assert.ok(!fs.existsSync(path.join(roots.scene, 'round-1.md')), 'exhaust 后 scene/round-1.md 应被删（不落空 scene）');
+    assert.ok(!mm.messages.some((m) => m.role === 'assistant' && m.content === ''), '不应入空 assistant 消息');
+    const notice = events.find((e) => e.event === 'notice');
+    assert.ok(notice, '应推 notice');
+    assert.equal(notice.data.kind, 'error', 'notice kind=error');
+    assert.match(notice.data.text, /渲染连续.*次返回空/, 'notice 文案提示渲染空');
+    assert.ok(events.some((e) => e.event === 'done'), '应正常 emitDone 封棺');
+  });
+
+  it('outline 连续空回复 → 提醒 3 次即放弃，不进 render、不死循环', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-outline-cap-'));
+    const charPath = path.join(tmp, 'lore', 'user_profile.md');
+    const { agent, roots, model } = buildAgent(tmp, [
+      { content: '' }, { content: '' }, { content: '' }, { content: '' },  // 4 次空 outline（1 次初试 + 3 次提醒重入）
+      { content: '不该被调用的 render 正文' },                                 // 若误进 render 会消费这条
+    ]);
+    const events = [];
+    const emit = (e) => events.push(e);
+    await agent.runFourLoopWorkflow({ emit, skipAddUser: true });
+
+    // 没进 render：第 5 条 responses 未被消费 → 无 scene、无 outline
+    assert.equal(model._callIndex, 4, '只跑 4 次 outline LLM 调用（1+3 提醒），不进 render');
+    assert.ok(!fs.existsSync(path.join(roots.outline, 'round-1.md')), '未产出大纲');
+    assert.ok(!fs.existsSync(path.join(roots.scene, 'round-1.md')), 'outline 放弃后不应进 render/落 scene');
+    const notice = events.find((e) => e.event === 'notice');
+    assert.ok(notice, '应推放弃 notice');
+    assert.equal(notice.data.kind, 'error', 'notice kind=error');
+    assert.match(notice.data.text, /未产出大纲/, 'notice 文案提示未产出大纲');
+    assert.ok(events.some((e) => e.event === 'done'), '应 emitDone 封棺，不死循环');
+  });
+
+  it('reloadConfig modelKey 守卫：提示词类编辑不重建 model，base_url 变了才重建', () => {
+    // stub config：load() 推进 getModelConfig 返回的配置序号（模拟真实 load 从盘读到新配置）。
+    //   序列：[初始/构造]→idx0；第1次 reload（仅提示词变,mc 不变）→idx1；第2次 reload（base_url 变）→idx2。
+    const cfgA = { provider: 'llm', base_url: 'http://a', auth_token: 'k', model: 'm', enable_thinking: false };
+    const modelConfigs = [cfgA, { ...cfgA }, { ...cfgA, base_url: 'http://b' }];
+    let loadIdx = 0;
+    const config = {
+      load: () => { loadIdx = Math.min(loadIdx + 1, modelConfigs.length - 1); },
+      getModelConfig: () => modelConfigs[loadIdx],
+      get: (k) => ({ systemPrompt: 's', memoryTokenLimit: 40000, compactSystemPrompt: '', compactPrompt: '' })[k],
+    };
+    const mm = { updateConfig: () => {} };
+    const tm = { _setMessageManager() {} };
+    const agent = new Agent({ config, model: {}, toolManager: tm, messageManager: mm });
+    const m0 = agent.model;
+
+    // 第 1 次 reload：load 把 idx0→idx1，两份 mc 字段相同 → modelKey 不变 → 跳过重建
+    agent.reloadConfig();
+    assert.equal(agent.model, m0, '提示词编辑不重建 model,同实例引用');
+
+    // 第 2 次 reload：load 把 idx1→idx2，base_url 变了 → modelKey 变 → 重建 LLMModel
+    agent.reloadConfig();
+    assert.notEqual(agent.model, m0, 'base_url 变了应重建');
+    assert.ok(agent.model instanceof LLMModel, '重建后为 LLMModel 实例');
+  });
+});
+describe('lore 作用域工具', () => {
+  beforeEach(() => resetReadState());
+
+  function makeAgent(loreRoot) {
+    return { _roots: { lore: loreRoot } };
+  }
+
+  it('Write 非法路径（lore 外）被前置校验拒', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-lore-'));
+    const w = makeWrite(makeAgent(path.join(tmp, 'lore')));
+    const r = await w.execute({ file_path: path.join(tmp, 'outside.md'), content: charProfile('x') });
+    assert.match(r, /只能写 lore 目录内的文件/);
+    assert.ok(!fs.existsSync(path.join(tmp, 'outside.md')), 'lore 外文件不应被写入');
+  });
+
+  it('Write 缺 frontmatter 被后置校验拒（不写盘）', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-lore-'));
+    const lore = path.join(tmp, 'lore');
+    fs.mkdirSync(lore);
+    const w = makeWrite(makeAgent(lore));
+    const r = await w.execute({ file_path: path.join(lore, 'a.md'), content: '无 frontmatter 的内容' });
+    assert.match(r, /frontmatter/);
+    assert.ok(!fs.existsSync(path.join(lore, 'a.md')), '缺 frontmatter 不应落盘');
+  });
+
+  it('Write lore 内 + 合法 frontmatter → 落盘', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-lore-'));
+    const lore = path.join(tmp, 'lore', 'characters');
+    fs.mkdirSync(lore, { recursive: true });
+    const w = makeWrite(makeAgent(path.join(tmp, 'lore')));
+    const fp = path.join(lore, '镇长.md');
+    const r = await w.execute({ file_path: fp, content: charProfile('镇长正文') });
+    assert.match(r, /created successfully/);
+    assert.equal(fs.readFileSync(fp, 'utf-8'), charProfile('镇长正文'));
+  });
+
+  it('Write 覆盖已有文件无需先 Read（基线已注入）', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-lore-'));
+    const lore = path.join(tmp, 'lore', 'characters');
+    fs.mkdirSync(lore, { recursive: true });
+    const fp = path.join(lore, '镇长.md');
+    const w = makeWrite(makeAgent(path.join(tmp, 'lore')));
+    await w.execute({ file_path: fp, content: charProfile('旧正文') });
+    // 未 Read 直接覆盖 → 应成功（不卡 hasRead/陈旧检查）
+    const r = await w.execute({ file_path: fp, content: charProfile('新正文') });
+    assert.match(r, /overwritten successfully/);
+    assert.equal(fs.readFileSync(fp, 'utf-8'), charProfile('新正文'));
+  });
+
+  it('Edit 已有文件无需先 Read（基线已注入）', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-lore-'));
+    const lore = path.join(tmp, 'lore');
+    fs.mkdirSync(lore);
+    const fp = path.join(lore, 'a.md');
+    fs.writeFileSync(fp, charProfile('正文-旧'), 'utf-8');
+    const agent = makeAgent(lore);
+    const e = makeEdit(agent);
+    // 未 Read 直接编辑 → 应成功（不卡 hasRead/陈旧检查）
+    const r = await e.execute({ file_path: fp, old_string: '正文-旧', new_string: '正文-新' });
+    assert.match(r, /updated successfully/);
+    assert.equal(fs.readFileSync(fp, 'utf-8'), charProfile('正文-新'));
+  });
+
+  it('Edit 改后破坏 frontmatter 被拒（不写盘）', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-lore-'));
+    const lore = path.join(tmp, 'lore');
+    fs.mkdirSync(lore);
+    const fp = path.join(lore, 'a.md');
+    fs.writeFileSync(fp, charProfile('正文-旧'), 'utf-8');
+    const agent = makeAgent(lore);
+    const e = makeEdit(agent);
+    // 把开头的 --- 删掉 → 破坏 frontmatter
+    const r = await e.execute({ file_path: fp, old_string: '---\nname: 勇者', new_string: 'name: 勇者' });
+    assert.match(r, /frontmatter/);
+    assert.equal(fs.readFileSync(fp, 'utf-8'), charProfile('正文-旧'), '破坏 frontmatter 的编辑不应落盘');
+  });
+
+  it('Edit lore 外路径被拒', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-lore-'));
+    const e = makeEdit(makeAgent(path.join(tmp, 'lore')));
+    const r = await e.execute({ file_path: path.join(tmp, 'outside.md'), old_string: 'a', new_string: 'b' });
+    assert.match(r, /只能编辑 lore 目录内的文件/);
+  });
+
+  it('Read lore 外路径被拒；lore 内可读', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-lore-'));
+    const lore = path.join(tmp, 'lore');
+    fs.mkdirSync(lore);
+    const fp = path.join(lore, 'a.md');
+    fs.writeFileSync(fp, charProfile('正文'), 'utf-8');
+    const rd = makeRead(makeAgent(lore));
+    assert.match(await rd.execute({ file_path: path.join(tmp, 'outside.md') }), /只能读 lore 目录内的文件/);
+    const ok = await rd.execute({ file_path: fp });
+    assert.match(ok, /勇者/);
+  });
+
+  it('tools 目录无 Glob（已被移除）', () => {
+    const dir = fileURLToPath(new URL('../agents/elf-018/tools/', import.meta.url));
+    assert.ok(!fs.existsSync(path.join(dir, 'Glob.js')), 'elf-018 不应有 Glob 工具');
   });
 });

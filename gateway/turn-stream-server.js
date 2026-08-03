@@ -137,6 +137,19 @@ export class TurnStreamServer {
   handleEvent(roomId, eventName, data = {}) {
     const st = this._ensure(roomId);
 
+    // ── status 边界 flush：loop 切换时先把上一 loop 滞留的尾文本/工具 flush 成带旧 _loop 的气泡，再切 _currentLoop ──
+    //   复盘 elf-018：reviewer 末尾纯文本「完成了」无工具，行 142 的分块 flush 要求 toolCalls>0 不触发，尾文本滞留
+    //   assistantContent；render 首 token 到达时 _currentLoop 被翻成 render，于是「完成了」连同正文在 done 时落成
+    //   「完成了正文…」一条 render 气泡，reviewer 丢了收尾气泡。engine/agent.js 在每个 loop 首个 token 前先 emit
+    //   status(thinking, newLoop)，此刻 st._currentLoop 还是旧值——趁此主动封盘，尾文本盖旧 loop 戳落盘。
+    //   仅随带 loop 的 status 触发（tool_manager.js:194 的工具执行 status 不带 loop，data.loop 为 falsy 不进）；
+    //   同 loop 内多轮 status(thinking, sameLoop) 不切换、不 flush，不改 loop 内既有气泡粒度。空 buffer 时 _flushBubble
+    //   行 100 兜底 no-op（如首个 loop 的 status）。
+    if (eventName === 'status' && data?.loop && data.loop !== st._currentLoop) {
+      this._flushBubble(roomId);
+      st._currentLoop = data.loop;
+    }
+
     // ── 多轮分块判定（外部注入）：新轮 token/tool_call 到达且上轮已可收尾 → flush 上一轮 ──
     const canBeNewRound = eventName === 'token' || eventName === 'tool_call';
     if (canBeNewRound && st.toolCalls.length > 0 && !_hasExecuting(st.toolCalls)) {

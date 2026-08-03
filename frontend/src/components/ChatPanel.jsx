@@ -23,7 +23,7 @@ function PrivateToast() {
 /**
  * 渲染一个 assistant bubble（Turn 内的一条记录）
  */
-const LOOP_LABELS = { main: '大纲', reviewer: '审校', render: '渲染' };
+const LOOP_LABELS = { outline: '大纲', render: '渲染' };
 
 function AssistantBubble({ bubble, isStreaming, isLastInTurn, onToggleTime, showTime, currentLoop }) {
   const [expanded, setExpanded] = useState(false);

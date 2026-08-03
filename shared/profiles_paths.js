@@ -49,7 +49,7 @@ export function roomsRoot() {
   return path.join(profilesRoot(), 'rooms');
 }
 
-/** 日志目录：profiles/logs。 */
+/** 日志目录：profiles/logs。ELF_LOG_DIR 可覆盖（测试用，日志与真实 profiles/logs 分离）。 */
 export function logsDir() {
-  return path.join(profilesRoot(), 'logs');
+  return process.env.ELF_LOG_DIR ? path.resolve(process.env.ELF_LOG_DIR) : path.join(profilesRoot(), 'logs');
 }

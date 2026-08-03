@@ -1,10 +1,11 @@
 /**
  * DNDMessageManager —— DM agent 的 MM。
  *
- * - compactIfNeeded no-op：不压缩 MM 对话（历史大纲单独压缩：DNDAgent._triggerHistoryCompact）。
- * - getBaseForLLM override：main loop 跨轮累积时，"最近一条 user 之前"的 tool_result 超长则
+ * - compactIfNeeded：用 base 异步压缩（compactMode=async），调本类 _doCompact override（lastUser 制：
+ *   摘要"最近一条 user 之前"的全部，保留最近 user 及之后）。压缩摘要同时供 render 取用（DNDAgent._compactSummaryText）。
+ * - getBaseForLLM override：outline loop 跨轮累积时，"最近一条 user 之前"的 tool_result 超长则
  *   持久化到 dataDir/tool-results/<id>.txt + 替换为 <persisted-output> 占位带 preview（参考 elf-002 L1/microcompact），
- *   最近 user 及之后不剪。assistant(大纲产出) 保留。
+ *   最近 user 及之后不剪。assistant（render 正文）保留。
  */
 import fs from 'fs';
 import path from 'path';
@@ -18,10 +19,6 @@ export class MessageManager extends BaseMessageManager {
   constructor(params) {
     super(params);
     this.toolResultsDir = this.dataDir ? path.join(this.dataDir, 'tool-results') : null;
-  }
-
-  async compactIfNeeded(llmModel, options = {}) {
-    return;   // DM 不压缩 MM 对话
   }
 
   // add* override：每条消息记 _loop（供前端折叠 + 刷新重建）

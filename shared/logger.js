@@ -13,6 +13,7 @@ import fs from 'fs';
 import path from 'path';
 import { logsDir } from './profiles_paths.js';
 
+// 日志目录：经 logsDir() 统一解析（支持 ELF_LOG_DIR 覆盖，测试用独立目录与真实 profiles/logs 分离）。
 const LOG_DIR = logsDir();
 
 // 单文件大小上限：10MB

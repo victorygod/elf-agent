@@ -82,7 +82,11 @@ export function snapshotBeforeSend(agentId, prompt, roomHistoryPath) {
     logger.info(`[snapshot ${agentId}] 首次创建空 context.json`);
   }
 
-  const beforeCount = listCheckpoints(agentId).length;
+  const before = listCheckpoints(agentId);
+  const beforeCount = before.length;
+  // 入栈定序：seq = 现存最大栈序 + 1（空则 0）——单调、重启安全、rewind 后续推也不与已删的撞。
+  //   顺序在创建时定死，不靠毫秒墙钟/readdir 顺序（旧 bug：同毫秒两个快照 createdAt 相等，rewind 漏删）。
+  const nextSeq = before.length ? before[before.length - 1].seq + 1 : 0;
   const cpId = `cp_${Date.now()}_${_rand4()}`;
   const cpDir = path.join(_checkpointsDir(agentId), cpId);
   fs.mkdirSync(cpDir, { recursive: true });
@@ -106,7 +110,7 @@ export function snapshotBeforeSend(agentId, prompt, roomHistoryPath) {
     fs.writeFileSync(
       path.join(cpDir, 'meta.json'),
       JSON.stringify(
-        { id: cpId, createdAt: new Date().toISOString(), prompt, restoredPrompt: prompt },
+        { id: cpId, createdAt: new Date().toISOString(), prompt, restoredPrompt: prompt, seq: nextSeq },
         null,
         2
       ),
@@ -130,9 +134,9 @@ function _evictOld(agentId) {
     .filter(e => e.isDirectory())
     .map(e => {
       const cpDir = path.join(root, e.name);
-      return { name: e.name, ts: _cpTimestamp(cpDir), cpDir };
+      return { name: e.name, seq: _cpSeq(cpDir), cpDir };
     })
-    .sort((a, b) => b.ts - a.ts); // 新→旧
+    .sort((a, b) => b.seq - a.seq); // 新→旧（按栈序）
   for (let i = MAX_CHECKPOINTS; i < dirs.length; i++) {
     _rmDir(dirs[i].cpDir);
   }
@@ -154,10 +158,16 @@ function _readMeta(cpDir) {
   }
 }
 
-/** 快照创建时间（用于排序） */
-function _cpTimestamp(cpDir) {
-  const m = _readMeta(cpDir);
-  return m?.createdAt ? Date.parse(m.createdAt) : 0;
+/** checkpoint 栈序号：meta.seq 权威（创建时入栈分配、单调），老数据无 seq 退化为 createdAt 毫秒 */
+function _seqOf(meta) {
+  if (meta && typeof meta.seq === 'number') return meta.seq;
+  if (meta && meta.createdAt) { const t = Date.parse(meta.createdAt); if (!Number.isNaN(t)) return t; }
+  return 0;
+}
+
+/** 读 cpDir 的栈序号（列表排序/滑窗淘汰/rewind 出栈删统一用此，不再用毫秒墙钟） */
+function _cpSeq(cpDir) {
+  return _seqOf(_readMeta(cpDir));
 }
 
 /**
@@ -172,15 +182,12 @@ export function listCheckpoints(agentId) {
     .map(e => {
       const cpDir = path.join(root, e.name);
       const meta = _readMeta(cpDir);
+      const seq = _seqOf(meta);
       return meta
-        ? { id: meta.id, createdAt: meta.createdAt, prompt: meta.prompt }
-        : { id: e.name, createdAt: null, prompt: null };
+        ? { id: meta.id, createdAt: meta.createdAt, prompt: meta.prompt, seq }
+        : { id: e.name, createdAt: null, prompt: null, seq };
     });
-  entries.sort((a, b) => {
-    const ta = a.createdAt ? Date.parse(a.createdAt) : 0;
-    const tb = b.createdAt ? Date.parse(b.createdAt) : 0;
-    return ta - tb;
-  });
+  entries.sort((a, b) => a.seq - b.seq);   // 按栈序升序（最旧在前）
   return entries;
 }
 
@@ -190,6 +197,14 @@ export function listCheckpoints(agentId) {
 export function latestCheckpointId(agentId) {
   const list = listCheckpoints(agentId);
   return list.length ? list[list.length - 1].id : null;
+}
+
+/**
+ * 清空 rewind 栈：删掉该 agent 全部 checkpoint。
+ * 清空历史（DELETE /rooms/:rid/history）调——历史清了，对历史/记忆的快照栈也整体作废。
+ */
+export function clearCheckpoints(agentId) {
+  _rmDir(_checkpointsDir(agentId));
 }
 
 /**
@@ -211,8 +226,8 @@ export function rewindTo(agentId, checkpointId, roomHistoryPathOpt) {
   if (idx < 0) return { ok: false, restoredPrompt: null, error: 'checkpoint not found' };
 
   const target = list[idx];
-  const targetTs = target.createdAt ? Date.parse(target.createdAt) : 0;
-  logger.info(`[rewindTo 目标 ${agentId}] 目标项 idx=${idx} id=${target.id} createdAt=${target.createdAt} ts=${targetTs} prompt="${(target.prompt || '').slice(0, 30)}"`);
+  const targetSeq = target.seq;
+  logger.info(`[rewindTo 目标 ${agentId}] 目标项 idx=${idx} id=${target.id} seq=${targetSeq} createdAt=${target.createdAt} prompt="${(target.prompt || '').slice(0, 30)}"`);
 
   const root = _checkpointsDir(agentId);
   const targetCpDir = path.join(root, list[idx].id);
@@ -274,13 +289,15 @@ export function rewindTo(agentId, checkpointId, roomHistoryPathOpt) {
       }
     }
 
-    // 5. 删掉 target 之后（不含 target）的快照包
-    //    保留 target 本身，这样用户可以重复回退到同一 checkpoint。
+    // 5. 删掉 target 及其之后的所有快照包
+    //    target 本身也出栈：回退后栈顶下移到更旧那个，连续 rewind 才能一路往更旧走，
+    //    否则会卡在原栈顶空转（连按 N 次只撤销 1 轮）。
     const deletedIds = [];
     const keptIds = [];
+    // 出栈语义：栈顶=最大 seq；rewindTo(target)=弹出 target 及其之上全部（seq >= target）。
+    //   按 seq（创建时入栈分配、单调）判删，不再用毫秒墙钟——同毫秒快照也不会漏删。
     for (const cp of list) {
-      const ts = cp.createdAt ? Date.parse(cp.createdAt) : 0;
-      if (ts > targetTs) {
+      if (cp.seq >= targetSeq) {
         _rmDir(path.join(root, cp.id));
         deletedIds.push(cp.id);
       } else {
@@ -288,7 +305,7 @@ export function rewindTo(agentId, checkpointId, roomHistoryPathOpt) {
       }
     }
     const after = listCheckpoints(agentId);
-    logger.info(`[rewindTo 删除 ${agentId}] 目标 ts=${targetTs}，判定规则 ts>目标=删（保留目标本身）。删除 ${deletedIds.length} 个: ${deletedIds.join(',') || '(无)'}；保留 ${keptIds.length} 个: ${keptIds.join(',')}`);
+    logger.info(`[rewindTo 删除 ${agentId}] 目标 seq=${targetSeq}，判定规则 seq>=目标=删（含目标本身出栈）。删除 ${deletedIds.length} 个: ${deletedIds.join(',') || '(无)'}；保留 ${keptIds.length} 个: ${keptIds.join(',')}`);
     logger.info(`[rewindTo 删除后回查 ${agentId}] 磁盘实际剩余 ${after.length} 个快照包: ${_fmtList(after)}`);
 
     return { ok: true, restoredPrompt: meta.restoredPrompt ?? meta.prompt ?? null };

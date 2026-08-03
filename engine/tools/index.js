@@ -13,4 +13,3 @@ export { Grep } from './Grep.js';
 export { Agent } from './Agent.js';
 export { Skill } from './Skill.js';
 export { Speak } from './Speak.js';
-export { Roll } from './Roll.js';

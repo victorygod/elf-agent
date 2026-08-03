@@ -36,6 +36,10 @@ describe('Agent + Gateway 集成测试', () => {
     // 强制子进程用 mock model：不连真实 LLM、秒回、无网络依赖；同时让 Config 跳过 api_key 必填校验。
     // 子进程经 ProcessManager spawn 继承本测试进程的 env。
     process.env.ELF_FORCE_MOCK_MODEL = '1';
+    // 私聊 agent 监听端口整体偏移：本测试起的真实 agent 落在 18xxx，与真实 gateway 的 808x
+    //   完全隔离，可并行运行（真实 gateway 不设此 env → offset 0 → 端口不变）。
+    //   必须在 new ProcessManager() 前设：PM 构造时读取并据之计算 agent.port。
+    process.env.ELF_PORT_OFFSET = process.env.ELF_PORT_OFFSET || '10000';
     pm = new ProcessManager();
     pm.discoverAgents();
     // 清理可能残留的端口占用

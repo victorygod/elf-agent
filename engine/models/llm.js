@@ -13,7 +13,7 @@
 /**
  * 提取额外的请求参数（除 provider/base_url/auth_token/model 外的所有字段）
  */
-function extractExtraParams(config) {
+export function extractExtraParams(config) {
   const reserved = new Set(['provider', 'base_url', 'auth_token', 'model']);
   const extra = {};
   for (const [key, value] of Object.entries(config)) {

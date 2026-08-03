@@ -1,7 +1,8 @@
 /**
- * elf-018 装配入口 —— DNDAgent（4-loop workflow）+ DNDMessageManager。
+ * elf-018 装配入口 —— DNDAgent（2-loop workflow：outline → render）+ DNDMessageManager。
  * 运行时文档放 dataDir/runtime（rewind 整份回退）；config 留 canon（只读）+ seeds（首次种子）。
- * messages 组装由 DNDAgent._buildLoopMessages 自管（system 拼 loop_prompt+canon+file_index），不用注入器。
+ * messages 组装：system 经 promptAssembler.useSystemReplace 注入 canon+metadata，append 经
+ * useAfterLastUser 注入 state.md/面板/任务；render 由 DNDAgent._buildRenderMessages 自管。
  */
 import fs from 'fs';
 import path from 'path';
@@ -10,6 +11,11 @@ import { Config } from '../../engine/config_loader.js';
 import { buildAgentFromConfig } from '../../engine/build_agent.js';
 import { MessageManager } from './message_manager.js';
 import { DNDAgent } from './agent.js';
+import { makeWriteOutline } from './tools/WriteOutline.js';
+import { makeEditOutline } from './tools/EditOutline.js';
+import { makeRead } from './tools/Read.js';
+import { makeWrite } from './tools/Write.js';
+import { makeEdit } from './tools/Edit.js';
 import { agentMemory } from '../../shared/profiles_paths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -44,10 +50,21 @@ export async function createAgent({ runContext, dataDir, model, toolManager } = 
   agent._protagonistFile = 'user_profile.md';
   agent._configDir = configDir;   // 供 clearRuntime 找 seeds 重新播种
 
-  // main loop 用普通 agent 机制（base assemble + DNDMM tool_result 剪裁），canon/面板/任务经注入器在 _currentLoop='main' 时注入
+  // 本轮大纲专用工具（有状态：持 agent 实例，按 _roundNumber/_roots 定位本轮文件）。工厂构造、
+  // 需 agent 实例，故在此手动注册，不进 config.json tools 数组（自动注册路径在 new Agent 之前、拿不到 agent）。
+  agent.toolManager.register(makeWriteOutline(agent));
+  agent.toolManager.register(makeEditOutline(agent));
+
+  // lore 作用域 Read/Write/Edit 专版（同名覆盖 build_agent 注册的通用版）：持 agent 实例做 lore 范围 +
+  // frontmatter 守卫。config.json 的 tools 仍列其名（驱动通用版先注册），这里 register 同名覆盖成专版。
+  agent.toolManager.register(makeRead(agent));
+  agent.toolManager.register(makeWrite(agent));
+  agent.toolManager.register(makeEdit(agent));
+
+  // outline loop 用普通 agent 机制（base assemble + DNDMM tool_result 剪裁），canon/面板/任务经注入器在 _currentLoop='outline' 时注入
   const asm = agent.promptAssembler;
-  asm.useSystemReplace(() => agent._currentLoop === 'main' ? agent._mainSystem() : null, { order: -100, name: 'main-system' });
-  asm.useAfterLastUser(() => agent._currentLoop === 'main' ? agent._mainContext() : null, { order: 300, name: 'main-context' });
+  asm.useSystemReplace(() => agent._currentLoop === 'outline' ? agent._outlineSystem() : null, { order: -100, name: 'outline-system' });
+  asm.useAfterLastUser(() => agent._currentLoop === 'outline' ? agent._outlineContext() : null, { order: 300, name: 'outline-context' });
 
   return agent;
 }

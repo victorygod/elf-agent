@@ -1,5 +1,5 @@
 /**
- * Roll 工具 —— DND 5e d20 判定掷骰
+ * Roll 工具 —— DND 5e d20 判定掷骰（elf-018 专属工具，本地化于本 agent）
  *
  * 确定性随机（crypto.randomInt，防 LLM 凭空编数字）。自然 1 大失败 / 自然 20 大成功。
  * 给 dc 则判 total = roll + modifier >= dc。只读、并发安全（不改任何状态）。

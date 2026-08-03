@@ -84,7 +84,8 @@ export class MockModel {
         toolCalls = resp.tool_calls;
         await onChunk({ type: 'tool_calls', tool_calls: resp.tool_calls });
       } else {
-        const fullContent = resp.content || this.defaultResponse;
+        // resp.content 显式为 '' 时照空返回（用于测 render 空内容自愈）；缺省（undefined）才回退 default。
+        const fullContent = resp.content != null ? resp.content : this.defaultResponse;
         for (const char of fullContent) {
           if (signal?.aborted) abort();
           if (this.delayMs > 0) await new Promise(r => setTimeout(r, this.delayMs));

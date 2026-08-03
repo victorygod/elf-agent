@@ -44,7 +44,11 @@ export async function startAgent(configDir, runOpts = {}) {
 
   // 2. 构造 runContext（运行时身份）
   //    port 缺省回退 config.port（私聊默认）；dataDir 缺省回退 fromConfigDir 内的 configDir/..
-  const defaultPort = typeof configPreview.port === 'number' ? configPreview.port : null;
+  //    ELF_PORT_OFFSET：私聊实例监听端口整体偏移（测试用，与真实 gateway 端口隔离）；
+  //      真实 gateway 不设此 env → offset 0 → 端口不变。
+  const offset = Number(process.env.ELF_PORT_OFFSET) || 0;
+  const basePort = typeof configPreview.port === 'number' ? configPreview.port : null;
+  const defaultPort = basePort != null ? basePort + offset : null;
   // room 模式 port fail-fast(防 #5):副本不显式传 port 会回退 config.port(私聊端口),
   // 与常驻私聊实例抢端口 EADDRINUSE 崩溃。room 模式必须显式 port,不回退私聊端口。
   // 注意:buildRunContext 拿到的 port 已是"runOpts.port ?? defaultPort",无法区分来源,故在此判定。

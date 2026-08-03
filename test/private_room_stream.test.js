@@ -304,8 +304,8 @@ describe('private_room_stream 行为锚定（#8 修复点）', () => {
     handlePrivateAgentEvent('tool_call', { _roomId: roomId, loop: 'reviewer', tool_calls: [{ id: 'tc1', name: 'Skip', args: {} }] }, history);
     handlePrivateAgentEvent('tool_result', { _roomId: roomId, id: 'tc1', status: 'success', message: 'skipped' }, history);
     // render 开始：engine/agent.js _runLLMStream 在首个 token 前先发 status{render}
+    //   status 边界 flush：上一 reviewer Skip 气泡趁 _currentLoop 仍为 reviewer 落盘（status 分支先 flush 再切 loop）
     handlePrivateAgentEvent('status', { _roomId: roomId, state: 'thinking', loop: 'render' }, history);
-    // render 首个 token 触发新轮 flush，落盘上一 Skip 气泡
     handlePrivateAgentEvent('token', { _roomId: roomId, loop: 'render', content: '正文' }, history);
     handlePrivateAgentEvent('done', { _roomId: roomId }, history);
     const recs = fs.readFileSync(path.join(root, roomId, 'history.jsonl'), 'utf-8').trim().split('\n').map(l => JSON.parse(l));
@@ -313,5 +313,32 @@ describe('private_room_stream 行为锚定（#8 修复点）', () => {
     assert.equal(assistants.length, 2, `应落两条 assistant（reviewer Skip + render 正文），实际 ${assistants.length}`);
     assert.equal(assistants[0]._loop, 'reviewer', `reviewer 末尾 Skip 气泡应 _loop=reviewer（不被 status{render} 提前拧），实际 ${assistants[0]._loop}`);
     assert.equal(assistants[1]._loop, 'render', 'render 正文气泡应 _loop=render');
+  });
+
+  // 14. 纯文本尾 + loop 切换：reviewer 末尾纯文本（无工具）被 status{render} 边界 flush 成独立
+  //     reviewer 气泡，不被吞进 render 正文开头。复盘 elf-018 round-1：reviewer 第4轮 LLM 收尾
+  //     「完成了」（纯文本、无 tool_call），原本因 st.toolCalls==0 行 142 分块不触发，尾文本滞留
+  //     assistantContent；render 首 token 把 _currentLoop 翻成 render 后连同正文落成「完成了正文…」一条
+  //     render 气泡，reviewer 丢了收尾气泡。修复后 status 边界主动封盘——与用例 13 的 Skip 工具气泡
+  //     不同，此处验证的是「纯文本尾」这条原本无 flush 契机的路径。
+  it('纯文本尾 + loop 切换：reviewer 纯文本收尾被 status 边界 flush 成独立气泡，不吞进 render', () => {
+    beginTurn('纯文本尾', null);
+    // reviewer：工具轮（Write）落盘后，紧接纯文本收尾「完成了」——无工具，分块 flush 不触发，悬在 buffer
+    handlePrivateAgentEvent('tool_call', { _roomId: roomId, loop: 'reviewer', tool_calls: [{ id: 'tc1', name: 'Write', args: {} }] }, history);
+    handlePrivateAgentEvent('tool_result', { _roomId: roomId, id: 'tc1', status: 'success', message: 'ok' }, history);
+    handlePrivateAgentEvent('token', { _roomId: roomId, loop: 'reviewer', content: '完成了' }, history);
+    // render 开始：status{render} 边界 → 主动 flush reviewer 尾文本「完成了」成 reviewer 气泡（趁 _currentLoop 仍为 reviewer）
+    handlePrivateAgentEvent('status', { _roomId: roomId, state: 'thinking', loop: 'render' }, history);
+    handlePrivateAgentEvent('token', { _roomId: roomId, loop: 'render', content: '正文' }, history);
+    handlePrivateAgentEvent('done', { _roomId: roomId }, history);
+    const recs = fs.readFileSync(path.join(root, roomId, 'history.jsonl'), 'utf-8').trim().split('\n').map(l => JSON.parse(l));
+    const assistants = recs.filter(r => r.role === 'assistant');
+    // 3 条：reviewer 工具气泡 + reviewer 纯文本尾气泡 + render 正文气泡
+    assert.equal(assistants.length, 3, `应落三条 assistant（reviewer 工具 + reviewer 文本尾 + render），实际 ${assistants.length}`);
+    assert.equal(assistants[0]._loop, 'reviewer', 'reviewer 工具气泡 _loop=reviewer');
+    assert.equal(assistants[1]._loop, 'reviewer', `reviewer 纯文本尾气泡应 _loop=reviewer（不被吞进 render），实际 ${assistants[1]._loop}`);
+    assert.equal(assistants[1].content, '完成了', `reviewer 尾文本独立成气泡 content="完成了"，实际 "${assistants[1].content}"`);
+    assert.equal(assistants[2]._loop, 'render', 'render 正文气泡 _loop=render');
+    assert.equal(assistants[2].content, '正文', `render 正文不含「完成了」前缀，实际 "${assistants[2].content}"`);
   });
 });

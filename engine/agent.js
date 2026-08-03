@@ -20,6 +20,7 @@ import { createLogger } from '../shared/logger.js';
 const defaultLogger = createLogger('default-agent');
 import { Config } from './config_loader.js';
 import { LLMModel, MockModel } from './models/index.js';
+import { extractExtraParams } from './models/llm.js';
 import { MessageManager } from './message_manager.js';
 
 let logFileName = null;
@@ -28,6 +29,22 @@ export function setAgentLogFileName(name) {
   logFileName = name;
   setAbortFlowLogFileName(name);
   setHarnessLogFileName(name);
+}
+
+/**
+ * 模型配置指纹：唯一标识 LLM HTTP client 所需字段（provider/base_url/auth_token/model/timeouts + 透传 extraParams）。
+ * 提示词类字段不在其内 → 改提示词 modelKey 不变，reloadConfig 据此跳过 new LLMModel。
+ */
+function modelKey(mc = {}) {
+  return JSON.stringify({
+    provider: mc.provider,
+    base_url: mc.base_url || mc.baseUrl,
+    auth_token: mc.auth_token || mc.apiKey,
+    model: mc.model,
+    connectTimeout: mc.connectTimeout,
+    requestTimeout: mc.requestTimeout,
+    extra: extractExtraParams(mc)
+  });
 }
 
 export class Agent {
@@ -96,29 +113,36 @@ export class Agent {
 
   /**
    * 热更新配置（配置文件变化时调用）
-   * 重新加载 config，然后更新 model 和 messageManager
+   * 重新加载 config，然后更新 model 和 messageManager。
+   *
+   * model 实例只在"模型配置真变了"时重建——提示词类编辑（systemPrompt / loop_*_prompt）不触碰
+   *   base_url/auth_token/model/timeouts，modelKey 不变 → 跳过 new LLMModel，避免每次存提示词都
+   *   重建 HTTP client 的无谓扰动（且若恰好在飞 LLM 流，换实例虽不直接杀旧流，仍是多余动作）。
+   *   提示词热更新不受影响：DND 各 loop 在请求构建时懒读 config.get(...)，config.load() 已让
+   *   this.data 整体刷新；messageManager.updateConfig 也始终调，systemPrompt 即时生效。
    */
   reloadConfig() {
     const logger = createLogger('agent', logFileName);
+    const oldKey = modelKey(this.config.getModelConfig());   // load 前 stringify 快照（防 load 原地突变同对象）
     this.config.load();
+    const newMC = this.config.getModelConfig();
+    const newKey = modelKey(newMC);
 
-    // 更新 Model
-    const modelConfig = this.config.getModelConfig();
-    if (modelConfig.provider === 'mock') {
-      this.model = new MockModel();
+    // 更新 Model：modelKey 变了才重建
+    if (newKey !== oldKey) {
+      this.model = newMC.provider === 'mock' ? new MockModel() : new LLMModel(newMC);
+      logger.info('配置热加载完成 (model 已更新)');
     } else {
-      this.model = new LLMModel(modelConfig);
+      logger.info('配置热加载完成 (model 未变,跳过重建)');
     }
 
-    // 更新 MessageManager
+    // 更新 MessageManager（始终——systemPrompt/memoryTokenLimit/compactPrompt 类即时生效）
     this.messageManager.updateConfig({
       systemPrompt: this.config.get('systemPrompt'),
       memoryTokenLimit: this.config.get('memoryTokenLimit'),
       compactSystemPrompt: this.config.get('compactSystemPrompt'),
       compactPrompt: this.config.get('compactPrompt')
     });
-
-    logger.info('配置热加载完成');
   }
 
   /**

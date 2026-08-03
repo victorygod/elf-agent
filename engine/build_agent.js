@@ -9,6 +9,7 @@
  *
  * 不做兼容/不反射：废弃 fromConfigDir 的 messageManagerClass/agentClass 反射路径。
  */
+import fs from 'fs';
 import path from 'path';
 import { createLogger } from '../shared/logger.js';
 import { LLMModel, MockModel } from './models/index.js';
@@ -50,7 +51,12 @@ export async function buildAgentFromConfig({ messageManager, runContext = null, 
     const toolNames = config.get('tools');
     if (Array.isArray(toolNames)) {
       for (const name of toolNames) {
-        const tool = allTools[name];
+        let tool = allTools[name];
+        if (!tool) {
+          // 中央表查不到 → 回退 agent 本地 tools/<name>.js（config 的同级目录，agent 专属工具）
+          const localPath = path.join(config.configDir, '..', 'tools', `${name}.js`);
+          if (fs.existsSync(localPath)) tool = (await import(localPath))[name];
+        }
         if (tool) { toolManager.register(tool); logger.info(`注册工具: ${name}`); }
         else logger.warn(`未知工具: ${name}，跳过`);
       }

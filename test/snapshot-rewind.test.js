@@ -7,7 +7,7 @@
  * 3. rewindTo 对缺失 room-history.jsonl 的 checkpoint 能从 context.json 重建
  */
 
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, before, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
@@ -17,6 +17,7 @@ import {
   rewindTo,
   listCheckpoints,
   latestCheckpointId,
+  clearCheckpoints,
 } from '../gateway/snapshot.js';
 import { profilesRoot, _resetProfilesRoot, agentMemory } from '../shared/profiles_paths.js';
 
@@ -25,8 +26,13 @@ import { profilesRoot, _resetProfilesRoot, agentMemory } from '../shared/profile
 const __profilesRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-snapshot-test-'));
 process.env.ELF_PROFILES_ROOT = __profilesRoot;
 
+/** 本轮测试足迹：agentId() 记录用过的 id，afterEach 仅清这些（不再无差别抹掉所有 agents/rooms） */
+const _footprint = new Set();
+
 function agentId(name) {
-  return `test-${name}`;
+  const id = `test-${name}`;
+  _footprint.add(id);   // 记足迹：afterEach 仅清本轮测试影响的 agent 目录（+ 其私聊房 history）
+  return id;
 }
 
 function dataDirFor(id) {
@@ -56,17 +62,14 @@ after(() => {
   delete process.env.ELF_PROFILES_ROOT;
 });
 
-beforeEach(() => {
-  // 每个 test 前清空 agents 目录，防止之前运行残留的 checkpoint 干扰
-  const agentsDir = path.join(profilesRoot(), 'agents');
-  if (fs.existsSync(agentsDir)) {
-    fs.rmSync(agentsDir, { recursive: true, force: true });
+afterEach(() => {
+  // 仅清本轮测试影响的：本 it 用过的 agent 记忆目录 + 对应私聊房 history（只有 room-history
+  //   那条会建 rooms/chat-<id>）。不再无差别抹掉全部 agents/rooms——agentId 天然唯一，无需清场。
+  for (const id of _footprint) {
+    fs.rmSync(path.join(profilesRoot(), 'agents', id), { recursive: true, force: true });
+    fs.rmSync(path.join(profilesRoot(), 'rooms', `chat-${id}`), { recursive: true, force: true });
   }
-  // 同时清空 rooms 目录（存放私聊房 history）
-  const roomsDir = path.join(profilesRoot(), 'rooms');
-  if (fs.existsSync(roomsDir)) {
-    fs.rmSync(roomsDir, { recursive: true, force: true });
-  }
+  _footprint.clear();
 });
 
 // ── 辅助函数 ──
@@ -173,9 +176,9 @@ describe('snapshotBeforeSend — 首次对话 checkpoint', () => {
 
 // ========================================================================
 
-describe('rewindTo — 删除逻辑（保留目标 checkpoint）', () => {
+describe('rewindTo — 删除逻辑（弹出目标 checkpoint）', () => {
 
-  it('回退后目标 checkpoint 本身应被保留', () => {
+  it('回退后目标 checkpoint 本身应被弹出', () => {
     const aid = agentId('retain-target');
     ensureAgentDir(aid);
     const dataDir = dataDirFor(aid);
@@ -202,19 +205,17 @@ describe('rewindTo — 删除逻辑（保留目标 checkpoint）', () => {
     // 回退到 cp1（最早的一个）
     const result = rewindTo(aid, cp1);
     assert.equal(result.ok, true, 'rewind 应成功');
-    assert.equal(result.restoredPrompt, '第一条', '应返回正确的 restoredPrompt');
+    assert.equal(result.restoredPrompt, '第一条', '应返回正确的 restoredPrompt（删 target 前已读出）');
 
-    // cp1 本身不应被删除
+    // cp1 和 cp2 都应被删除（target 及其之后全弹）
     const list = listCheckpoints(aid);
     const ids = list.map(c => c.id);
-    assert.ok(ids.includes(cp1), 'cp1 应保留在 checkpoint 列表中');
-
-    // cp2 应被删除（因为在 cp1 之后）
+    assert.ok(!ids.includes(cp1), 'cp1 应被弹出');
     assert.ok(!ids.includes(cp2), 'cp2 应被删除');
 
-    // 应能再次回退到 cp1
+    // cp1 已不在栈中，重复回退会失败（避免卡在原栈顶空转）
     const result2 = rewindTo(aid, cp1);
-    assert.equal(result2.ok, true, '应能重复回退到同一 checkpoint');
+    assert.equal(result2.ok, false, 'target 已弹出，重复回退应失败');
   });
 
   it('回退到最新 checkpoint 时仅删除之后的快照', () => {
@@ -244,10 +245,11 @@ describe('rewindTo — 删除逻辑（保留目标 checkpoint）', () => {
     const result = rewindTo(aid, cp3);
     assert.equal(result.ok, true, 'rewind 应成功');
 
-    // cp3 应被保留，之前的也保留（回退到最新：没有后续快照可删）
+    // cp3 连同其本身一并弹出，只剩 cp1/cp2（连按 rewind 才能往更旧走）
     const list = listCheckpoints(aid);
-    assert.equal(list.length, 3, '回退到最新 checkpoint 应保留全部（含 cp1/cp2/cp3）');
-    assert.equal(list[2].id, cp3, '最新 checkpoint 应在列表末尾');
+    assert.equal(list.length, 2, '回退到最新 checkpoint 应弹出 cp3');
+    assert.equal(list[0].id, cp1);
+    assert.equal(list[1].id, cp2);
   });
 
   it('省略 checkpointId 时回退到最近一个', () => {
@@ -269,10 +271,10 @@ describe('rewindTo — 删除逻辑（保留目标 checkpoint）', () => {
     assert.equal(result.ok, true, 'rewind 应成功');
     assert.equal(result.restoredPrompt, '第二条', '应回退到最近的 checkpoint');
 
-    // 使用 > 语义：回退到最新，保留全部（cp1 和 cp2 都在）
+    // >= 语义：最近 checkpoint 连本身弹掉，只剩 cp1
     const list = listCheckpoints(aid);
-    assert.equal(list.length, 2, '应保留两个 checkpoint');
-    assert.ok(list.find(c => c.id === cp2), 'cp2 应保留');
+    assert.equal(list.length, 1, '应只保留 cp1');
+    assert.ok(!list.find(c => c.id === cp2), 'cp2 应被弹出');
   });
 });
 
@@ -387,19 +389,15 @@ describe('listCheckpoints & latestCheckpointId', () => {
 
     const cp2 = snapshotBeforeSend(aid, '第二条');
 
-    // 回退到 cp1
+    // 回退到 cp1：cp1 连同 cp2 全弹，栈空
     rewindTo(aid, cp1);
 
     const list = listCheckpoints(aid);
-    assert.equal(list.length, 1, '应只保留一个 checkpoint');
-    assert.equal(list[0].id, cp1, '应保留 cp1');
+    assert.equal(list.length, 0, 'cp1 及 cp2 都应被弹出');
 
-    // 再次回退到 cp1（测试保留语义）
+    // 再次回退到 cp1：target 已不在栈，应失败（不再卡栈顶空转）
     const result = rewindTo(aid, cp1);
-    assert.equal(result.ok, true, '重复回退 cp1 应成功');
-
-    const list2 = listCheckpoints(aid);
-    assert.equal(list2.length, 1, '重复回退后仍应有一个 checkpoint');
+    assert.equal(result.ok, false, 'cp1 已弹出，重复回退应失败');
   });
 });
 
@@ -433,5 +431,89 @@ describe('snapshotBeforeSend — 滑窗淘汰', () => {
     for (let i = 2; i < 12; i++) {
       assert.ok(list.find(c => c.id === cpIds[i]), `cp${i} 应保留`);
     }
+  });
+});
+
+// ========================================================================
+
+describe('rewind 栈语义（seq 入栈定序 / rewindTo 出栈 / clearCheckpoints 清栈）', () => {
+
+  it('seq 单调递增：连打快照，list 按 seq 升序 0,1,2...', () => {
+    const aid = agentId('seq-monotonic');
+    ensureAgentDir(aid);
+    const dataDir = dataDirFor(aid);
+    fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
+
+    const cp1 = snapshotBeforeSend(aid, '一');   // seq 0
+    const cp2 = snapshotBeforeSend(aid, '二');   // seq 1
+    const cp3 = snapshotBeforeSend(aid, '三');   // seq 2
+
+    const list = listCheckpoints(aid);
+    assert.equal(list.length, 3);
+    assert.deepEqual(list.map(c => c.seq), [0, 1, 2], 'seq 应为 0,1,2 升序');
+    assert.deepEqual(list.map(c => c.id), [cp1, cp2, cp3], '顺序应与创建一致');
+  });
+
+  it('同毫秒两个快照也能正确出栈（修旧 flaky：不再靠忙等隔毫秒）', () => {
+    const aid = agentId('same-ms');
+    ensureAgentDir(aid);
+    const dataDir = dataDirFor(aid);
+    fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
+
+    const cp1 = snapshotBeforeSend(aid, '第一条');
+    fs.writeFileSync(path.join(dataDir, 'context.json'),
+      JSON.stringify([{ id: 'm1', role: 'user', content: '第一条' }]), 'utf-8');
+    const cp2 = snapshotBeforeSend(aid, '第二条');   // 故意紧挨着打，可能与 cp1 同毫秒
+
+    const list0 = listCheckpoints(aid);
+    assert.equal(list0[0].id, cp1);
+    assert.equal(list0[1].id, cp2);
+    assert.ok(list0[1].seq > list0[0].seq, 'seq 仍严格递增（不依赖墙钟毫秒）');
+
+    rewindTo(aid, cp1);   // 出栈：弹出 cp1 及其之上全部（含 cp2）
+    const list = listCheckpoints(aid);
+    assert.equal(list.length, 0, '同毫秒下 rewind 也应弹出 cp1+cp2，栈空');
+  });
+
+  it('rewind 后续推：栈位置在现存中连续（弹出后新推取下一位置）', () => {
+    const aid = agentId('rewind-then-push');
+    ensureAgentDir(aid);
+    const dataDir = dataDirFor(aid);
+    fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
+
+    const cp1 = snapshotBeforeSend(aid, '一');   // seq 0
+    snapshotBeforeSend(aid, '二');               // seq 1
+    rewindTo(aid, cp1);                          // 弹到 cp1：cp1 及 seq=1 全弹，栈空
+    assert.equal(listCheckpoints(aid).length, 0);
+
+    const cp3 = snapshotBeforeSend(aid, '三');   // 续推：栈空，seq 从 0 重新起
+    const list = listCheckpoints(aid);
+    assert.equal(list.length, 1);
+    assert.deepEqual(list.map(c => c.id), [cp3], '栈=[cp3]');
+    assert.deepEqual(list.map(c => c.seq), [0], '栈位置从 0 重新连续');
+  });
+
+  it('clearCheckpoints 清空整个 rewind 栈，重打 seq 从 0 起', () => {
+    const aid = agentId('clear-stack');
+    ensureAgentDir(aid);
+    const dataDir = dataDirFor(aid);
+    fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
+
+    snapshotBeforeSend(aid, '一');
+    snapshotBeforeSend(aid, '二');
+    assert.equal(listCheckpoints(aid).length, 2, '清空前应有 2 个');
+
+    clearCheckpoints(aid);
+
+    assert.equal(listCheckpoints(aid).length, 0, '清栈后应为空');
+    assert.equal(latestCheckpointId(aid), null, 'latestCheckpointId 应为 null');
+    assert.ok(!fs.existsSync(checkpointsDirFor(aid)), 'checkpoints 目录应被删');
+
+    // 清栈后再打快照，seq 从 0 重新开始（栈已空）
+    const cp = snapshotBeforeSend(aid, '三');
+    const list = listCheckpoints(aid);
+    assert.equal(list.length, 1);
+    assert.equal(list[0].id, cp);
+    assert.equal(list[0].seq, 0, '清空后重打 seq 从 0 起');
   });
 });

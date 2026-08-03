@@ -21,13 +21,13 @@ export function setLogFileName(name) {
   logFileName = name;
 }
 
-// 摘要包装前缀（对齐 Claude Code oF6 摘要包装）
-const SUMMARY_PREAMBLE =
+// 摘要包装前缀（对齐 Claude Code oF6 摘要包装）；export 供子类/消费方剥除 preamble 取纯摘要
+export const SUMMARY_PREAMBLE =
   'This session is being continued from a previous conversation that ran out of context. ' +
   'The summary below covers the earlier portion of the conversation.\n\n';
 
 // 续写指令（对齐 CC continuationClause）
-const CONTINUATION_CLAUSE =
+export const CONTINUATION_CLAUSE =
   'Continue the conversation from where it left off without asking the user any further questions. ' +
   'Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface ' +
   'with "I\'ll continue" or similar. Pick up the last task as if the break never happened.\n\n';

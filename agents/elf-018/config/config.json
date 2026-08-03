@@ -11,10 +11,6 @@
     "type": "path",
     "content": "loop_outline_prompt.md"
   },
-  "loop_reviewer_prompt": {
-    "type": "path",
-    "content": "loop_reviewer_prompt.md"
-  },
   "loop_render_prompt": {
     "type": "path",
     "content": "loop_render_prompt.md"

@@ -13,7 +13,7 @@ import path from 'path';
 import { loadGatewayConfig } from './config.js';
 import { RoomManager } from './room_bus.js';
 import { subscribePrivateRoom, startPrivateTurn, forceFinishPrivateTurn } from './private_room_stream.js';
-import { rewindTo, listCheckpoints, snapshotBeforeSend } from './snapshot.js';
+import { rewindTo, listCheckpoints, snapshotBeforeSend, clearCheckpoints } from './snapshot.js';
 import { agentMemory } from '../shared/profiles_paths.js';
 
 export function registerRoomRoutes(app, roomManager, opts = {}) {
@@ -170,6 +170,8 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
     const rid = req.params.rid;
     if (isPrivateRoom(rid)) {
       if (privateRoomHistory) privateRoomHistory.clear(rid);
+      // 清空历史连带清 rewind 栈：checkpoints 是对私聊房历史/记忆的快照，历史清了栈也整体作废。
+      try { clearCheckpoints(privateAgentId(rid)); } catch (e) { /* 清栈失败不阻塞清历史 */ }
     } else {
       roomManager.getHistory(rid).clear();
     }

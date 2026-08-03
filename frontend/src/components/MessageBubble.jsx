@@ -6,7 +6,7 @@ import { formatTime } from '../utils/format';
 import MarkdownContent from './MarkdownContent';
 import styles from './MessageBubble.module.css';
 
-const LOOP_LABELS = { main: '大纲', reviewer: '审校', render: '渲染' };
+const LOOP_LABELS = { outline: '大纲', render: '渲染' };
 
 const MessageBubble = React.memo(function MessageBubble({ msg, agentId, agentAvatar, userAvatar, isStreaming, onToggleTime, showTime, inAssistantGroup, currentLoop }) {
   const [expanded, setExpanded] = useState(false);
