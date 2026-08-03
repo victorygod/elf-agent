@@ -11,6 +11,7 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { createLogger } from '../shared/logger.js';
 import { LLMModel, MockModel } from './models/index.js';
 import { ToolManager } from './tools/tool_manager.js';
@@ -55,7 +56,7 @@ export async function buildAgentFromConfig({ messageManager, runContext = null, 
         if (!tool) {
           // 中央表查不到 → 回退 agent 本地 tools/<name>.js（config 的同级目录，agent 专属工具）
           const localPath = path.join(config.configDir, '..', 'tools', `${name}.js`);
-          if (fs.existsSync(localPath)) tool = (await import(localPath))[name];
+          if (fs.existsSync(localPath)) tool = (await import(pathToFileURL(localPath).href))[name];
         }
         if (tool) { toolManager.register(tool); logger.info(`注册工具: ${name}`); }
         else logger.warn(`未知工具: ${name}，跳过`);
