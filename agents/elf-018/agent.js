@@ -68,7 +68,15 @@ export class DNDAgent extends Agent {
       //   常驻 true，后续每轮首个工具执行完即被 executeBatch 当作中断抛 AbortError → runAborable 收尾，
       //   表现为「中断过一次就一直中断」。
       this._aborted = false;
-      return this.runFourLoopWorkflow({ emit: opts.emit || (() => {}), skipAddUser: opts.skipAddUser });
+      await this.runFourLoopWorkflow({ emit: opts.emit || (() => {}), skipAddUser: opts.skipAddUser });
+      // 用户终止成功后立即 rewind：丢掉本轮已产出的 partial 正文/工具/提醒，把 MM 还原到最近一条真实 user
+      //   消息，并清本轮 outline/scene 半成品（_countRounds 回退 → 重发/续跑按原 user 重玩本轮，而非跳到 N+1）。
+      //   abort 收尾（finishAborted）已 emit aborted+done 并把 partial 存为 assistant——由 rewind 一并截掉。
+      if (this._aborted) {
+        this.messageManager.rewindToLastUser();
+        this._discardCurrentRoundArtifacts();
+      }
+      return;
     }
     return super.reasoning(message, opts);
   }

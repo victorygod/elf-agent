@@ -195,11 +195,17 @@ export class ToolManager {
       }
     };
     // tool_result 事件辅助：完成即推，payload 带 id 供前端按 id 匹配（到达顺序不限原序）
+    //   成功带 result（前端 badge 截断展示、title 放全文）；错误仍走 message（与原 error 渲染一致）
     const emitToolResult = (item, result) => {
       const isErr = isErrorResult(result);
       emit({
         event: 'tool_result',
-        data: { id: item.tc.id, status: isErr ? 'error' : 'success', message: isErr ? result : undefined },
+        data: {
+          id: item.tc.id,
+          status: isErr ? 'error' : 'success',
+          message: isErr ? result : undefined,
+          result: isErr ? undefined : result,
+        },
       });
     };
 

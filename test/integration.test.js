@@ -72,37 +72,11 @@ describe('Agent + Gateway 集成测试', () => {
   });
 
   after(async () => {
-    // ① 立即断开所有 events 长连接
-    //    每个 Agent 都有独立的 connectAgentEvents + AbortController。
-    //    abort 后所有 setTimeout 回调因 signal.aborted 而静默退出，
-    //    彻底切断 events 重连链，防止 node --test 进程卡住无法退出。
+    // v4：停共享 agent-server（一个进程承载全部 agent）：/shutdown + 强杀 + 断 __server__ /events 连接。
+    //   旧的 per-agent disconnectAgentEvents(id)/killPort(agent.port) 循环在共享模型下是 no-op（连接 key 是 __server__，
+    //   agents Map 不再带 port），不补这步会导致 node --test 因 /events 长连 + 残留 server 进程而挂住不退出。
     if (pm) {
-      try {
-        const { disconnectAgentEvents } = await import('../gateway/agent_events.js');
-        for (const [id] of pm.agents) {
-          disconnectAgentEvents(id);
-        }
-      } catch (e) { /* agent_events 不可用不阻塞后续清理 */ }
-    }
-
-    // ② 优雅停止所有 Agent（给 /shutdown 2 秒超时）
-    for (const [, agent] of pm?.agents ?? []) {
-      try {
-        await fetch(`http://127.0.0.1:${agent.port}/shutdown`, {
-          method: 'POST',
-          signal: AbortSignal.timeout(2000),
-        });
-      } catch { /* Agent 可能未运行或已崩溃 */ }
-    }
-    await new Promise(r => setTimeout(r, 500));
-
-    // ③ 兜底：强制 kill 仍占端口的进程
-    for (const [id, agent] of pm?.agents ?? []) {
-      try {
-        execSync(`lsof -ti :${agent.port} -sTCP:LISTEN | xargs kill -9 2>/dev/null || true`, {
-          stdio: 'ignore',
-        });
-      } catch { /* 忽略 */ }
+      try { await pm.stopServer(); } catch (e) { /* 忽略 */ }
     }
 
     // ④ 关闭 Gateway 服务器
@@ -247,14 +221,13 @@ describe('Agent + Gateway 集成测试', () => {
     const dataBefore = await statusBefore.json();
     assert.equal(dataBefore.status, 'running');
 
-    // 通过 ProcessManager 找到 PID 并 SIGKILL 模拟崩溃
-    const agentInternal = pm.agents.get('elf-002');
-    assert.ok(agentInternal, '应存在于 agents Map 中');
-    assert.ok(agentInternal.pid, `应有 pid，实际为 ${agentInternal.pid}`);
+    // 通过 ProcessManager 找到共享 agent-server 的 PID 并 SIGKILL 模拟崩溃
+    //   v4：单 agent 进程模型已废；pid 在 pm.server（共享 agent-server），不在 agents Map。
+    assert.ok(pm.server.pid, `应有 server pid，实际为 ${pm.server.pid}`);
 
-    // SIGKILL 进程模拟崩溃
+    // SIGKILL 共享 server 进程模拟崩溃
     try {
-      process.kill(agentInternal.pid, 'SIGKILL');
+      process.kill(pm.server.pid, 'SIGKILL');
     } catch (e) {
       // 进程可能已退出
     }
@@ -262,13 +235,13 @@ describe('Agent + Gateway 集成测试', () => {
     // 等待进程退出
     await new Promise(r => setTimeout(r, 1000));
 
-    // 通过探活刷新状态
-    await pm.probeAgent('elf-002');
+    // 通过探活刷新状态（probeServer 探共享 server）
+    await pm.probeServer();
 
-    // 验证 status 变为 stopped
+    // 验证 status 变为 server-down（共享 server 崩了 → 其名下已启用 agent 派生 server-down，§4.3 进程级）
     const statusAfter = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/agents/elf-002`);
     const dataAfter = await statusAfter.json();
-    assert.equal(dataAfter.status, 'stopped', 'Agent 崩溃后 status 应为 stopped');
+    assert.equal(dataAfter.status, 'server-down', 'Agent-server 崩溃后其名下 agent 应为 server-down');
   });
 
   it('配置热加载：修改文件后 Agent 应自动重载配置', async () => {

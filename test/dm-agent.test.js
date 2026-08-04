@@ -33,7 +33,7 @@ const charProfile = (body) => `---\nname: 勇者\ndescription: 玩家角色（�
 describe('Roll 工具', () => {
   it('返回格式含 d20 点数与用途', async () => {
     const r = await Roll.execute({ purpose: '攻击判定', dc: 10, modifier: 2 });
-    assert.match(r, /Roll d20=\d+/);
+    assert.match(r, /Roll 1d20=\d+/);
     assert.match(r, /vs DC 10/);
     assert.match(r, /（攻击判定）/);
     assert.ok(/大失败|大成功|成功|失败/.test(r));
@@ -41,7 +41,7 @@ describe('Roll 工具', () => {
 
   it('省略 dc 时不判过（无 vs DC，自然1/20 仍大失败/大成功）', async () => {
     const r = await Roll.execute({ purpose: '测试' });
-    assert.match(r, /Roll d20=\d+/);
+    assert.match(r, /Roll 1d20=\d+/);
     assert.doesNotMatch(r, /vs DC/);
   });
 
@@ -49,11 +49,30 @@ describe('Roll 工具', () => {
     const seen = new Set();
     for (let i = 0; i < 200; i++) {
       const r = await Roll.execute({ purpose: '采样', dc: 10 });
-      const m = r.match(/Roll d20=(\d+)/);
+      const m = r.match(/Roll 1d20=(\d+)/);
       seen.add(Number(m[1]));
       if (seen.has(1) && seen.has(20)) break;
     }
     assert.ok(seen.has(1) && seen.has(20), '多次掷骰应能采到 1 和 20');
+  });
+
+  it('1d8 伤害骰：无 dc、只出数值、不判 nat', async () => {
+    const r = await Roll.execute({ purpose: '长剑伤害', dice: '1d8', modifier: 3 });
+    assert.match(r, /Roll 1d8=\d+/);
+    assert.match(r, /仅掷骰/);
+    assert.doesNotMatch(r, /vs DC/);
+    assert.doesNotMatch(r, /大成功|大失败/);   // 非 1d20 不判 nat
+  });
+
+  it('2d6 多颗骰：显示逐骰与求和', async () => {
+    const r = await Roll.execute({ purpose: '伤害', dice: '2d6' });
+    assert.match(r, /Roll 2d6=\d+\+\d+=\d+/);
+    assert.doesNotMatch(r, /大成功|大失败/);
+  });
+
+  it('dice 默认 1d20（不传时）', async () => {
+    const r = await Roll.execute({ purpose: '默认', dc: 10 });
+    assert.match(r, /Roll 1d20=\d+/);
   });
 });
 
@@ -97,6 +116,56 @@ describe('DNDMessageManager', () => {
       'Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface ' +
       'with "I\'ll continue" or similar. Pick up the last task as if the break never happened.\n\n';
   }
+
+  it('rewindToLastUser：截断到最近真实 user（含），清其后 assistant/tool/meta/summary', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-dndmm-rewind-'));
+    const mm = new DNDMessageManager({
+      systemPrompt: 'sys', memoryTokenLimit: 40000,
+      compactPrompt: '总结', compactSystemPrompt: '压缩器', dataDir: tmp, config: null,
+    });
+    mm.addUserMessage('玩家本轮指令');          // 真实 user（最近）
+    mm.addMetaMessage('本轮尚未产出大纲…', 'outline_reminder');   // meta（user 角色，应被清）
+    mm.addAssistantToolCalls([{ id: 'c1', type: 'function', function: { name: 'WriteOutline', arguments: '{}' } }]);
+    mm.addToolResult('c1', 'ok');
+    mm.addAssistantMessage('半成品正文……');     // 中断保留的 partial
+    const userIdx = mm.messages.findIndex((m) => m.role === 'user' && !m.isMeta && !m.isCompactSummary);
+    const userId = mm.messages[userIdx].id;
+
+    mm.rewindToLastUser();
+
+    assert.equal(mm.messages.length, userIdx + 1, '只保留到最近真实 user（含）');
+    assert.equal(mm.messages[mm.messages.length - 1].id, userId, '末条即该 user');
+    assert.ok(!mm.messages.some((m) => m.role === 'assistant'), '其后的 assistant 全清');
+    assert.ok(!mm.messages.some((m) => m.role === 'tool'), '其后的 tool 全清');
+    assert.ok(!mm.messages.some((m) => m.isMeta), '其后的 meta 全清');
+    // 落盘一致
+    const onDisk = JSON.parse(fs.readFileSync(path.join(tmp, 'context.json'), 'utf-8'));
+    assert.equal(onDisk.length, userIdx + 1, 'context.json 已截断落盘');
+  });
+
+  it('rewindToLastUser：末条已是真实 user 不动；只有 meta/summary(非真实 user) 不动', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-dndmm-rewind2-'));
+    const mm = new DNDMessageManager({
+      systemPrompt: 'sys', memoryTokenLimit: 40000,
+      compactPrompt: '总结', compactSystemPrompt: '压缩器', dataDir: tmp, config: null,
+    });
+    mm.addUserMessage('玩家指令');          // 末条即真实 user
+    const before = mm.messages.length;
+    mm.rewindToLastUser();
+    assert.equal(mm.messages.length, before, '末条已是真实 user 时不截断');
+
+    // 只有 meta（无真实 user）→ 找不到真实 user，不动
+    const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-dndmm-rewind3-'));
+    const mm2 = new DNDMessageManager({
+      systemPrompt: 'sys', memoryTokenLimit: 40000,
+      compactPrompt: '总结', compactSystemPrompt: '压缩器', dataDir: tmp2, config: null,
+    });
+    mm2.addMetaMessage('提醒', 'tag');
+    mm2.addAssistantMessage('半成品');
+    const before2 = mm2.messages.length;
+    mm2.rewindToLastUser();
+    assert.equal(mm2.messages.length, before2, '无真实 user 时不截断');
+  });
 });
 
 // ========================
@@ -394,6 +463,57 @@ describe('render 空内容自愈 + reloadConfig', () => {
     assert.equal(notice.data.kind, 'error', 'notice kind=error');
     assert.match(notice.data.text, /未产出大纲/, 'notice 文案提示未产出大纲');
     assert.ok(events.some((e) => e.event === 'done'), '应 emitDone 封棺，不死循环');
+  });
+
+  it('用户终止 → reasoning 收尾后立即 rewind 到最近真实 user（清 partial/工具/提醒 + 删本轮半成品）', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-dnd-terminate-'));
+    const charPath = path.join(tmp, 'lore', 'user_profile.md');
+    const { agent, mm, roots, model } = buildAgent(tmp, [
+      ...outlineResponses(charPath),
+      { content: '剧情正文内容' },   // render：流到首字即被中止
+    ]);
+    agent._scene = {};   // 走 override 的 runFourLoopWorkflow 分支（私聊场景）
+    // 本轮真实 user（rewind 的锚点）
+    mm.addUserMessage('玩家本轮指令');
+    const userIdx = mm.messages.length - 1;
+    const userId = mm.messages[userIdx].id;
+
+    // 在 render 的 chatStream（第 4 次 LLM 调用）首 token 后同步中止：制造非空 partial（验证 rewind 会清掉它）
+    const realChatStream = model.chatStream.bind(model);
+    let callCount = 0;
+    let aborted = false;
+    const events = [];
+    const emit = (e) => events.push(e);
+    model.chatStream = async function (messages, tools, options) {
+      callCount++;
+      const origOnChunk = options.onChunk;
+      if (callCount === 4) {
+        options.onChunk = (chunk) => {
+          if (origOnChunk) origOnChunk(chunk);
+          if (!aborted) { aborted = true; agent.abort(); }   // 首 token 后中止
+        };
+      }
+      return realChatStream(messages, tools, options);
+    };
+
+    await agent.reasoning(null, { skipAddUser: true, emit });
+
+    assert.ok(aborted, 'render 首 token 后触发了 abort');
+    assert.equal(agent._aborted, true, '本轮被终止（_aborted=true）');
+    assert.ok(events.some((e) => e.event === 'aborted'), 'emit 了 aborted');
+
+    // MM rewind 到最近真实 user：末条即该 user，其后 assistant/tool/meta 全清
+    assert.equal(mm.messages.length, userIdx + 1, 'MM 截断到最近真实 user（含）');
+    assert.equal(mm.messages[mm.messages.length - 1].id, userId, '末条即本轮 user');
+    assert.ok(!mm.messages.some((m) => m.role === 'assistant'), 'partial 正文 + outline 工具调用全清');
+    assert.ok(!mm.messages.some((m) => m.role === 'tool'), '工具结果全清');
+    assert.ok(!mm.messages.some((m) => m.isMeta), 'meta 提醒全清');
+    // 落盘一致
+    const onDisk = JSON.parse(fs.readFileSync(path.join(mm.dataDir, 'context.json'), 'utf-8'));
+    assert.equal(onDisk.length, userIdx + 1, 'context.json 已截断落盘');
+    // 本轮半成品被删：_countRounds 回退 → 重发/续跑按原 user 重玩本轮而非跳到 N+1
+    assert.ok(!fs.existsSync(path.join(roots.outline, 'round-1.md')), '终止后 outline/round-1.md 应被删');
+    assert.ok(!fs.existsSync(path.join(roots.scene, 'round-1.md')), '终止后不应落 scene/round-1.md');
   });
 
   it('reloadConfig modelKey 守卫：提示词类编辑不重建 model，base_url 变了才重建', () => {

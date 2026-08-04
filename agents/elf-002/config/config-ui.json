@@ -20,7 +20,7 @@
         { "key": "memoryTokenLimit", "type": "number", "label": "记忆压缩 Token 上限", "hint": "累计上下文超过此值时，触发整体摘要压缩（建议 4000-16000）" },
         { "key": "perToolLimit", "type": "number", "label": "单工具结果 Token 上限", "hint": "单个工具结果超过此值时，落盘并改写为占位符（防止一条结果撑爆上下文）" },
         { "key": "budgetWindow", "type": "number", "label": "单轮工具结果预算", "hint": "一轮对话内的工具结果总量超过此值时，按体积从大到小逐个落盘淘汰（控制单轮工具结果的累积量）" },
-        { "key": "previewLength", "type": "number", "label": "工具结果预览长度", "hint": "工具结果在前端预览时显示的最大字符数" },
+        { "key": "previewLength", "type": "number", "label": "工具结果预览长度", "hint": "单个工具结果超限落盘后，在 LLM 上下文占位符里保留的预览字符数（全文存磁盘，LLM 需细节时用 Read 回读；不影响前端展示）" },
         { "key": "maxIterations", "type": "number", "label": "最大迭代轮数", "hint": "Agent Loop 最大循环次数（设为 0 表示无限迭代）" }
       ]
     },

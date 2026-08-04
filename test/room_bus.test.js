@@ -10,7 +10,7 @@ import path from 'path';
 import os from 'os';
 import http from 'node:http';
 import { profilesRoot, roomsRoot, agentRoomState, _resetProfilesRoot } from '../shared/profiles_paths.js';
-import { RoomBroadcaster, RoomHistory, allocPort, RoomRegistry, RoomConfig, RoomManager, MEMBER_STATUS } from '../gateway/room_bus.js';
+import { RoomBroadcaster, RoomHistory, RoomConfig, RoomManager, MEMBER_STATUS } from '../gateway/room_bus.js';
 
 /** 造 mock res（捕获 write/end，模拟 close 事件）
  *  writeThrowsAfterN: 前 N 次 write 正常，第 N+1 次起抛错（模拟订阅后才断连）
@@ -217,95 +217,6 @@ describe('RoomHistory', () => {
 });
 
 // ============================================================
-// allocPort
-// ============================================================
-
-describe('allocPort', () => {
-  it('返回一个可 listen 的端口', async () => {
-    const port = await allocPort();
-    assert.ok(port > 0, 'port 应 > 0');
-    // 再起 server 占用它，证明可 listen
-    await new Promise((resolve) => {
-      const srv = http.createServer();
-      srv.listen(port, '127.0.0.1', () => srv.close(() => resolve()));
-    });
-  });
-
-  it('两次调用都能拿到有效端口', async () => {
-    const p1 = await allocPort();
-    const p2 = await allocPort();
-    assert.ok(p1 > 0);
-    assert.ok(p2 > 0);
-  });
-});
-
-// ============================================================
-// RoomRegistry
-// ============================================================
-
-describe('RoomRegistry', () => {
-  let tmpDir, reg;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-rr-'));
-    reg = new RoomRegistry(path.join(tmpDir, 'rooms'));
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it('write 写入 run.json，read 读回字段正确', () => {
-    reg.write('roomA', 'elf-001', {
-      port: 9001, pid: 1234, memberName: 'elf-001', dataDir: '/tmp/x', roomBusUrl: 'http://x',
-    });
-    const r = reg.read('roomA', 'elf-001');
-    assert.equal(r.runKey, 'roomA/elf-001');
-    assert.equal(r.roomId, 'roomA');
-    assert.equal(r.agentId, 'elf-001');
-    assert.equal(r.port, 9001);
-    assert.equal(r.pid, 1234);
-    assert.equal(r.memberName, 'elf-001');
-    assert.equal(r.dataDir, '/tmp/x');
-    assert.equal(r.roomBusUrl, 'http://x');
-  });
-
-  it('list 列出某群所有副本', () => {
-    reg.write('roomA', 'elf-001', { port: 9001, pid: 1, memberName: 'a', dataDir: '/x', roomBusUrl: 'http://x' });
-    reg.write('roomA', 'elf-002', { port: 9002, pid: 2, memberName: 'b', dataDir: '/y', roomBusUrl: 'http://x' });
-    const list = reg.list('roomA');
-    assert.equal(list.length, 2);
-    const agentIds = list.map(r => r.agentId).sort();
-    assert.deepEqual(agentIds, ['elf-001', 'elf-002']);
-  });
-
-  it('remove 删除 run.json，list 不再含它', () => {
-    reg.write('roomA', 'elf-001', { port: 9001, pid: 1, memberName: 'a', dataDir: '/x', roomBusUrl: 'http://x' });
-    reg.remove('roomA', 'elf-001');
-    assert.equal(reg.read('roomA', 'elf-001'), null);
-    assert.equal(reg.list('roomA').length, 0);
-  });
-
-  it('list 对不存在群返回空', () => {
-    assert.deepEqual(reg.list('nope'), []);
-  });
-
-  it('list 跳过缺 run.json 的成员目录', () => {
-    // 造一个成员目录但没 run.json
-    const dir = path.join(tmpDir, 'rooms', 'roomA', 'data', 'elf-003');
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'other.txt'), 'junk');
-    reg.write('roomA', 'elf-001', { port: 9001, pid: 1, memberName: 'a', dataDir: '/x', roomBusUrl: 'http://x' });
-    const list = reg.list('roomA');
-    assert.equal(list.length, 1); // 只 elf-001，elf-003 被跳过
-  });
-
-  it('read 对不存在的副本返回 null', () => {
-    assert.equal(reg.read('roomA', 'ghost'), null);
-  });
-});
-
-// ============================================================
 // RoomConfig
 // ============================================================
 
@@ -417,66 +328,61 @@ describe('RoomManager', () => {
   });
 
 
-  /** fake spawn：返回带 _fakeReady=true 的假 child，记录调用 */
-  function fakeSpawnFactory(calls = []) {
-    return (args) => {
-      calls.push(args);
-      return { pid: 10000 + calls.length, _fakeReady: true };
+  /** pm 桩：v4 共享 agent-server 模型。getAgentStatus='running'（ensureAgentPresent 跳过 startAgent），
+   *   getAgentPort 返回 portFor(id)（共享 server 端口；默认 9999 无人监听，/clear 类 fetch 失败走删盘兜底）。 */
+  function makePm(portFor = () => 9999) {
+    const started = [];
+    return {
+      started,
+      getAgentStatus: () => 'running',
+      async startAgent(id) { started.push(id); return { agentId: id, status: 'running', pid: 9999 }; },
+      getAgentPort: (id) => portFor(id),
+      getAgent: (id) => ({ pid: 9999 }),
     };
   }
 
-  function newManager(calls) {
+  function newManager(pm = makePm()) {
     return new RoomManager(roomsDir, 8080, {
-      spawnFn: fakeSpawnFactory(calls),
+      pm,
       agentConfigDir: (id) => path.join(agentsDir, id, 'config'),
-      startTimeout: 500, // fake 不真等
     });
   }
 
-  it('createRoom 写 RoomConfig + 拉起所有成员副本 + 状态 running', async () => {
-    const calls = [];
-    const mgr = newManager(calls);
+  it('createRoom 写 RoomConfig + 经 pm 确保成员在场 + 状态 running', async () => {
+    const mgr = newManager();
     const r = await mgr.createRoom('群', ['elf-001', 'elf-002']);
     assert.ok(r.roomId);
     assert.equal(r.members.length, 2);
-    assert.equal(calls.length, 2); // 两个成员都 spawn
-    // run.json 已写
-    const list = mgr.registry.list(r.roomId);
-    assert.equal(list.length, 2);
-    // 成员状态 running
     const room = mgr.getRoom(r.roomId);
-    assert.ok(room.members.every(m => m.status === MEMBER_STATUS.RUNNING));
+    assert.ok(room.members.every(m => m.status === MEMBER_STATUS.RUNNING), '成员经 pm 确保在场');
+    assert.ok(room.members.every(m => m.port === 9999), '成员 port 取自 pm.getAgentPort（共享 server）');
   });
 
-  it('createRoom 成员不存在时不 spawn，该成员 offline', async () => {
-    const calls = [];
-    const mgr = newManager(calls);
+  it('createRoom 成员不存在时该成员 offline', async () => {
+    const mgr = newManager();
     const r = await mgr.createRoom('群', ['elf-001', 'ghost']);
-    assert.equal(calls.length, 1); // 只 elf-001 被 spawn
     const room = mgr.getRoom(r.roomId);
     const ghost = room.members.find(m => m.agentId === 'ghost');
     assert.equal(ghost.status, MEMBER_STATUS.OFFLINE);
   });
 
-  it('addMember 改 config + spawn 新副本', async () => {
-    const calls = [];
-    const mgr = newManager(calls);
+  it('addMember 改 config + 经 pm 确保在场', async () => {
+    const mgr = newManager();
     const r = await mgr.createRoom('群', ['elf-001']);
-    assert.equal(calls.length, 1);
     await mgr.addMember(r.roomId, 'elf-002');
-    assert.equal(calls.length, 2);
     const room = mgr.getRoom(r.roomId);
     assert.equal(room.members.length, 2);
+    assert.equal(room.members.find(m => m.agentId === 'elf-002').status, MEMBER_STATUS.RUNNING);
   });
 
   it('addMember 对不存在的群抛错', async () => {
-    const mgr = newManager([]);
+    const mgr = newManager(makePm());
     await assert.rejects(mgr.addMember('nope', 'elf-001'), /群不存在/);
   });
 
   it('removeMember 停副本 + 改 config + 删 data', async () => {
     const calls = [];
-    const mgr = newManager(calls);
+    const mgr = newManager();
     const r = await mgr.createRoom('群', ['elf-001', 'elf-002']);
     // 造该成员对本群的记忆目录（profiles/agents/elf-002/rooms/<rid>），removeMember 应清掉它
     const dataDir = agentRoomState('elf-002', r.roomId);
@@ -490,7 +396,7 @@ describe('RoomManager', () => {
 
   it('pm 模式 removeMember 通知副本 /clear/:roomId（停观测定时器，否则被踢后仍自驱循环）', async () => {
     const calls = [];
-    const mgr = newManager(calls);
+    const mgr = newManager();
     const r = await mgr.createRoom('群', ['elf-001', 'elf-002']);
 
     // 把 elf-002 换成 mock 副本 http server，记录收到的请求
@@ -526,7 +432,7 @@ describe('RoomManager', () => {
 
   it('pm 模式 removeMember 副本不可达时只 warn、不抛、仍清 config 与 data', async () => {
     const calls = [];
-    const mgr = newManager(calls);
+    const mgr = newManager();
     const r = await mgr.createRoom('群', ['elf-001', 'elf-002']);
     const dataDir = agentRoomState('elf-002', r.roomId);
     fs.mkdirSync(dataDir, { recursive: true });
@@ -545,7 +451,7 @@ describe('RoomManager', () => {
   });
 
   it('listRooms 列出所有群', async () => {
-    const mgr = newManager([]);
+    const mgr = newManager();
     await mgr.createRoom('群1', ['elf-001']);
     await mgr.createRoom('群2', ['elf-002']);
     const list = mgr.listRooms();
@@ -553,103 +459,53 @@ describe('RoomManager', () => {
   });
 
   it('getRoom 对不存在返回 null', () => {
-    const mgr = newManager([]);
+    const mgr = newManager();
     assert.equal(mgr.getRoom('nope'), null);
   });
 
-  it('ensureReplicasAlive：存活成员标 running，死的重拉', async () => {
-    const calls = [];
-    const mgr = newManager(calls);
+  it('ensureReplicasAlive 经 pm 重新确保成员在场（模拟重启：清内存态，config 落盘仍在）', async () => {
+    const mgr = newManager();
     const r = await mgr.createRoom('群', ['elf-001']);
-    assert.equal(calls.length, 1);
-    // 模拟副本死掉：把端口改成一个空闲端口，probePort 返回 ok:false → 重拉
-    const room = mgr.rooms.get(r.roomId);
-    const m = room.members.get('elf-001');
-    const freePort = await allocPort(); // 空闲
-    room.members.set('elf-001', { ...m, port: freePort });
+    mgr.rooms.get(r.roomId).members.clear(); // 模拟 gateway 重启内存态丢失
     await mgr.ensureReplicasAlive(r.roomId);
-    // 重拉会再调一次 spawn
-    assert.equal(calls.length, 2);
     const after = mgr.getRoom(r.roomId);
-    assert.equal(after.members[0].status, MEMBER_STATUS.RUNNING);
+    assert.equal(after.members.length, 1);
+    assert.equal(after.members[0].status, MEMBER_STATUS.RUNNING, '经 pm 重新 ensureAgentPresent 回填 running');
   });
 
-  it('ensureReplicasAlive：内存态丢失(模拟重启)+进程死 → re-discover 重拉(问题4)', async () => {
-    const calls = [];
-    const mgr = newManager(calls);
+  it('clearMemberMemory：server 不可达 → 删盘兜底清 context.json', async () => {
+    const mgr = newManager(makePm(() => 9999)); // 9999 无人监听 → /clear 失败走删盘兜底
     const r = await mgr.createRoom('群', ['elf-001']);
-    assert.equal(calls.length, 1);
-    // 模拟 gateway 重启：清空内存 members Map，但保留落盘 run.json
-    const room = mgr.rooms.get(r.roomId);
-    const deadPort = await allocPort(); // 拿一个端口立即释放 → 进程不存活
-    room.members.clear();
-    // run.json 仍在(createRoom 时 spawnReplica 写过)；但 port 已死 → 重拉
-    await mgr.ensureReplicasAlive(r.roomId);
-    assert.equal(calls.length, 2, '内存缺失且进程死应重拉一次');
-    const after = mgr.getRoom(r.roomId);
-    assert.equal(after.members[0].status, MEMBER_STATUS.RUNNING, '重拉后回填 running');
-  });
-
-  it('ensureReplicasAlive：内存态丢失但 run.json 无记录 → 直接重拉(问题4)', async () => {
-    const calls = [];
-    const mgr = newManager(calls);
-    const r = await mgr.createRoom('群', ['elf-001']);
-    assert.equal(calls.length, 1);
-    const room = mgr.rooms.get(r.roomId);
-    room.members.clear();
-    mgr.registry.remove(r.roomId, 'elf-001'); // 抹掉 run.json
-    await mgr.ensureReplicasAlive(r.roomId);
-    assert.equal(calls.length, 2, 'run.json 也无记录,直接重拉');
-  });
-
-  it('clearMemberMemory：内存无 port 且副本不可达 → 删盘兜底清 context.json(问题2)', async () => {
-    const calls = [];
-    const mgr = newManager(calls);
-    const r = await mgr.createRoom('群', ['elf-001']);
-    // 造一份 context.json + tool-results 在成员群记忆目录（profiles/agents/<id>/rooms/<rid>）
     const dataDir = agentRoomState('elf-001', r.roomId);
     fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(path.join(dataDir, 'context.json'), JSON.stringify([{ role: 'user', content: 'x' }]), 'utf-8');
     fs.mkdirSync(path.join(dataDir, 'tool-results'), { recursive: true });
     fs.writeFileSync(path.join(dataDir, 'tool-results', 'a.json'), '{}', 'utf-8');
-    // 模拟副本离线：清空内存 port（fake spawn 没起真服务,/clear fetch 必失败）
-    const room = mgr.rooms.get(r.roomId);
-    room.members.set('elf-001', { port: null, pid: null, status: MEMBER_STATUS.OFFLINE });
     await mgr.clearMemberMemory(r.roomId);
-    // context.json 被清空成 []
     const ctx = JSON.parse(fs.readFileSync(path.join(dataDir, 'context.json'), 'utf-8'));
     assert.deepEqual(ctx, []);
-    // tool-results 目录被删
     assert.equal(fs.existsSync(path.join(dataDir, 'tool-results')), false);
   });
 
-  it('clearMemberMemory：内存无 port 但 registry 有 → 用 run.json 端口兜底(问题2)', async () => {
-    const calls = [];
-    const mgr = newManager(calls);
+  it('clearMemberMemory：server 可达 → /clear 成功（带 agentId）不删盘本体', async () => {
+    const received = [];
+    const srv = http.createServer((req, res2) => {
+      let body = '';
+      req.on('data', c => body += c);
+      req.on('end', () => { received.push({ url: req.url, body }); res2.writeHead(200); res2.end(); });
+    });
+    await new Promise(resolve => srv.listen(0, '127.0.0.1', resolve));
+    const port = srv.address().port;
+    const mgr = newManager(makePm(() => port));
     const r = await mgr.createRoom('群', ['elf-001']);
-    const dataDir = agentRoomState('elf-001', r.roomId);
-    fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(path.join(dataDir, 'context.json'), JSON.stringify([{ role: 'user', content: 'x' }]), 'utf-8');
-    // 内存 Map 完全清空(模拟重启)，但 run.json 仍在
-    const room = mgr.rooms.get(r.roomId);
-    room.members.clear();
     await mgr.clearMemberMemory(r.roomId);
-    const ctx = JSON.parse(fs.readFileSync(path.join(dataDir, 'context.json'), 'utf-8'));
-    assert.deepEqual(ctx, [], 'registry 回退取端口,fetch 失败后仍删盘兜底清空');
+    await new Promise(resolve => setTimeout(resolve, 60));
+    const clr = received.find(x => x.url === `/clear/${r.roomId}`);
+    assert.ok(clr, `server 应收到 /clear/${r.roomId}，实际 ${JSON.stringify(received)}`);
+    assert.equal(clr.body, JSON.stringify({ agentId: 'elf-001' }), '/clear body 带 agentId（群聊复合键路由）');
+    await new Promise(resolve => srv.close(resolve));
   });
 
-  it('spawnFn 可注入且收到正确参数', async () => {
-    const calls = [];
-    const mgr = newManager(calls);
-    const r = await mgr.createRoom('群', ['elf-001']);
-    const c = calls[0];
-    assert.equal(c.agentId, 'elf-001');
-    assert.equal(c.roomId, r.roomId);
-    assert.equal(c.mode, undefined); // mode 由 defaultSpawnFn 内部加，fake 收不到
-    assert.ok(c.port > 0);
-    assert.ok(c.dataDir.includes('agents/elf-001/rooms/'));
-    assert.match(c.roomBusUrl, /http:\/\/127.0.0.1:8080\/rooms\//);
-  });
 });
 
 // ============================================================
@@ -743,7 +599,11 @@ describe('RoomBroadcaster agent subscription', () => {
     const goodPort = srv.address().port;
     bc.subscribeAgent('elf-001', goodPort);
 
-    const freePort = await allocPort();
+    // 拿一个刚释放的空闲端口（无人监听）→ POST 失败触发 onAgentOffline
+    const freePort = await new Promise((resolve) => {
+      const s = http.createServer();
+      s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
+    });
     bc.subscribeAgent('elf-002', freePort);
 
     bc.notifyAll('speak', {

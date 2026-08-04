@@ -16,7 +16,7 @@ import { Harness, setHarnessLogFileName } from './harness.js';
 import { PromptAssembler } from './prompt/index.js';
 import { sendNotice } from './notice.js';
 
-import { createLogger } from '../shared/logger.js';
+import { createLogger, withAgentLog } from '../shared/logger.js';
 const defaultLogger = createLogger('default-agent');
 import { Config } from './config_loader.js';
 import { LLMModel, MockModel } from './models/index.js';
@@ -153,6 +153,11 @@ export class Agent {
    * 兼容: 纯字符串 / 非 chat role → 直接 reasoning（子 agent 内部调用、Room 非 chat 转发）。
    */
   async receive(message, options = {}) {
+    // 包 agentId 日志上下文：本 agent 回合内所有 logger 写 profiles/logs/agent-<agentId>.log（双 agent 共处 server 内按 agent 分文件）。
+    return withAgentLog(this.runContext?.agentId, async () => this._receiveImpl(message, options));
+  }
+
+  async _receiveImpl(message, options = {}) {
     const emit = options.emit || (() => {});
     // 场景插件是 agent 属性（this._scene），效中间件就地展开 agent-level + 场景（无状态）。
     //   {role:'chat'} 消息必须经场景插件的 preReceive 决策（私聊 PrivateChatPlugin/群聊 RoomPlugin），

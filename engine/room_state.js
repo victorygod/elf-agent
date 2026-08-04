@@ -80,6 +80,7 @@ export async function createRoomState({ configDir, agentId, roomId, mode, dataDi
   }
 
   return {
+    agentId,
     roomId,
     agent,
     runContext,

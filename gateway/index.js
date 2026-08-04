@@ -31,10 +31,8 @@ async function main() {
   // 3. 扫描 agents/ 目录
   await pm.discoverAgents();
 
-  // 4. 探活已有进程
-  for (const [id] of pm.agents) {
-    await pm.probeAgent(id);
-  }
+  // 4. 探活共享 agent-server（一个进程承载全部 agent，探一次即可；在跑则重建 /events 通道）
+  await pm.probeServer();
 
   // 通过 UI 手动点击启动 Agent，不再自动启动第一个
   {

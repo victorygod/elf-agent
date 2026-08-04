@@ -11,10 +11,27 @@
 
 import fs from 'fs';
 import path from 'path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { logsDir } from './profiles_paths.js';
 
 // 日志目录：经 logsDir() 统一解析（支持 ELF_LOG_DIR 覆盖，测试用独立目录与真实 profiles/logs 分离）。
 const LOG_DIR = logsDir();
+
+// agent-server 进程内按 agent 分文件：receive() 经 withAgentLog(agentId) 进上下文，
+//   其间所有 logger 写 profiles/logs/agent-<agentId>.log；上下文外（建房/生命周期/compact 异步等）落各自 fallback 文件。
+//   gateway 进程不调 enableAgentLogRouting → 其 logger 永远用 fileName（gateway.log），不受影响。
+const agentLogCtx = new AsyncLocalStorage();
+let agentRoutingEnabled = false;
+export function enableAgentLogRouting() { agentRoutingEnabled = true; }
+/** 在 agentId 上下文里执行 fn；fn 内所有 logger 调用写 agent-<agentId>.log。agentId 缺省直接执行。 */
+export function withAgentLog(agentId, fn) {
+  if (!agentRoutingEnabled || !agentId) return fn();
+  return agentLogCtx.run({ agentId }, fn);
+}
+/** 当前上下文的 agentId（双 agent 共处 server 内区分 per-agent 日志用）。 */
+export function currentLogAgentId() {
+  return agentRoutingEnabled ? agentLogCtx.getStore()?.agentId : null;
+}
 
 // 单文件大小上限：10MB
 const MAX_SIZE = 10 * 1024 * 1024;
@@ -102,16 +119,21 @@ class Logger {
     } else {
       console.log(line);
     }
-    // 文件输出
-    if (this.logFile) {
+    // 文件输出：agent-server 进程内若处 agent 上下文，写 agent-<agentId>.log；否则写 logger 自带 file。
+    let logFile = this.logFile;
+    if (agentRoutingEnabled) {
+      const aid = agentLogCtx.getStore()?.agentId;
+      if (aid) logFile = path.join(LOG_DIR, `agent-${aid}.log`);
+    }
+    if (logFile) {
       const data = line + '\n';
       try {
-        // 先完整写入这一行，再检查大小
-        fs.appendFileSync(this.logFile, data);
-        const size = getCurrentSize(this.logFile) + Buffer.byteLength(data);
-        sizeCache.set(this.logFile, size);
+        // 先完整写入这一行，再检查大小（写 logFile，可能是 per-agent 路径或 this.logFile fallback）
+        fs.appendFileSync(logFile, data);
+        const size = getCurrentSize(logFile) + Buffer.byteLength(data);
+        sizeCache.set(logFile, size);
         if (size >= MAX_SIZE) {
-          rotate(this.logFile);
+          rotate(logFile);
         }
       } catch (e) {
         // 写入失败时忽略，避免日志系统自身导致崩溃

@@ -36,6 +36,8 @@ export function loadGatewayConfig() {
     const config = JSON.parse(raw);
     return {
       port: config.port || 8080,
+      // agent-server（承载全部 agent 的共享 server 进程）端口；本期 M=1 单 server。默认 8180 避开 agents 80xx 段。
+      agentServerPort: config.agentServerPort || 8180,
       userName: config.userName || 'user',
       userAvatar: config.userAvatar || null,
       // 稳定用户身份（问题3）：username 可改，uid 不变，历史归属据此连续。现阶段默认固定值。
@@ -45,7 +47,7 @@ export function loadGatewayConfig() {
     };
   } catch (err) {
     logger.warn(`无法加载 gateway.json: ${err.message}, 使用默认配置`);
-    return { port: 8080, userName: 'user', userAvatar: null, userUid: 'default_userid', sidebarOrder: { rooms: [], agents: [] } };
+    return { port: 8080, agentServerPort: 8180, userName: 'user', userAvatar: null, userUid: 'default_userid', sidebarOrder: { rooms: [], agents: [] } };
   }
 }
 
@@ -68,6 +70,7 @@ export function saveGatewayConfig(updates = {}) {
     fs.writeFileSync(configPath, JSON.stringify(merged, null, 2), 'utf-8');
     return {
       port: merged.port || 8080,
+      agentServerPort: merged.agentServerPort || 8180,
       userName: merged.userName || 'user',
       userAvatar: merged.userAvatar || null,
       userUid: merged.userUid || 'default_userid',

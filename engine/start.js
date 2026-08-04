@@ -17,9 +17,7 @@ import { setAgentLogFileName } from './agent.js';
 import { createAgentServer, setServerLogFileName } from './server.js';
 import { setLogFileName as setMessageManagerLogFileName } from './message_manager.js';
 import { buildRunContext } from './run_context.js';
-// RoomAgent 类已在 v0.2 阶段 5c 删除：生产由 RoomMiddleware 直推（见下），测试经 new Agent + push RoomMiddleware 构造。
-import { Speak } from './tools/Speak.js';
-import { createLogger } from '../shared/logger.js';
+import { createLogger, enableAgentLogRouting } from '../shared/logger.js';
 
 /**
  * 启动 Agent（实例化改造后支持运行时身份注入）
@@ -49,16 +47,10 @@ export async function startAgent(configDir, runOpts = {}) {
   const offset = Number(process.env.ELF_PORT_OFFSET) || 0;
   const basePort = typeof configPreview.port === 'number' ? configPreview.port : null;
   const defaultPort = basePort != null ? basePort + offset : null;
-  // room 模式 port fail-fast(防 #5):副本不显式传 port 会回退 config.port(私聊端口),
-  // 与常驻私聊实例抢端口 EADDRINUSE 崩溃。room 模式必须显式 port,不回退私聊端口。
-  // 注意:buildRunContext 拿到的 port 已是"runOpts.port ?? defaultPort",无法区分来源,故在此判定。
-  if (runOpts.mode === 'room' && (runOpts.port === undefined || runOpts.port === null)) {
-    throw new Error('room 模式必须显式提供 port(否则回退私聊端口导致冲突)');
-  }
-  // dataDir：room 由 room_bus 经 --data 显式传（副本路径=profiles/agents/<id>/rooms/<rid>）；私聊优先 ELF_DATA_DIR env
-  //   （gateway spawn 时设 profiles/agents/<id>/memory），回退 null（create_agent 再回退 agentMemory(<id>)，开发直跑 index.js 用）。
+  // v4：startAgent 仅私聊。dataDir 优先 ELF_DATA_DIR env（gateway spawn 时设 profiles/agents/<id>/memory），
+  //   回退 null（create_agent 再回退 agentMemory(<id>)，开发直跑 index.js 用）。
   let dataDir = runOpts.dataDir ? path.resolve(runOpts.dataDir) : null;
-  if (!dataDir && runOpts.mode !== 'room' && process.env.ELF_DATA_DIR) {
+  if (!dataDir && process.env.ELF_DATA_DIR) {
     dataDir = path.resolve(process.env.ELF_DATA_DIR);
   }
   const runContext = buildRunContext({
@@ -66,9 +58,8 @@ export async function startAgent(configDir, runOpts = {}) {
     mode: runOpts.mode,
     port: runOpts.port ?? defaultPort,
     dataDir,
-    // v3：私聊也是 Room，roomId = chat-<agentId>（PrivateChatPlugin 据此拼 /rooms/<rid>/sync-history）。
-    //   room 模式保留 runOpts.roomId（副本真实群 id）。
-    roomId: runOpts.mode === 'room' ? runOpts.roomId : (runOpts.roomId || `chat-${agentId}`),
+    // 私聊也是 Room，roomId = chat-<agentId>（PrivateChatPlugin 据此拼 /rooms/<rid>/sync-history）。
+    roomId: runOpts.roomId || `chat-${agentId}`,
     memberName: runOpts.memberName,
     roomBusUrl: runOpts.roomBusUrl,
   });
@@ -95,19 +86,8 @@ export async function startAgent(configDir, runOpts = {}) {
   // 场景插件走 agent._scene（v3：单一 ScenePlugin，主权 owner）。不 push 进 agent.middlewares（那是
   //   agent-level 横切定制）。实例复用（持状态：RoomPlugin 的 buffer/replying、PrivateChatPlugin 的 syncSource）。
   //   阶段三多实例时 _scene 升 per-instance（RoomState map）。
-  if (runContext.mode === 'room') {
-    const { RoomPlugin } = await import('./plugins/room_plugin.js');
-    const rm = new RoomPlugin(agent);
-    agent._scene = rm;
-    agent.toolManager.register(Speak);
-    logger.info(`群聊模式：注入 RoomMiddleware(run-level) + 注册 Speak (runKey=${runContext.runKey})`);
-    try {
-      await rm.syncMissingHistory();
-    } catch (err) {
-      logger.warn(`历史同步失败 (非致命): ${err.message}`);
-    }
-  } else {
-    // 私聊模式：PrivateChatPlugin 持私聊消息接入（syncSource align）+ 空闲即 flush 调度（v3 统一 buffer 模式）。
+  // v4：startAgent 仅起私聊（单 agent 进程入口）。群聊实例由共享 agent-server 内 createRoomState 懒建，不经 start.js。
+  {
     const gwUrl = runOpts.gatewayUrl || process.env.ELF_GATEWAY_URL;
     if (gwUrl) agent._gatewayUrl = gwUrl;
     const { PrivateChatPlugin, setPrivateChatLogFileName } = await import('./plugins/private_chat_plugin.js');
@@ -167,6 +147,52 @@ export async function startAgent(configDir, runOpts = {}) {
   return { agent, config: agent.config, server };
 }
 
+/**
+ * 启动多 agent 的 agent-server（一个进程承载 agents/* 全部 agent，工厂懒建 RoomState）。
+ * 与 startAgent（单 agent）对应：经 createAgentServer 工厂模式（configDir fn 覆盖全部 agentId），
+ *   无 defaultAgent；/observe 按 (agentId, roomId) 路由（见 server.js 复合键）。
+ * gateway 经此模式 spawn 一个 server 进程托管全部 agent（本期 M=1）。
+ * 用法：node engine/start.js --serve-all --port 8090 [--gateway-url http://127.0.0.1:8080]
+ */
+export async function startAgentServer({ port, gatewayUrl } = {}) {
+  if (!port || !Number.isFinite(port)) throw new Error('startAgentServer: port 必填');
+  const agentsDir = path.join(process.cwd(), 'agents');
+  const agentIds = fs.readdirSync(agentsDir, { withFileTypes: true })
+    .filter(e => e.isDirectory())
+    .map(e => e.name)
+    .filter(id => fs.existsSync(path.join(agentsDir, id, 'config', 'config.json')));
+  if (agentIds.length === 0) throw new Error(`未发现 agent：${agentsDir}/*/config/config.json`);
+
+  const logFileName = 'agent-server.log';
+  setConfigLogFileName(logFileName);
+  setAgentLogFileName(logFileName);
+  setServerLogFileName(logFileName);
+  setMessageManagerLogFileName(logFileName);
+  // 启用 per-agent 日志路由：receive() 经 withAgentLog(agentId) 进上下文后，所有 logger 写 agent-<agentId>.log；
+  //   上下文外（建房/生命周期/compact 异步等）仍落 agent-server.log。
+  enableAgentLogRouting();
+  const logger = createLogger('agent-server-main', logFileName);
+
+  const configDirFn = (id) => path.join(process.cwd(), 'agents', id, 'config');
+  // config:null → 多 agent 模式无单一 config（/config、/status 已 guard）；configDir fn 覆盖全部 agentId 供懒建。
+  const app = createAgentServer({
+    config: null,
+    configDir: configDirFn,
+    defaultAgentId: null,
+    gatewayUrl: gatewayUrl || null,
+    port,
+  });
+  const server = app.listen(port, () => {
+    logger.info(`Agent-server 承载 ${agentIds.length} 个 agent [${agentIds.join(', ')}] listening on port ${port}`);
+  });
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') logger.error(`端口 ${port} 已被占用，agent-server 无法启动`);
+    else logger.error(`HTTP 服务错误: ${err.message}`);
+    process.exit(1);
+  });
+  return { app, server, agentIds };
+}
+
 // 直接运行时执行启动
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -176,9 +202,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
   const args = process.argv.slice(2);
   const runOpts = {};
   let configDir = null;
+  let serveAll = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--config' && args[i + 1]) { configDir = path.resolve(args[i + 1]); i++; }
-    else if (args[i] === '--mode' && args[i + 1]) { runOpts.mode = args[i + 1]; i++; }
+    else if (args[i] === '--serve-all') { serveAll = true; }
     else if (args[i] === '--port' && args[i + 1]) {
       // parseInt 非数字返回 NaN,会穿透 ??(NaN 非 null/undefined)直达 app.listen(NaN) 抛错。
       // fail-fast:解析失败立即报错,避免下游 listen 失败时错误信息不提 --port(#3)。
@@ -190,20 +217,29 @@ if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
       runOpts.port = p; i++;
     }
     else if (args[i] === '--data' && args[i + 1]) { runOpts.dataDir = args[i + 1]; i++; }
-    else if (args[i] === '--room-id' && args[i + 1]) { runOpts.roomId = args[i + 1]; i++; }
-    else if (args[i] === '--member' && args[i + 1]) { runOpts.memberName = args[i + 1]; i++; }
-    else if (args[i] === '--room-bus' && args[i + 1]) { runOpts.roomBusUrl = args[i + 1]; i++; }
     else if (args[i] === '--gateway-url' && args[i + 1]) { runOpts.gatewayUrl = args[i + 1]; i++; }
   }
 
-  if (!configDir) {
-    console.error('Usage: node start.js --config <config-dir> [--mode private|room] [--port N] [--data <dir>] [--room-id <id>] [--member <name>] [--room-bus <url>]');
-    process.exit(1);
+  // --serve-all：多 agent 的 agent-server（一个进程承载 agents/* 全部 agent）。
+  if (serveAll) {
+    if (!runOpts.port) {
+      console.error('Usage: node start.js --serve-all --port N [--gateway-url http://127.0.0.1:8080]');
+      process.exit(1);
+    }
+    startAgentServer({ port: runOpts.port, gatewayUrl: runOpts.gatewayUrl }).catch(err => {
+      const logger = createLogger('agent-server-main', 'agent-error.log');
+      logger.error(`Agent-server 启动失败: ${err.message}`);
+      process.exit(1);
+    });
+  } else {
+    if (!configDir) {
+      console.error('Usage: node start.js --config <config-dir> [--port N] [--data <dir>] [--gateway-url <url>]  |  --serve-all --port N');
+      process.exit(1);
+    }
+    startAgent(configDir, runOpts).catch(err => {
+      const logger = createLogger('agent-main', 'agent-error.log');
+      logger.error(`Agent 启动失败: ${err.message}`);
+      process.exit(1);
+    });
   }
-
-  startAgent(configDir, runOpts).catch(err => {
-    const logger = createLogger('agent-main', 'agent-error.log');
-    logger.error(`Agent 启动失败: ${err.message}`);
-    process.exit(1);
-  });
 }

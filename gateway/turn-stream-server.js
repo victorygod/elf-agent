@@ -175,6 +175,7 @@ export class TurnStreamServer {
       const t = st.toolCalls.find(tc => tc.id === data.id && tc.status === 'executing');
       if (t) t.status = data.status || 'success';
       if (t && data.message) t.message = data.message;
+      if (t && data.result != null) t.result = data.result;
     }
 
     // ── compact 锚定落盘（按 compactId 就地更新，不新行）──

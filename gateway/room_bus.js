@@ -14,11 +14,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import net from 'net';
 import crypto from 'crypto';
-import { spawn } from 'child_process';
 import { createLogger } from '../shared/logger.js';
-import { probePort, waitForReady, httpShutdown } from '../shared/agent_probe.js';
 import { loadGatewayConfig } from './config.js';
 import { agentRoomState } from '../shared/profiles_paths.js';
 
@@ -173,15 +170,15 @@ export class RoomBroadcaster {
       // v3：懒建群 RoomState 时 buildRunContext 需 roomBusUrl，否则 Speak 报"缺 roomBusUrl,无法发言"。
       roomBusUrl: this._gatewayPort ? `http://127.0.0.1:${this._gatewayPort}/rooms/${this.roomId}` : null,
     };
-    const bodyStr = JSON.stringify(body);
     const failed = [];
 
     await Promise.all([...this._agentSubscribers].map(async ([agentId, sub]) => {
       try {
+        // ② 群聊 observe body 显式带 agentId：host（多 agent 共处一 server）按 (agentId,roomId) 路由所需。
         const resp = await fetch(`http://127.0.0.1:${sub.port}/observe`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: bodyStr,
+          body: JSON.stringify({ ...body, agentId }),
           signal: AbortSignal.timeout(30_000),
         });
         if (!resp.ok) failed.push(agentId);
@@ -382,114 +379,6 @@ export class RoomHistory {
 }
 
 // ============================================================
-// allocPort —— 动态分配空闲端口
-// ============================================================
-
-/**
- * 用 net.createServer().listen(0) 让 OS 分配一个空闲端口，立即 close 返回。
- * 注意竞态：拿到端口到副本 listen（B 阶段）有窗口；本阶段只保证返回可 listen 端口。
- * @returns {Promise<number>}
- */
-export function allocPort() {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.on('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const port = srv.address().port;
-      srv.close(() => resolve(port));
-    });
-  });
-}
-
-// ============================================================
-// RoomRegistry —— 副本注册表（run.json 读写）
-// ============================================================
-
-/**
- * 管理 profiles/rooms/<rid>/run/<agentId>.json 进程登记。re-discover / cleanup.sh 用。
- */
-export class RoomRegistry {
-  /**
-   * @param {string} roomsDir - rooms 根目录
-   */
-  constructor(roomsDir) {
-    this.roomsDir = roomsDir;
-  }
-
-  /** 某副本的 run.json 路径：<roomsDir>/<rid>/run/<id>.json（schema 从旧 data/<id>/run.json 改为 run/<id>.json） */
-  _path(roomId, agentId) {
-    return path.join(this.roomsDir, roomId, 'run', `${agentId}.json`);
-  }
-
-  /**
-   * 写入副本注册信息
-   * @param {string} roomId
-   * @param {string} agentId
-   * @param {{port:number, pid:number, memberName:string, dataDir:string, roomBusUrl:string}} info
-   */
-  write(roomId, agentId, info) {
-    const filePath = this._path(roomId, agentId);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const record = {
-      runKey: `${roomId}/${agentId}`,
-      roomId,
-      agentId,
-      port: info.port,
-      pid: info.pid,
-      memberName: info.memberName ?? agentId,
-      dataDir: info.dataDir ?? null,
-      roomBusUrl: info.roomBusUrl ?? null,
-    };
-    fs.writeFileSync(filePath, JSON.stringify(record, null, 2), 'utf-8');
-    return record;
-  }
-
-  /** 读单副本，不存在返回 null */
-  read(roomId, agentId) {
-    const filePath = this._path(roomId, agentId);
-    try {
-      const raw = fs.readFileSync(filePath, 'utf-8');
-      return JSON.parse(raw);
-    } catch (err) {
-      return null;
-    }
-  }
-
-  /**
-   * 列出某群所有副本注册信息（跳过缺 run.json 的成员目录）
-   * @returns {Array<object>}
-   */
-  list(roomId) {
-    const runDir = path.join(this.roomsDir, roomId, 'run');
-    if (!fs.existsSync(runDir)) return [];
-    let entries;
-    try {
-      entries = fs.readdirSync(runDir, { withFileTypes: true });
-    } catch (err) {
-      return [];
-    }
-    const result = [];
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-      const agentId = entry.name.slice(0, -5); // 去 .json
-      const rec = this.read(roomId, agentId);
-      if (rec) result.push(rec);
-    }
-    return result;
-  }
-
-  /** 删除单副本 run.json（不删目录，保留 context/history） */
-  remove(roomId, agentId) {
-    const filePath = this._path(roomId, agentId);
-    try {
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    } catch (err) {
-      logger.warn(`删除 run.json 失败 (${roomId}/${agentId}): ${err.message}`);
-    }
-  }
-}
-
-// ============================================================
 // RoomConfig —— 群配置 room.json（成员名单持⽌化）
 // ============================================================
 
@@ -579,73 +468,44 @@ export class RoomConfig {
 /** 副本运行态 */
 const MEMBER_STATUS = { RUNNING: 'running', OFFLINE: 'offline', STARTING: 'starting', STOPPED: 'stopped' };
 
-/** 真实 spawn 副本进程：调 engine/start.js --mode room ... */
-function defaultSpawnFn({ configDir, roomId, agentId, port, dataDir, roomBusUrl }) {
-  const child = spawn(process.execPath, [
-    'engine/start.js',
-    '--config', configDir,
-    '--mode', 'room',
-    '--port', String(port),
-    '--data', dataDir,
-    '--room-id', roomId,
-    '--member', agentId,
-    '--room-bus', roomBusUrl,
-  ], {
-    cwd: process.cwd(),
-    detached: true,
-    stdio: 'ignore',
-    env: { ...process.env },
-  });
-  child.unref();
-  return child; // 调用方读 child.pid
-}
-
 /**
- * 群管理器。聚合 RoomConfig + RoomRegistry + RoomBroadcaster + 副本运行态。
- * spawnFn 可注入用于测试（默认真实 spawn）。
+ * 群管理器。聚合 RoomConfig + RoomBroadcaster + 成员运行态。
+ * v4：群成员不再 spawn 副本进程——复用共享 agent-server（经 pm）。成员"在场" = 退订/订阅本群广播。
  */
 export class RoomManager {
   /**
    * @param {string} roomsDir
-   * @param {number} gatewayPort - 给副本 --room-bus 用
+   * @param {number} gatewayPort
    * @param {object} [opts]
-   * @param {Function} [opts.spawnFn] - 注入 fake spawn（测试用）
    * @param {Function} [opts.agentConfigDir] - 纯函数 (agentId)=>configDir，默认 agents/<id>/config
    */
   constructor(roomsDir, gatewayPort, opts = {}) {
     this.roomsDir = roomsDir;
     this.gatewayPort = gatewayPort;
-    this.registry = new RoomRegistry(roomsDir);
-    this.spawnFn = opts.spawnFn || defaultSpawnFn;
     this.agentConfigDir = opts.agentConfigDir || ((id) => path.join(process.cwd(), 'agents', id, 'config'));
     this.startTimeout = opts.startTimeout || 10_000;
-    /** v3：注入 ProcessManager（pm）。有 pm 时 ensureAgentPresent 直接复用已运行的 agent 进程，
-     *   通过 POST /observe（payload 带 roomId）路由到该 agent 进程内的 RoomState，不再 spawn 副本。
-     *   无 pm 时（旧测试注入 spawnFn）回退 spawnReplica。 */
+    /** 注入 ProcessManager（pm）。ensureAgentPresent 经 pm.startAgent 复用共享 agent-server，
+     *   /observe（payload 带 roomId + agentId）路由到 server 内 (agentId,roomId) RoomState（懒建）。 */
     this.pm = opts.pm || null;
     this.gatewayUrl = opts.gatewayUrl || null;
-    // 成员群记忆路径统一走 profiles_paths 的 agentRoomState(id, rid)，不再持 chatRoot 字段。
     /** roomId → { config: RoomConfig, broadcaster: RoomBroadcaster, history: RoomHistory, members: Map<agentId, {port,pid,status}> } */
     this.rooms = new Map();
   }
 
   /**
-   * v3：确保某 agent 进程在场并订阅本群广播。有 pm 时复用 pm.startAgent（不再 spawn 副本），
-   *   /observe 经 payload.roomId 路由到该 agent 进程内的 RoomState[roomId]（懒建）。
-   *   无 pm 时回退 spawnReplica（旧 spawnFn 测试路径）。
+   * 确保某 agent 在场并订阅本群广播。v4：复用共享 agent-server（经 pm.startAgent，懒起 + 幂等），
+   *   /observe 经 payload 的 (agentId, roomId) 路由到 server 内 RoomState（懒建）。不再 spawn 副本、不再写 run.json。
    * @returns {Promise<{port, pid, status}>}
    */
   async ensureAgentPresent(roomId, agentId) {
     const room = this._ensureRoom(roomId);
-    if (!this.pm) {
-      return this.spawnReplica(roomId, agentId);
-    }
+    if (!this.pm) throw new Error('ensureAgentPresent 需注入 pm（共享 agent-server 模型）');
     const configDir = this.agentConfigDir(agentId);
     if (!fs.existsSync(path.join(configDir, 'config.json'))) {
       room.members.set(agentId, { port: null, pid: null, status: MEMBER_STATUS.OFFLINE });
       throw new Error(`agent 不存在: ${agentId}`);
     }
-    // 复用已运行的 agent 进程（pm.startAgent 幂等：已运行直接返回）。
+    // 复用共享 agent-server（pm.startAgent 幂等：已运行直接返回，没起则懒起）。
     if (this.pm.getAgentStatus?.(agentId) !== 'running') {
       await this.pm.startAgent(agentId);
     }
@@ -653,11 +513,7 @@ export class RoomManager {
     const pid = this.pm.getAgent?.(agentId)?.pid ?? null;
     room.members.set(agentId, { port, pid, status: MEMBER_STATUS.RUNNING });
     room.broadcaster.subscribeAgent(agentId, port);
-    // 落盘 run.json 仍供 cleanup.sh 兼容（v3 不再 spawn，但保留记录）。dataDir 记 agent 在此群的记忆路径。
-    const dataDir = agentRoomState(agentId, roomId);
-    const roomBusUrl = `http://127.0.0.1:${this.gatewayPort}/rooms/${roomId}`;
-    this.registry.write(roomId, agentId, { port, pid, memberName: agentId, dataDir, roomBusUrl });
-    logger.info(`ensureAgentPresent ${roomId}/${agentId} 复用进程 (port ${port})`);
+    logger.info(`ensureAgentPresent ${roomId}/${agentId} 复用共享 server (port ${port})`);
     return { port, pid, status: MEMBER_STATUS.RUNNING };
   }
 
@@ -698,78 +554,28 @@ export class RoomManager {
     return { roomId, name: rec.name, members: rec.members };
   }
 
-  /**
-   * 拉起一个副本
-   * @returns {Promise<{port, pid, status}>}
-   */
-  async spawnReplica(roomId, agentId) {
-    const room = this._ensureRoom(roomId);
-    if (!room.config.exists()) throw new Error(`群不存在: ${roomId}`);
-    const configDir = this.agentConfigDir(agentId);
-    if (!fs.existsSync(path.join(configDir, 'config.json'))) {
-      // 成员 agent 不存在
-      room.members.set(agentId, { port: null, pid: null, status: MEMBER_STATUS.OFFLINE });
-      throw new Error(`agent 不存在: ${agentId}`);
-    }
-    const port = await allocPort();
-    const dataDir = agentRoomState(agentId, roomId);
-    const roomBusUrl = `http://127.0.0.1:${this.gatewayPort}/rooms/${roomId}`;
-    room.members.set(agentId, { port, pid: null, status: MEMBER_STATUS.STARTING });
-    try {
-      const child = this.spawnFn({ configDir, roomId, agentId, port, dataDir, roomBusUrl });
-      const pid = child.pid;
-      // 等待就绪（fake spawn 测试时 child._fakeReady 已 true，跳过等待）
-      const ready = child._fakeReady === true ? true : await waitForReady(port, this.startTimeout);
-      if (!ready) {
-        room.members.set(agentId, { port, pid, status: MEMBER_STATUS.OFFLINE });
-        logger.warn(`副本 ${roomId}/${agentId} 拉起超时，标 offline`);
-        return { port, pid, status: MEMBER_STATUS.OFFLINE };
-      }
-      this.registry.write(roomId, agentId, { port, pid, memberName: agentId, dataDir, roomBusUrl });
-      room.members.set(agentId, { port, pid, status: MEMBER_STATUS.RUNNING });
-      room.broadcaster.subscribeAgent(agentId, port);
-      logger.info(`副本 ${roomId}/${agentId} 已起 (port ${port}, pid ${pid})`);
-      return { port, pid, status: MEMBER_STATUS.RUNNING };
-    } catch (err) {
-      room.members.set(agentId, { port, pid: null, status: MEMBER_STATUS.OFFLINE });
-      logger.error(`spawn 副本失败 ${roomId}/${agentId}: ${err.message}`);
-      return { port, pid: null, status: MEMBER_STATUS.OFFLINE };
-    }
-  }
-
-  /** 停一个副本。
-   *  v3：有 pm 时 agent 进程被多 room（含私聊 chat-<id>）复用，绝不能因退群/停某房而 shutdown 它——
-   *    仅退订本房广播。无 pm（旧 spawn 模式）才 shutdown 副本进程。 */
+  /** 停一个成员（v4：共享 agent-server 模型下仅退订本房广播 + 通知 server 该 (agentId,roomId) 实例 dispose 观测定时器；
+   *    绝不 shutdown 共享 server——它在私聊/他群仍用）。 */
   async stopReplica(roomId, agentId) {
     const room = this._ensureRoom(roomId);
     const m = room.members.get(agentId);
-    if (this.pm) {
-      // 共享进程：只退订，不动进程。先取 port（registry.remove 后就取不到），再退订；
-      // 随后异步通知副本本房 leave（/clear/:roomId → scene.dispose 停观测定时器），
-      //   否则被踢/退群后 agent 进程内观测定时器仍自驱循环（gateway 已退订广播，副本收不到事件）。
-      let leavePort = m?.port;
-      if (!leavePort) { const rec = this.registry.read(roomId, agentId); leavePort = rec?.port || null; }
-      this.registry.remove(roomId, agentId);
-      room.broadcaster.unsubscribeAgent(agentId);
-      room.members.set(agentId, { port: null, pid: null, status: MEMBER_STATUS.STOPPED });
-      if (leavePort) {
-        fetch(`http://127.0.0.1:${leavePort}/clear/${encodeURIComponent(roomId)}`, { method: 'POST', signal: AbortSignal.timeout(5000) })
-          .then(r => { r.ok ? logger.info(`副本 ${roomId}/${agentId} 已通知退群（/clear dispose 停观测定时器）`)
-                            : logger.warn(`副本 ${roomId}/${agentId} 退群通知返回 ${r.status}`); })
-          .catch(err => logger.warn(`副本 ${roomId}/${agentId} 退群通知不可达(${err.message})，观测定时器需靠下次进房复活`));
-      } else {
-        logger.warn(`副本 ${roomId}/${agentId} 无 port，未能通知退群，观测定时器需靠下次进房复活`);
-      }
-      logger.info(`副本 ${roomId}/${agentId} 退订（pm 共享进程保留）`);
-      return;
-    }
-    if (m && m.port) {
-      try { await httpShutdown(m.port); } catch (err) { /* 进程可能已不在 */ }
-    }
-    this.registry.remove(roomId, agentId);
     room.broadcaster.unsubscribeAgent(agentId);
     room.members.set(agentId, { port: null, pid: null, status: MEMBER_STATUS.STOPPED });
-    logger.info(`副本 ${roomId}/${agentId} 已停`);
+    // 通知 server 该 (agentId, roomId) 实例 /clear（群聊需带 agentId 走复合键路由），停其观测定时器；不可达靠下次进房复活。
+    const leavePort = m?.port ?? this.pm?.getAgentPort?.(agentId) ?? null;
+    if (leavePort) {
+      fetch(`http://127.0.0.1:${leavePort}/clear/${encodeURIComponent(roomId)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId }),
+        signal: AbortSignal.timeout(5000),
+      })
+        .then(r => { r.ok ? logger.info(`成员 ${roomId}/${agentId} 已通知退群（/clear dispose 停观测定时器）`)
+                          : logger.warn(`成员 ${roomId}/${agentId} 退群通知返回 ${r.status}`); })
+        .catch(err => logger.warn(`成员 ${roomId}/${agentId} 退群通知不可达(${err.message})，观测定时器需靠下次进房复活`));
+    } else {
+      logger.warn(`成员 ${roomId}/${agentId} 无 port，未能通知退群，观测定时器需靠下次进房复活`);
+    }
+    logger.info(`成员 ${roomId}/${agentId} 退订（共享 server 保留）`);
   }
 
   /** 加成员：改 config + spawn */
@@ -881,56 +687,12 @@ export class RoomManager {
    * @returns {Promise<void>}
    */
   async ensureReplicasAlive(roomId) {
-    const room = this._ensureRoom(roomId);
-    const cfg = room.config.read();
+    const cfg = this._ensureRoom(roomId).config.read();
     if (!cfg) return;
-    // v3：有 pm 时直接 ensureAgentPresent（复用已运行 agent 进程），跳过 run.json/probe re-discover 逻辑。
-    if (this.pm) {
-      await Promise.all(cfg.members.map((agentId) =>
-        this.ensureAgentPresent(roomId, agentId).catch(err => logger.warn(`ensureReplicasAlive ${agentId}: ${err.message}`))
-      ));
-      return;
-    }
-    await Promise.all(cfg.members.map(async (agentId) => {
-      const m = room.members.get(agentId);
-      if (m?.status === MEMBER_STATUS.STOPPED) {
-        // 已停的不管（可能正被移除）
-        return;
-      }
-      // 问题4：!m 表示内存态丢失（典型场景 gateway 重启，detached 副本仍在跑或已死）。
-      //   原来直接 return → 重启后不探活不重拉，全员永远显示离线。
-      //   现在按落盘 run.json re-discover：探活活着就回填内存态，死了就 spawnReplica 重拉。
-      if (!m) {
-        const rec = this.registry.read(roomId, agentId);
-        if (rec?.port) {
-          const r = await probePort(rec.port);
-          if (r.ok) {
-            room.members.set(agentId, { port: rec.port, pid: rec.pid ?? r.pid ?? null, status: MEMBER_STATUS.RUNNING });
-            room.broadcaster.subscribeAgent(agentId, rec.port);
-            logger.info(`副本 ${agentId} re-discover 成功 (port ${rec.port} 存活),回填内存态`);
-            return;
-          }
-        }
-        // run.json 没有 / 进程死了 → 重拉（spawnReplica 内部 allocPort + waitForReady + 写 run.json + 回填 Map）
-        logger.info(`副本 ${agentId} 内存态缺失且不存活，重拉`);
-        await this.spawnReplica(roomId, agentId).catch(err => {
-          logger.warn(`重拉 ${agentId} 失败: ${err.message}`);
-        });
-        return;
-      }
-      // m 存在：原有探活重拉逻辑
-      const r = await probePort(m.port);
-      if (r.ok) {
-        room.members.set(agentId, { ...m, status: MEMBER_STATUS.RUNNING, pid: r.pid ?? m.pid });
-        room.broadcaster.subscribeAgent(agentId, m.port);
-      } else {
-        // 死了，重拉
-        logger.info(`副本 ${agentId} 不存活，重拉`);
-        await this.spawnReplica(roomId, agentId).catch(err => {
-          logger.warn(`重拉 ${agentId} 失败: ${err.message}`);
-        });
-      }
-    }));
+    // v4：pm-only。逐成员 ensureAgentPresent（复用共享 agent-server，懒起 + 幂等）。不再 run.json re-discover / spawn。
+    await Promise.all(cfg.members.map((agentId) =>
+      this.ensureAgentPresent(roomId, agentId).catch(err => logger.warn(`ensureReplicasAlive ${agentId}: ${err.message}`))
+    ));
   }
 
   /** 广播成员状态变更给订阅者 */
@@ -1010,7 +772,7 @@ export class RoomManager {
     if (!cfg?.members?.length) return;
     const results = await Promise.allSettled(
       cfg.members.map(agentId =>
-        this.spawnReplica(roomId, agentId).catch(err => {
+        this.ensureAgentPresent(roomId, agentId).catch(err => {
           logger.warn(`启动房间 ${roomId} 的成员 ${agentId} 失败: ${err.message}`);
           return { agentId, status: 'failed', reason: err.message };
         })
@@ -1186,16 +948,16 @@ export class RoomManager {
     const results = await Promise.all(cfg.members.map(async (agentId) => {
       let ok = false;
       let reason = null;
-      // 1) 取 port：内存态优先，缺失(gateway 重启后)回退落盘 run.json（问题2）
-      let port = room.members.get(agentId)?.port;
-      if (!port) {
-        const rec = this.registry.read(roomId, agentId);
-        port = rec?.port || null;
-      }
-      // 2) 有 port → 调副本 /clear/:roomId（v3 共享进程按房清，旧 /clear 只清默认私聊房）；不可达/非 200 走删盘兜底
+      // 1) 取 port：内存态优先，缺失回退 pm.getAgentPort（共享 server 端口）
+      let port = room.members.get(agentId)?.port ?? this.pm?.getAgentPort?.(agentId) ?? null;
+      // 2) 有 port → 调 server /clear/:roomId（群聊需带 agentId 走复合键路由）；不可达/非 200 走删盘兜底
       if (port) {
         try {
-          const resp = await fetch(`http://127.0.0.1:${port}/clear/${encodeURIComponent(roomId)}`, { method: 'POST', signal: AbortSignal.timeout(5000) });
+          const resp = await fetch(`http://127.0.0.1:${port}/clear/${encodeURIComponent(roomId)}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agentId }),
+            signal: AbortSignal.timeout(5000),
+          });
           if (resp.ok) {
             ok = true;
             logger.info(`清理记忆成功 ${roomId}/${agentId} (副本 /clear)`);

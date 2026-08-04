@@ -16,6 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import { createLogger } from '../shared/logger.js';
 import { createRoomState } from './room_state.js';
+import { agentRoomState, agentMemory } from '../shared/profiles_paths.js';
 
 let logFileName = null;
 
@@ -51,23 +52,24 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
     if (agentOrOpts.defaultAgent) {
       const a = agentOrOpts.defaultAgent;
       const aid = agentOrOpts.defaultAgentId || a.runContext?.agentId || a.config?.get?.('agentId') || 'unknown';
-      defaultRoom = { roomId: `chat-${aid}`, agent: a, runContext: a.runContext, plugin: a._scene, observeProcessing: false, pendingObserve: null };
+      defaultRoom = { agentId: aid, roomId: `chat-${aid}`, agent: a, runContext: a.runContext, plugin: a._scene, observeProcessing: false, pendingObserve: null };
     }
-    if (agentOrOpts.configDir && agentOrOpts.dataRoot) {
+    if (agentOrOpts.configDir) {
       factoryOpts = agentOrOpts;
     }
   } else {
     const agent = agentOrOpts;
     const agentId = config?.get?.('agentId') || agent?.config?.get?.('agentId') || 'unknown';
     defaultAgentId = agentId;
-    defaultRoom = { roomId: `chat-${agentId}`, agent, runContext: agent.runContext, plugin: agent._scene, observeProcessing: false, pendingObserve: null };
+    defaultRoom = { agentId, roomId: `chat-${agentId}`, agent, runContext: agent.runContext, plugin: agent._scene, observeProcessing: false, pendingObserve: null };
   }
 
   // ===== 共享：eventsClients（/events SSE 全局 Set）+ _pushEvent 通用写入（带 roomId）=====
   const eventsClients = new Set();
   /** 把事件推给所有 /events 订阅者。data 经归一化保证带 _roomId（路由用）。 */
   const serverPushEvent = (eventName, data) => {
-    const payload = (data && typeof data === 'object' && ('_roomId' in data)) ? data : { ...(data || {}), _roomId: '' };
+    const base = (data && typeof data === 'object') ? data : {};
+    const payload = { _agentId: '', _roomId: '', ...base };
     const chunk = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
     for (const res of eventsClients) {
       try {
@@ -81,7 +83,7 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
   function wireAgentEvents(room) {
     const rid = room.roomId;
     const a = room.agent;
-    a._pushEvent = (eventName, data) => serverPushEvent(eventName, { ...(data || {}), _roomId: rid });
+    a._pushEvent = (eventName, data) => serverPushEvent(eventName, { ...(data || {}), _agentId: room.agentId, _roomId: rid });
     // compact 等异步事件经 callback 总线 → _pushEvent（与旧单 agent 同源）。避免重复注册。
     if (!a._wiredServerEvents) {
       a._wiredServerEvents = true;
@@ -95,37 +97,58 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
   if (defaultRoom) { defaultRoom._chatProcessing = false; wireAgentEvents(defaultRoom); }
 
   // ===== 房间表 + 懒创建 =====
-  const rooms = new Map(); // roomId → RoomState
-  if (defaultRoom) rooms.set(defaultRoom.roomId, defaultRoom);
+  // rooms: Map<agentId, Map<roomId, RoomState>>（复合键，承载多 agent 共处；见 docs inprocess-agent-host §三）
+  const rooms = new Map();
+  // instanceErrors: Map<agentId, 原因> —— 实例化失败留痕，供 gateway 探活区分 server 失败 vs 实例失败（§4.3）。
+  //   createRoomState 抛时记录后 re-throw（错误仍以 500 上送 observe，不吞错），成功则清除。
+  const instanceErrors = new Map();
+  function getRoom(aid, rid) { const m = rooms.get(aid); return m ? m.get(rid) : undefined; }
+  function setRoom(room) { if (!rooms.has(room.agentId)) rooms.set(room.agentId, new Map()); rooms.get(room.agentId).set(room.roomId, room); }
+  // 解析 agentId：显式 > 私聊 rid 编码(chat-) > 进程默认 agent
+  function resolveAgentId(rid, explicit) {
+    if (explicit) return explicit;
+    if (typeof rid === 'string' && rid.startsWith('chat-')) return rid.slice('chat-'.length);
+    return defaultAgentId || null;
+  }
+  if (defaultRoom) setRoom(defaultRoom);
 
   async function getOrCreateRoom(roomId, opts = {}) {
-    if (rooms.has(roomId)) return rooms.get(roomId);
+    const agentId = resolveAgentId(roomId, opts.agentId);
+    const existing = agentId ? getRoom(agentId, roomId) : undefined;
+    if (existing) return existing;
     if (!factoryOpts) {
       // 旧版单 agent 无工厂：只认默认房。群里非默认 roomId 不支持。
       throw new Error(`单 agent 模式不支持按需创建房间 ${roomId}`);
     }
     const mode = opts.mode || (roomId.startsWith('chat-') ? 'private' : 'room');
-    const dataRoot = factoryOpts.dataRoot;
-    // 群聊 dataDir = profiles/agents/<id>/rooms/<rid>（对齐 shared/profiles_paths.agentRoomState，
-    //   clearMemberMemory 删盘兜底按此路径清；旧实现漏 rooms/ 层致 context.json 清不到）。
-    const dataDir = path.join(dataRoot, 'rooms', roomId);
+    // dataDir：私聊房用 agentMemory(<id>)（= profiles/agents/<id>/memory，与 snapshot/rewind 的记忆源对齐——
+    //   snapshot.js 快照/rewind 读 memory/；旧 per-agent 进程的 defaultRoom 也落此）；群聊房用 agentRoomState(<id>,<rid>)
+    //   （= profiles/agents/<id>/rooms/<rid>，同群两个共处成员各自落自己 agentId 目录，不串）。
+    const dataDir = mode === 'private' ? agentMemory(agentId) : agentRoomState(agentId, roomId);
     fs.mkdirSync(dataDir, { recursive: true });
-    // 私聊 roomId = chat-<agentId> → 取 agentId；群聊 roomId = room_xxx，需显式 agentId/mode。
-    const agentId = mode === 'private' ? roomId.slice('chat-'.length) : (opts.agentId || factoryOpts.defaultAgentId);
-    const room = await createRoomState({
-      configDir: factoryOpts.configDir(agentId),
-      agentId,
-      roomId,
-      mode,
-      dataDir,
-      port: factoryOpts.port ?? null,
-      gatewayUrl: factoryOpts.gatewayUrl || null,
-      memberName: opts.memberName || agentId,
-      roomBusUrl: opts.roomBusUrl || null,
-    });
+    let room;
+    try {
+      room = await createRoomState({
+        configDir: factoryOpts.configDir(agentId),
+        agentId,
+        roomId,
+        mode,
+        dataDir,
+        port: factoryOpts.port ?? null,
+        gatewayUrl: factoryOpts.gatewayUrl || null,
+        memberName: opts.memberName || agentId,
+        roomBusUrl: opts.roomBusUrl || null,
+      });
+    } catch (err) {
+      // 实例化失败：记录原因供探活区分（§4.3 实例级），**re-throw 不吞错**——/observe 仍返 500 带原因。
+      instanceErrors.set(agentId, err.message);
+      logger.error(`RoomState[${agentId}/${roomId}] 实例化失败: ${err.message}`);
+      throw err;
+    }
+    instanceErrors.delete(agentId); // 成功：清除之前的失败留痕
     wireAgentEvents(room);
-    rooms.set(roomId, room);
-    logger.info(`RoomState[${roomId}] 懒创建完成 (mode=${mode})`);
+    setRoom(room);
+    logger.info(`RoomState[${agentId}/${roomId}] 懒创建完成 (mode=${mode})`);
     return room;
   }
 
@@ -225,8 +248,9 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
   // ===== /abort/:roomId + 旧 /abort（默认房）=====
   app.post('/abort/:roomId', (req, res) => {
     const rid = req.params.roomId;
-    const room = rooms.get(rid);
-    if (!room) return res.status(404).json({ error: `room 不存在: ${rid}` });
+    const aid = resolveAgentId(rid, req.body?.agentId);
+    const room = aid ? getRoom(aid, rid) : undefined;
+    if (!room) return res.status(404).json({ error: `room 不存在: ${aid}/${rid}` });
     room.agent.abort();
     res.json({ status: 'ok', message: 'abort signal sent' });
   });
@@ -325,6 +349,8 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
 
   // ===== GET /config =====
   app.get('/config', (req, res) => {
+    // 多 agent server 模式无单一 config（各 agent 各自 config 在 agents/<id>/config,gateway 直读）。
+    if (!config) return res.status(400).json({ error: '多 agent server 模式无单一 config，请经 gateway 的 /agents/:id/config 取' });
     const allConfig = config.getAll();
     const modelConfig = config.getModelConfig();
     if (modelConfig.provider !== 'mock') {
@@ -339,11 +365,13 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
   app.get('/status', (req, res) => {
     res.json({
       status: 'ok',
-      agentId: config.get('agentId'),
-      runKey: statusAgent?.runContext?.runKey || config.get('agentId'),
+      agentId: config?.get?.('agentId') || null,
+      runKey: statusAgent?.runContext?.runKey || config?.get?.('agentId') || null,
       mode: statusAgent?.runContext?.mode || 'private',
       pid: process.pid,
-      rooms: [...rooms.keys()],
+      agentIds: [...rooms.keys()],
+      instanceErrors: Object.fromEntries(instanceErrors), // { agentId: 原因 } —— 实例化失败的 agent（探活区分实例级）
+      rooms: (function () { const a = []; for (const m of rooms.values()) for (const rid of m.keys()) a.push(rid); return a; })(),
     });
   });
 
@@ -377,8 +405,10 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
     logger.info(`RoomState[${room.roomId}] 记忆已清空`);
   }
   app.post('/clear/:roomId', (req, res) => {
-    const room = rooms.get(req.params.roomId);
-    if (!room) return res.status(404).json({ error: `room 不存在: ${req.params.roomId}` });
+    const rid = req.params.roomId;
+    const aid = resolveAgentId(rid, req.body?.agentId);
+    const room = aid ? getRoom(aid, rid) : undefined;
+    if (!room) return res.status(404).json({ error: `room 不存在: ${aid}/${rid}` });
     try { clearRoom(room); res.json({ status: 'ok' }); }
     catch (err) { logger.error(`清空记忆失败: ${err.message}`); res.status(500).json({ error: err.message }); }
   });
@@ -404,8 +434,10 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
     logger.info(`RoomState[${room.roomId}] 已 reload context + 清 tool-results`);
   }
   app.post('/reload/:roomId', (req, res) => {
-    const room = rooms.get(req.params.roomId);
-    if (!room) return res.status(404).json({ error: `room 不存在: ${req.params.roomId}` });
+    const rid = req.params.roomId;
+    const aid = resolveAgentId(rid, req.body?.agentId);
+    const room = aid ? getRoom(aid, rid) : undefined;
+    if (!room) return res.status(404).json({ error: `room 不存在: ${aid}/${rid}` });
     try { reloadRoom(room); res.json({ status: 'ok' }); }
     catch (err) { logger.error(`reload 失败: ${err.message}`); res.status(500).json({ error: err.message }); }
   });
@@ -418,7 +450,9 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
 
   // ===== GET /rooms — 列本进程承载的 roomId（v3，诊断/路由用）=====
   app.get('/rooms', (req, res) => {
-    res.json({ rooms: [...rooms.keys()].map(rid => ({ roomId: rid, mode: rooms.get(rid).runContext?.mode || 'private' })) });
+    const list = [];
+    for (const m of rooms.values()) for (const room of m.values()) list.push({ agentId: room.agentId, roomId: room.roomId, mode: room.runContext?.mode || 'private' });
+    res.json({ rooms: list });
   });
 
   // ===== GET /events — 通用异步事件通道（私有 + 多房共用，event data 带 _roomId 路由）=====

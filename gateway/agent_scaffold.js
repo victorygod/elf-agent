@@ -11,7 +11,6 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { allocPort } from './room_bus.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_DIR = path.join(__dirname, 'agent_template');
@@ -72,8 +71,9 @@ export async function createAgentFromTemplate({ agentsDir, name }) {
     throw Object.assign(new Error(`Agent 目录已存在: ${agentId}`), { statusCode: 409 });
   }
 
-  // 分配空闲端口
-  const port = await allocPort();
+  // v4：共享 agent-server 模型下 config.port 不再用于 spawn（agent 跑在共享 server 的 agentServerPort）。
+  //   保留 config.port=0 占位（兼容 config schema；standalone 直跑 agents/<id>/index.js 时 listen(0) 自分配）。
+  const port = 0;
 
   // 从模板复制整套文件
   copyDir(TEMPLATE_DIR, targetDir);

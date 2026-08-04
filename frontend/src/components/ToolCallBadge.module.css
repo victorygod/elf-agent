@@ -103,3 +103,18 @@
   max-height: 120px;
   overflow-y: auto;
 }
+
+/* 成功结果：展示截断（单行省略），title 放全文 */
+.result {
+  margin-top: 4px;
+  padding: 4px 6px;
+  background: rgba(30, 115, 232, 0.06);
+  border-radius: 4px;
+  color: #1e73e8;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: help;
+}

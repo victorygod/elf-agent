@@ -33,9 +33,10 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
   async function postObserve(agentId, payload) {
     const port = pm?.getAgentPort?.(agentId);
     if (!port) throw new Error(`agent ${agentId} 端口未知（未启动？）`);
+    // ② observe body 显式带 agentId：host（多 agent 共处一 server）按 (agentId,roomId) 路由所需。
     return fetch(`http://127.0.0.1:${port}/observe`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, agentId }),
       signal: AbortSignal.timeout(30_000),
     });
   }

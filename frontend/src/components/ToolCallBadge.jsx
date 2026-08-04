@@ -43,6 +43,9 @@ export default function ToolCallBadge({ toolCall }) {
       {status === 'error' && toolCall.message && (
         <div className={styles.errorMsg}>{toolCall.message}</div>
       )}
+      {status === 'success' && toolCall.result && (
+        <div className={styles.result} title={toolCall.result}>{toolCall.result}</div>
+      )}
     </div>
   );
 }

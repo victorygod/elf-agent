@@ -1,11 +1,15 @@
 /**
- * Agent 进程管理器
- * 管理 Agent 子进程的生命周期：发现、启动、停止、探活
+ * Agent 进程管理器（v4：共享 agent-server 进程模型）
  *
- * Agent 以独立进程运行（detached spawn），与 Gateway 生命周期解耦。
- * Gateway 通过端口探测感知 Agent 状态，通过 HTTP /shutdown 控制其停止。
+ * 改造前：每 agent 一个独立进程（detached spawn agents/<id>/index.js），各自端口。
+ * 改造后：一个共享 agent-server 进程承载 agents/* 全部 agent（engine/start.js --serve-all）。
+ *   - server 进程懒起：首个 startAgent(id) 时 ensureServerUp() spawn 一次；之后 no-op。
+ *   - startAgent(id) = ensureServerUp() + 标该 agent 'running'（实例首条消息才 materialize）。
+ *   - stopAgent(id) = 标 'stopped'（不杀共享 server，兄弟 agent 还在用）。
+ *   - 在线两层：agent.status ∈ {stopped,running,error}；server 挂时 getAgentStatus 派生 'server-down'。
+ *   - 事件：仅连共享 server 一条 /events（N→1），事件按 _agentId 平铺路由（见 docs inprocess-agent-host §三/§4.2⑤）。
+ * gateway 仍按 agent 为中心调用（getAgentPort(agentId) 等），server 只是 agent 身上的 port 属性。
  */
-
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
@@ -13,7 +17,7 @@ import { createLogger } from '../shared/logger.js';
 import { probePort, findPidFromPort as probe_findPidFromPort, waitForReady as probe_waitForReady, httpShutdown as probe_httpShutdown, waitForPortFree as probe_waitForPortFree, PROBE_INTERVAL, STOP_PROBE_INTERVAL } from '../shared/agent_probe.js';
 import { connectAgentEvents, disconnectAgentEvents, hasAgentEventsConnection } from './agent_events.js';
 import { handlePrivateAgentEvent, forceFinishPrivateTurn } from './private_room_stream.js';
-import { agentMemory } from '../shared/profiles_paths.js';
+import { loadGatewayConfig } from './config.js';
 
 const logger = createLogger('process-manager', 'gateway.log');
 
@@ -23,22 +27,35 @@ const PROBE_TIMEOUT = 10_000;
 const STOP_PROBE_TIMEOUT = 5_000;
 /** 强制杀死前等待间隔 (ms) */
 const FORCE_KILL_DELAY = 2_000;
+/** 共享 server 的 /events 连接在 agent_events 中的 key（单条连接，承载全部 agent 事件） */
+const SERVER_EVENTS_KEY = '__server__';
+/** 停共享 server 时，确认 server 进程退出超时（比停单个 agent 长，因为有多个 agent） */
+const SERVER_STOP_TIMEOUT = 8_000;
 
 export class ProcessManager {
   constructor() {
-    // agents: Map<agentId, { port, pid, status, config }>
+    // agents: Map<agentId, { status: 'stopped'|'running'|'error', config }>（不再持 port/pid；那是共享 server 的）
     this.agents = new Map();
     this.agentsDir = path.join(process.cwd(), 'agents');
     // v3：privateRoomHistory 由 gateway/index.js 注入，供 _onAgentEvent 路由私聊房事件落 history。
     this.privateRoomHistory = null;
-    // 端口整体偏移（测试用 ELF_PORT_OFFSET 注入）：agent.port = config.port + offset，
-    //   与真实 gateway 端口隔离。真实 gateway 不设 → offset 0 → 端口不变。
+    // 端口整体偏移（测试用 ELF_PORT_OFFSET 注入）：server.port = agentServerPort + offset，与真实 gateway 端口隔离。
     this.portOffset = Number(process.env.ELF_PORT_OFFSET) || 0;
+    // 共享 agent-server 进程（本期 M=1）：承载 agents/* 全部 agent。
+    const gwCfg = loadGatewayConfig();
+    this.server = {
+      pid: null,
+      port: (gwCfg.agentServerPort || 8180) + this.portOffset,
+      status: 'stopped', // 'stopped' | 'running' | 'error'
+      error: null,
+      instanceErrors: {}, // { agentId: 原因 } —— 从 server /status 拉取，供探活区分实例级失败
+    };
+    // gateway base url，供 spawn 时经 --gateway-url 传给 agent-server（PrivateChatPlugin sync 用）。
+    this._gatewayUrl = null;
   }
 
   /**
    * 初始化扫描：清空 Map 后扫描 agents/ 目录
-   * 首次启动时调用，此时 Map 为空，等价于全量发现
    * @returns {Promise<{ added: string[], removed: string[], unchanged: string[] }>}
    */
   async discoverAgents() {
@@ -47,8 +64,7 @@ export class ProcessManager {
   }
 
   /**
-   * 增量扫描：保留运行中的 Agent 状态，发现新增/移除/变更
-   * 运行时热发现时调用
+   * 增量扫描：保留 agent 启用状态，发现新增/移除/变更
    * @returns {Promise<{ added: string[], removed: string[], unchanged: string[] }>}
    */
   async rediscoverAgents() {
@@ -56,10 +72,8 @@ export class ProcessManager {
   }
 
   /**
-   * 扫描 agents/ 目录的核心逻辑
-   * - 移除磁盘上不存在的 Agent（如果正在运行则通过 /shutdown 停止）
-   * - 新增磁盘上的 Agent
-   * - 重新读取不变 Agent 的配置
+   * 扫描 agents/ 目录：移除磁盘不存在的 agent，新增/重读 agent config。
+   * 注意：共享 server 不因单个 agent 目录增删而启停。
    * @returns {Promise<{ added: string[], removed: string[], unchanged: string[] }>}
    */
   async _scanAgents() {
@@ -77,63 +91,33 @@ export class ProcessManager {
 
     const diskAgentIds = new Set();
     for (const entry of entries) {
-      if (entry.isDirectory()) {
-        diskAgentIds.add(entry.name);
-      }
+      if (entry.isDirectory()) diskAgentIds.add(entry.name);
     }
 
-    // 找出已移除的 Agent（在内存中但磁盘上不存在）
+    // 移除磁盘上不存在的 agent（仅清内存；共享 server 不动）
     for (const [id, agent] of this.agents) {
       if (!diskAgentIds.has(id)) {
         removed.push(id);
-        // 如果正在运行，通过 HTTP 停止
-        if (agent.status === 'running') {
-          try {
-            await this._httpShutdown(agent.port);
-            logger.info(`Rediscover: 停止已移除的 Agent ${id}`);
-          } catch (err) {
-            logger.warn(`Rediscover: 停止已移除的 Agent ${id} 失败: ${err.message}`);
-          }
-        }
         this.agents.delete(id);
       } else {
         unchanged.push(id);
       }
     }
 
-    // 发现新增的 Agent（磁盘上存在但内存中没有）
+    // 新增 agent
     for (const agentId of diskAgentIds) {
-      if (this.agents.has(agentId)) continue;
-
       const configPath = path.join(this.agentsDir, agentId, 'config', 'config.json');
       try {
-        const rawConfig = fs.readFileSync(configPath, 'utf-8');
-        const config = JSON.parse(rawConfig);
-        this.agents.set(agentId, {
-          port: config.port + this.portOffset,
-          pid: null,
-          status: 'stopped',
-          config
-        });
-        added.push(agentId);
-        logger.info(`Rediscover: 发现新 Agent: ${agentId} (port: ${config.port})`);
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        if (this.agents.has(agentId)) {
+          this.agents.get(agentId).config = config; // 重读 config（名称等变更可生效）
+        } else {
+          this.agents.set(agentId, { status: 'stopped', config });
+          added.push(agentId);
+          logger.info(`Rediscover: 发现新 Agent: ${agentId}`);
+        }
       } catch (err) {
         logger.warn(`Rediscover: 跳过 Agent ${agentId}: 配置解析失败 - ${err.message}`);
-      }
-    }
-
-    // 对不变的 Agent 重新读取配置（名称/端口变更可生效）
-    for (const id of unchanged) {
-      const configPath = path.join(this.agentsDir, id, 'config', 'config.json');
-      try {
-        const rawConfig = fs.readFileSync(configPath, 'utf-8');
-        const config = JSON.parse(rawConfig);
-        const agent = this.agents.get(id);
-        // 保留 pid/status，仅更新 config 和 port
-        agent.config = config;
-        agent.port = config.port + this.portOffset;
-      } catch (err) {
-        logger.warn(`Rediscover: 无法重新读取 Agent ${id} 配置: ${err.message}`);
       }
     }
 
@@ -142,333 +126,367 @@ export class ProcessManager {
   }
 
   /**
-   * 对 Agent 探活，并更新 PID
-   * @param {string} id - Agent ID
-   * @returns {Promise<boolean>} 是否存活
+   * 探活共享 agent-server，更新 server 状态 + 重建 /events 通道。
+   * @returns {Promise<boolean>} server 是否存活
    */
-  async probeAgent(id) {
-    const agent = this.agents.get(id);
-    if (!agent) return false;
-
-    const r = await probePort(agent.port);
+  async probeServer() {
+    const r = await probePort(this.server.port);
     if (r.ok) {
-      agent.status = 'running';
-      agent.pid = r.pid ?? agent.pid;
-      logger.info(`Agent ${id} 探活成功 (port: ${agent.port}, pid: ${agent.pid})`);
-      // 通道跟随存活：probe 把 agent 拉回 running，但它的 SSE /events 通道可能在上一次
-      //   探活失败时已被 disconnectAgentEvents 拆掉。此时 agent 越健康（继续 probe 成功），
-      //   它后续回合的 done 事件越会发进一条没人接的 SSE，沦为孤儿 streaming。故 probe
-      //   成功时若通道不在，立即重建（幂等：已有活连接则 connectAgentEvents 内部 no-op）。
-      if (!hasAgentEventsConnection(id)) {
-        connectAgentEvents(id, agent.port, this._makeEventHandler(id), this._makeDisconnectHandler(id));
-        logger.info(`Agent ${id} SSE /events 通道已重建`);
+      this.server.status = 'running';
+      this.server.pid = r.pid ?? this.server.pid;
+      this.server.error = null;
+      // 拉取 server /status 的实例错误表，供 getAgentStatus 区分实例级失败（§4.3）。
+      this.server.instanceErrors = await this._fetchInstanceErrors();
+      logger.info(`Agent-server 探活成功 (port: ${this.server.port}, pid: ${this.server.pid})`);
+      // 通道跟随存活：probe 成功但 /events 通道不在时立即重建（幂等）。
+      if (!hasAgentEventsConnection(SERVER_EVENTS_KEY)) {
+        connectAgentEvents(SERVER_EVENTS_KEY, this.server.port, this._makeEventHandler(), this._makeDisconnectHandler());
+        logger.info(`Agent-server SSE /events 通道已重建`);
       }
       return true;
     }
-
-    // 进程不存活（崩溃 / 已 stop / 异常退出）：清状态 + 断 /events 重连器，
-    // 否则 connectAgentEvents 的 5s 重连会针对已死端口死循环刷日志。
-    agent.status = 'stopped';
-    agent.pid = null;
-    disconnectAgentEvents(id);
+    // server 不可达（未起 / 崩 / 退出）：清状态 + 断 /events，避免对死端口 5s 重连死循环刷日志。
+    this.server.status = 'stopped';
+    this.server.pid = null;
+    disconnectAgentEvents(SERVER_EVENTS_KEY);
     return false;
   }
 
   /**
+   * 对某 agent 探活（= 共享 server 在跑 + 该 agent 已启用）。提供给仍按 agent 调用的旧调用点。
+   * @param {string} id
+   * @returns {Promise<boolean>}
+   */
+  async probeAgent(id) {
+    const agent = this.agents.get(id);
+    if (!agent) return false;
+    const up = await this.probeServer();
+    return up && agent.status === 'running';
+  }
+
+  /**
    * 通过 lsof 查找占用端口的进程 PID
-   * @param {number} port - 端口号
-   * @returns {number|null} PID 或 null
    */
   findPidFromPort(port) {
     return probe_findPidFromPort(port);
   }
 
   /**
-   * 启动 Agent 进程（detached spawn，独立于 Gateway 生命周期）
+   * 确保共享 agent-server 在跑（懒起：没起才 spawn 一次，已起 no-op）。
+   * 所有 startAgent 共用此入口 —— 第一个 startAgent 起 server，其余仅标 enable。
+   * @returns {Promise<void>} 成功无返回；失败抛错并置 server.status='error'
+   */
+async ensureServerUp() {
+    // 串行化：并发 startAgent（典型：ensureReplicasAlive Promise.all 多成员同时 ensureAgentPresent）
+    //   共享同一次 spawn，否则多路同时进 spawn 分支抢 listen 同一端口 → EADDRINUSE 竞态。
+    if (this._ensureServerUpInFlight) return this._ensureServerUpInFlight;
+    this._ensureServerUpInFlight = this._ensureServerUpImpl().finally(() => { this._ensureServerUpInFlight = null; });
+    return this._ensureServerUpInFlight;
+  }
+
+  async _ensureServerUpImpl() {
+    // 已起：快速校验一下别是僵尸（probe 一次）。
+    if (this.server.status === 'running') {
+      const alive = await this.probeServer();
+      if (alive) return;
+      // 探活失败则继续走 spawn 分支（重起）。
+    }
+
+    // 端口被占用 → 试着清掉（可能是上次崩溃残留）。
+    const occupiedPid = this.findPidFromPort(this.server.port);
+    if (occupiedPid) {
+      logger.warn(`端口 ${this.server.port} 被进程 PID ${occupiedPid} 占用，正在终止该进程`);
+      try {
+        process.kill(occupiedPid, 'SIGTERM');
+        await this._waitForPortFree(this.server.port, 3000);
+      } catch (e) {
+        try { process.kill(occupiedPid, 'SIGKILL'); await this._waitForPortFree(this.server.port, 2000); }
+        catch (e2) {
+          this.server.status = 'error';
+          this.server.error = `端口 ${this.server.port} 被占用且无法终止 (pid ${occupiedPid})`;
+          throw Object.assign(new Error(this.server.error), { statusCode: 409 });
+        }
+      }
+    }
+
+    const entryFile = path.join(process.cwd(), 'engine', 'start.js');
+    try {
+      const child = spawn(process.execPath, [entryFile, '--serve-all', '--port', String(this.server.port), '--gateway-url', this._gatewayUrl || ''], {
+        cwd: process.cwd(),
+        detached: true,
+        stdio: 'ignore',
+        env: { ...process.env, ELF_GATEWAY_URL: this._gatewayUrl || '' },
+      });
+      child.unref();
+
+      this.server.status = 'running'; // 乐观先标，probe 兜底
+      this.server.pid = child.pid;
+      this.server.error = null;
+      logger.info(`Agent-server 已启动 (pid: ${child.pid}, port: ${this.server.port})`);
+
+      // 轮询确认 HTTP 就绪
+      const probed = await probe_waitForReady(this.server.port, PROBE_TIMEOUT, PROBE_INTERVAL);
+      if (!probed) {
+        const fallbackPid = this.findPidFromPort(this.server.port);
+        if (fallbackPid) {
+          this.server.pid = fallbackPid;
+          this.server.status = 'running';
+          logger.info(`Agent-server 探活超时但端口已有进程响应 (pid: ${fallbackPid})`);
+        } else {
+          this.server.status = 'error';
+          this.server.error = '探活超时（端口无响应）';
+          logger.warn(`Agent-server 启动后探活超时，状态可能不准确`);
+        }
+      }
+
+      if (this.server.status === 'running') {
+        connectAgentEvents(SERVER_EVENTS_KEY, this.server.port, this._makeEventHandler(), this._makeDisconnectHandler());
+      }
+    } catch (err) {
+      this.server.status = 'error';
+      this.server.error = err.message;
+      logger.error(`Agent-server 启动失败: ${err.message}`);
+      throw Object.assign(new Error(`Failed to start agent-server: ${err.message}`), { statusCode: 500 });
+    }
+  }
+
+  /**
+   * 启动某 agent（= 确保共享 server 在跑 + 标该 agent 'running'）。不再 spawn 该 agent 自己的进程。
    * @param {string} id - Agent ID
-   * @returns {Promise<object>} Agent 信息 { agentId, status, pid }
+   * @returns {Promise<object>} { agentId, status, pid }
    */
   async startAgent(id) {
     const agent = this.agents.get(id);
     if (!agent) {
       throw Object.assign(new Error('Agent not found'), { statusCode: 404 });
     }
-
-    // 先探活，已运行则返回冲突
-    const alive = await this.probeAgent(id);
-    if (alive) {
-      throw Object.assign(
-        new Error(`Agent ${id} 已在运行 (pid: ${agent.pid})，请先停止再重新启动`),
-        { statusCode: 409 }
-      );
+    // 已在运行（agent 启用且 server 活着）→ 409
+    if (agent.status === 'running') {
+      const alive = await this.probeServer();
+      if (alive) {
+        throw Object.assign(new Error(`Agent ${id} 已在运行 (pid: ${this.server.pid})`), { statusCode: 409 });
+      }
+      // server 挂了 → 落到 ensureServerUp 重起
     }
 
-    // 端口被其他进程占用 → 尝试查找并杀掉
-    const occupiedPid = this.findPidFromPort(agent.port);
-    if (occupiedPid) {
-      logger.warn(`端口 ${agent.port} 被进程 PID ${occupiedPid} 占用，正在终止该进程`);
-      try {
-        process.kill(occupiedPid, 'SIGTERM');
-        // 等待端口释放
-        await this._waitForPortFree(agent.port, 3000);
-        logger.info(`端口 ${agent.port} 已释放`);
-      } catch (killErr) {
-        // SIGTERM 失败则 SIGKILL
-        try {
-          process.kill(occupiedPid, 'SIGKILL');
-          await this._waitForPortFree(agent.port, 2000);
-        } catch (e) {
-          throw Object.assign(
-            new Error(`端口 ${agent.port} 被进程 PID ${occupiedPid} 占用且无法终止，请手动处理`),
-            { statusCode: 409 }
-          );
-        }
-      }
-    }
-
-    const entryFile = path.join(this.agentsDir, id, 'index.js');
-    // 私聊实例记忆目录：profiles/agents/<agentId>/memory（agent 拥有自己的记忆）。
-    //   agent 进程经 ELF_DATA_DIR env 读用；一进程一实例。老 chat/<id>/data、agents/<id>/data 由 start.js 首启迁移。
-    const chatDataDir = agentMemory(id);
-
-    try {
-      const child = spawn(process.execPath, [entryFile], {
-        cwd: process.cwd(),
-        detached: true,
-        stdio: 'ignore',
-        env: { ...process.env, ELF_GATEWAY_URL: this._gatewayUrl || '', ELF_DATA_DIR: chatDataDir }
-      });
-      child.unref();
-
-      // 立即标记为 running（detached 后无法追踪 PID 变化）
-      agent.status = 'running';
-      agent.pid = child.pid;
-
-      logger.info(`Agent ${id} 已启动 (pid: ${child.pid})`);
-
-      // 轮询确认 HTTP 就绪
-      const probed = await this._waitForReady(id, PROBE_TIMEOUT);
-      if (!probed) {
-        // 超时但进程已启动，做兜底检查
-        const fallbackPid = this.findPidFromPort(agent.port);
-        if (fallbackPid) {
-          agent.pid = fallbackPid;
-          agent.status = 'running';
-          logger.info(`Agent ${id} 探活超时但端口已有进程响应 (pid: ${fallbackPid})`);
-        } else {
-          logger.warn(`Agent ${id} 启动后探活超时，状态可能不准确`);
-        }
-      }
-
-      // 建立到 Agent /events 的长连接（后台压缩完成等异步事件通道）
-      if (agent.status === 'running') {
-        agent._eventsConn = connectAgentEvents(id, agent.port, this._makeEventHandler(id), this._makeDisconnectHandler(id));
-      }
-
-      return { agentId: id, status: agent.status, pid: agent.pid };
-
-    } catch (err) {
+    await this.ensureServerUp();
+    if (this.server.status !== 'running') {
+      // 进程级失败：该 agent 标 error，错误指明是 server 起不来（§4.3 进程级 vs 实例级）。
       agent.status = 'error';
-      logger.error(`Agent ${id} 启动失败: ${err.message}`);
-      throw Object.assign(new Error(`Failed to start agent: ${err.message}`), { statusCode: 500 });
+      throw Object.assign(new Error(`Agent ${id} 启动失败：agent-server 起不来 — ${this.server.error || '未知'}`), { statusCode: 503 });
     }
+    agent.status = 'running';
+    return { agentId: id, status: 'running', pid: this.server.pid };
   }
 
   /**
-   * 停止 Agent 进程（通过 HTTP /shutdown 优雅关闭）
-   * @param {string} id - Agent ID
-   * @returns {Promise<object>} Agent 信息 { agentId, status }
+   * 停止某 agent（= 标 'stopped'）。**不杀共享 server**（兄弟 agent 可能还在用）。
+   * 实例的下线由 gateway 侧 enable 标志门控（不再路由 observe 给 stopped agent）。
+   * 要杀共享 server 进程，用 stopServer()（全局停 / cleanup）。
+   * @param {string} id
+   * @returns {Promise<object>} { agentId, status }
    */
   async stopAgent(id) {
     const agent = this.agents.get(id);
     if (!agent) {
       throw Object.assign(new Error('Agent not found'), { statusCode: 404 });
     }
-
-    // 先探活确认是否在运行
-    const alive = await this.probeAgent(id);
-    if (!alive) {
+    if (agent.status !== 'running') {
       throw Object.assign(new Error('Agent already stopped'), { statusCode: 409 });
     }
-
-    // 通过 HTTP /shutdown 优雅关闭
-    try {
-      await this._httpShutdown(agent.port);
-    } catch (err) {
-      logger.warn(`Agent ${id} /shutdown 请求失败: ${err.message}，尝试强杀`);
-    }
-
-    // 轮询确认已退出
-    const stopped = await this._waitForStopped(id, STOP_PROBE_TIMEOUT);
-    if (!stopped) {
-      // 超时，强制杀进程
-      const pid = agent.pid || this.findPidFromPort(agent.port);
-      if (pid) {
-        logger.warn(`Agent ${id} 优雅关闭超时，强制终止进程 (pid: ${pid})`);
-        try {
-          process.kill(pid, 'SIGKILL');
-          // 等待进程退出
-          await this._waitForPortFree(agent.port, FORCE_KILL_DELAY);
-        } catch (killErr) {
-          logger.error(`Agent ${id} 强制终止失败: ${killErr.message}`);
-        }
-      }
-    }
-
-    // 再次探活确认
-    await this.probeAgent(id);
-
-    // 如果仍然 running（极端情况），强制标记为 stopped
-    if (agent.status === 'running') {
-      agent.status = 'stopped';
-      agent.pid = null;
-    }
-
-    logger.info(`Agent ${id} 已停止`);
-    // 断开 events 长连接
-    disconnectAgentEvents(id);
+    agent.status = 'stopped';
+    logger.info(`Agent ${id} 已停用（共享 agent-server 保留）`);
     return { agentId: id, status: 'stopped' };
   }
 
   /**
-   * 获取单个 Agent 信息
+   * 全局停共享 agent-server 进程（cleanup / 重启用）。先优雅 /shutdown，超时强杀。
+   * @returns {Promise<object>}
    */
+  async stopServer() {
+    const alive = await this.probeServer();
+    if (!alive) {
+      disconnectAgentEvents(SERVER_EVENTS_KEY);
+      return { status: 'stopped', wasRunning: false };
+    }
+    try { await this._httpShutdown(this.server.port); }
+    catch (err) { logger.warn(`Agent-server /shutdown 失败: ${err.message}，尝试强杀`); }
+    const stopped = await this._waitForServerStopped(SERVER_STOP_TIMEOUT);
+    if (!stopped) {
+      const pid = this.server.pid || this.findPidFromPort(this.server.port);
+      if (pid) {
+        logger.warn(`Agent-server 优雅关闭超时，强制终止 (pid: ${pid})`);
+        try { process.kill(pid, 'SIGKILL'); await this._waitForPortFree(this.server.port, FORCE_KILL_DELAY); }
+        catch (e) { logger.error(`Agent-server 强制终止失败: ${e.message}`); }
+      }
+    }
+    await this.probeServer();
+    if (this.server.status === 'running') { this.server.status = 'stopped'; this.server.pid = null; }
+    disconnectAgentEvents(SERVER_EVENTS_KEY);
+    logger.info(`Agent-server 已停止`);
+    return { status: 'stopped', wasRunning: true };
+  }
+
+  /**
+   * 获取共享 server 端口（agent 视角：agent 身上的 port 属性，M=1 下全 agent 共享）。
+   */
+  getServerPort() {
+    return this.server.status === 'running' ? this.server.port : null;
+  }
+
+  /** 获取单个 Agent 信息（对外字段保持旧契约：port/pid 现指共享 server） */
   getAgent(id) {
     const agent = this.agents.get(id);
     if (!agent) return null;
+    const status = this._effectiveStatus(id, agent);
+    const failure = this.getAgentFailure(id);
     return {
       agentId: id,
       name: agent.config?.name || id,
       path: `agents/${id}`,
-      port: agent.port,
-      status: agent.status,
-      pid: agent.pid,
+      port: this.server.status === 'running' ? this.server.port : null,
+      status,
+      pid: this.server.status === 'running' ? this.server.pid : null,
+      // 失败层级 + 原因（status 为 error/server-down 时有意义，区分进程级 vs 实例级，§4.3）
+      failureLevel: failure.level,
+      failureReason: failure.reason,
       avatar: agent.config?.avatar || null,
-      userAvatar: agent.config?.userAvatar || null
+      userAvatar: agent.config?.userAvatar || null,
     };
   }
 
-  /**
-   * 列出所有 Agent
-   */
+  /** 列出所有 Agent */
   listAgents() {
     const result = [];
     for (const [id, agent] of this.agents) {
+      const failure = this.getAgentFailure(id);
       result.push({
         agentId: id,
         name: agent.config?.name || id,
         path: `agents/${id}`,
-        port: agent.port,
-        status: agent.status,
-        pid: agent.pid,
+        port: this.server.status === 'running' ? this.server.port : null,
+        status: this._effectiveStatus(id, agent),
+        pid: this.server.status === 'running' ? this.server.pid : null,
+        failureLevel: failure.level,
+        failureReason: failure.reason,
         avatar: agent.config?.avatar || null,
-        userAvatar: agent.config?.userAvatar || null
+        userAvatar: agent.config?.userAvatar || null,
       });
     }
     return result;
   }
 
-  /**
-   * 检查 Agent 是否存在
-   */
   hasAgent(id) {
     return this.agents.has(id);
   }
 
   /**
-   * 获取 Agent 端口
+   * 获取 agent 端口（agent 启用且 server 在跑 → server.port；否则 null）。
+   * gateway 路由用此判：null 则不投 observe（stopped/server-down agent 不收消息）。
    */
   getAgentPort(id) {
     const agent = this.agents.get(id);
-    return agent ? agent.port : null;
+    if (!agent || agent.status !== 'running') return null;
+    return this.server.status === 'running' ? this.server.port : null;
   }
 
   /**
-   * 获取 Agent 状态
+   * 获取 agent 状态（两层：server 挂时已启用的 agent 派生 'server-down'）。
    */
   getAgentStatus(id) {
     const agent = this.agents.get(id);
-    return agent ? agent.status : null;
+    if (!agent) return null;
+    return this._effectiveStatus(id, agent);
+  }
+
+  /** 计算对外状态：running 但 server 挂 → 'server-down'；server 在跑但该 agent 实例化失败 → 'error'（§4.3 两层）。 */
+  _effectiveStatus(id, agent) {
+    if (agent.status === 'running' && this.server.status !== 'running') return 'server-down';
+    if (agent.status === 'running' && this.server.instanceErrors?.[id]) return 'error';
+    return agent.status;
   }
 
   /**
-   * 收到 Agent /events 通道的事件（v3）。
-   * 私聊房事件（data._roomId 以 chat- 开头）→ private_room_stream 转发到常驻 /rooms/chat-<id>/subscribe SSE。
-   * 其余（无 _roomId 的群聊异步事件，如 compact）无前端订阅者消费，仅记日志。
+   * 返回某 agent 的失败层级与原因（供 API/前端区分 server 失败 vs 实例失败）。
+   * @returns {{ level: 'server'|'agent'|null, reason: string|null }}
    */
-  _onAgentEvent(agentId, event, data) {
-    logger.info(`[events] _onAgentEvent: agentId=${agentId} event=${event}`);
+  getAgentFailure(id) {
+    const agent = this.agents.get(id);
+    if (!agent) return { level: null, reason: null };
+    if (this.server.status !== 'running') return { level: 'server', reason: this.server.error || 'agent-server 未运行' };
+    const ie = this.server.instanceErrors?.[id];
+    if (ie) return { level: 'agent', reason: ie };
+    return { level: null, reason: null };
+  }
+
+  /**
+   * 拉取共享 server /status 的 instanceErrors（实例化失败表）。server 不可达返回 {}。
+   * @returns {Promise<object>}
+   */
+  async _fetchInstanceErrors() {
+    try {
+      const resp = await fetch(`http://127.0.0.1:${this.server.port}/status`, { signal: AbortSignal.timeout(3000) });
+      if (!resp.ok) return {};
+      const body = await resp.json();
+      return body?.instanceErrors || {};
+    } catch (e) { return {}; }
+  }
+
+  /**
+   * 收到共享 server /events 通道的事件。事件已带 _agentId（见 server.js wireAgentEvents），
+   *   按 _agentId / _roomId 路由——**不**按连接绑定的 id（连接是共享的，承载全部 agent）。
+   * 私聊房事件（_roomId 以 chat- 开头）→ private_room_stream 转发到常驻 SSE。
+   * 群聊异步事件（compact 等）无前端订阅者，仅记日志。
+   */
+  _onAgentEvent(event, data) {
+    const aid = (data && typeof data === 'object' && typeof data._agentId === 'string') ? data._agentId : '(unknown)';
+    logger.info(`[events] _onAgentEvent: agentId=${aid} event=${event}`);
     if (data && typeof data === 'object' && typeof data._roomId === 'string' && data._roomId.startsWith('chat-')) {
       handlePrivateAgentEvent(event, data, this.privateRoomHistory || null);
       return;
     }
-    // 群聊异步事件（compact 等）：内部压缩不外露，前端无订阅者，忽略。compact 类事件明记一行，便于排查"压了但看不到"。
     if (typeof event === 'string' && event.startsWith('compact')) {
-      logger.info(`[compact] 群聊 ${agentId} event=${event} 内部已处理，前端无订阅者，不外露`);
+      logger.info(`[compact] ${aid} event=${event} 内部已处理，前端无订阅者，不外露`);
     }
   }
 
   // ─── 私有方法 ───────────────────────────────────────────
 
   /**
-   * 构造 /events 事件转发回调（统一抽出来，供 startAgent 与 probeAgent 重建复用）
-   * @param {string} id
-   * @returns {(event: string, data: object) => void}
+   * 构造 /events 事件转发回调（共享连接，按事件内 _agentId 路由，不绑启动时的 id）。
    */
-  _makeEventHandler(id) {
-    return (event, data) => this._onAgentEvent(id, event, data);
+  _makeEventHandler() {
+    return (event, data) => this._onAgentEvent(event, data);
   }
 
   /**
-   * 构造 /events 通道断开兜底回调：SSE 断开 → 该 agent 名下私聊房（chat-<id>）若仍
-   *   streaming=true，强制结束回合（forceFinishPrivateTurn 对非 streaming 房 no-op）。
-   *   防「agent 进程活着但 SSE 通道静默断开，done 事件发进无人接的连接」沦为孤儿 streaming。
-   * @param {string} id
-   * @returns {() => void}
+   * 构造 /events 通道断开兜底：共享连接断开 → 所有启用中 agent 的私聊房若仍 streaming，强制结束回合。
+   * 防「server 活着但 SSE 静默断开，done 事件发进无人接的连接」沦为孤儿 streaming。
    */
-  _makeDisconnectHandler(id) {
+  _makeDisconnectHandler() {
     return () => {
-      const roomId = `chat-${id}`;
-      if (forceFinishPrivateTurn(roomId)) {
-        logger.warn(`[events] Agent ${id} SSE 断开，强制结束孤儿 streaming room=${roomId}`);
+      for (const [id, agent] of this.agents) {
+        if (agent.status === 'running' && forceFinishPrivateTurn(`chat-${id}`)) {
+          logger.warn(`[events] Agent-server SSE 断开，强制结束孤儿 streaming room=chat-${id}`);
+        }
       }
     };
   }
 
   /**
-   * 发送 HTTP /shutdown 请求
-   * @param {number} port
-   * @returns {Promise<void>}
+   * 发送 HTTP /shutdown 请求（给共享 server 端口）
    */
   async _httpShutdown(port) {
     await probe_httpShutdown(port);
   }
 
   /**
-   * 轮询等待 Agent HTTP 就绪
-   * @param {string} id - Agent ID
-   * @param {number} timeout - 超时毫秒
-   * @returns {Promise<boolean>}
+   * 轮询等待共享 server 停止（HTTP 不可达）
    */
-  async _waitForReady(id, timeout) {
-    const agent = this.agents.get(id);
-    if (!agent) return false;
-    return probe_waitForReady(agent.port, timeout, PROBE_INTERVAL);
-  }
-
-  /**
-   * 轮询等待 Agent 停止（HTTP 不可达）
-   * @param {string} id - Agent ID
-   * @param {number} timeout - 超时毫秒
-   * @returns {Promise<boolean>} 是否确认已停止
-   */
-  async _waitForStopped(id, timeout) {
-    const agent = this.agents.get(id);
-    if (!agent) return true;
-
+  async _waitForServerStopped(timeout) {
     const start = Date.now();
     while (Date.now() - start < timeout) {
-      const alive = await this.probeAgent(id);
+      const alive = await this.probeServer();
       if (!alive) return true;
       await new Promise(resolve => setTimeout(resolve, STOP_PROBE_INTERVAL));
     }
@@ -477,9 +495,6 @@ export class ProcessManager {
 
   /**
    * 等待端口释放（lsof 不再发现 LISTEN 进程）
-   * @param {number} port
-   * @param {number} timeout - 超时毫秒
-   * @returns {Promise<void>}
    */
   async _waitForPortFree(port, timeout) {
     await probe_waitForPortFree(port, timeout);

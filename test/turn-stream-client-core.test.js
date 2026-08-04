@@ -128,6 +128,13 @@ describe('turn-stream-client-core', () => {
       assert.equal(tcs[1].status, 'executing', '其它工具不动');
       assert.notEqual(out.assistantBubbles[0].sealed, true, '还有 executing 不 sealed');
     });
+    it('成功 result 写入 toolCall（供 badge 截断展示、title 放全文）', () => {
+      const at = { assistantBubbles: [{ id: 'b0', toolCalls: [
+        { id: 't1', status: 'executing' },
+      ] }] };
+      const out = applyToolResult(at, { id: 't1', status: 'success', result: 'Roll d20=7+1=8 vs DC 10 → 失败（攻击）' });
+      assert.equal(out.assistantBubbles[0].toolCalls[0].result, 'Roll d20=7+1=8 vs DC 10 → 失败（攻击）');
+    });
     it('全部完成 → 标 sealed', () => {
       const at = { assistantBubbles: [{ id: 'b0', toolCalls: [{ id: 't1', status: 'success' }] }] };
       // 单个 tool 已 success，再发个无 id 的不会改；用一个全完成场景

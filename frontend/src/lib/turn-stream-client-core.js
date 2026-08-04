@@ -114,6 +114,7 @@ export function applyToolResult(activeTurn, data = {}) {
     if (i === idx) {
       const u = { ...tc, status: data.status };
       if (data.message) u.message = data.message;
+      if (data.result != null) u.result = data.result;
       return u;
     }
     return { ...tc };

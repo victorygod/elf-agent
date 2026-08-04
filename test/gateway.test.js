@@ -70,7 +70,8 @@ describe('ProcessManager', () => {
     const agent = pm.getAgent('elf-001');
     assert.ok(agent);
     assert.equal(agent.agentId, 'elf-001');
-    assert.equal(agent.port, 8081);
+    // v4：共享 agent-server 模型下，agent.port = 共享 server 端口，server 未起时为 null（不再是 per-agent config.port）。
+    assert.equal(agent.port, null);
     assert.equal(agent.status, 'stopped');
   });
 
@@ -140,6 +141,8 @@ describe('Gateway HTTP Server', () => {
   });
 
   after(async () => {
+    // v4：停共享 agent-server 进程（承载全部 agent 的单进程）。
+    try { await pm.stopServer(); } catch (e) { /* 忽略 */ }
     // 停止所有 Agent（通过 HTTP /shutdown 或端口清理）
     for (const [id, agent] of pm.agents) {
       try {
@@ -182,7 +185,8 @@ describe('Gateway HTTP Server', () => {
     assert.equal(res.status, 200);
     const data = await res.json();
     assert.equal(data.agentId, 'elf-001');
-    assert.equal(data.port, 8081);
+    // v4：共享 server 未启 → port null（该 it 在 start 之前运行）。
+    assert.equal(data.port, null);
   });
 
   it('GET /agents/:id 不存在的 Agent 应返回 404', async () => {
