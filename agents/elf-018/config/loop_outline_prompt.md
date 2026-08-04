@@ -60,6 +60,9 @@ character/item/skill/location/quest/state 分类列出本轮涉及项，标「�
 
 ## 选项方向
 供 render 的 2-4 个分支方向（不写具体措辞）。
+
+## 语言风格
+从 system「语言风格 metadata」里选最契合本章的一个风格，**只写一个** `<文件名.md>`（如 `<combat_style.md>`）；都不契合则写「无」（默认风格恒在 system 末尾，无需点名）。
 ```
 
 ## 约束
@@ -67,3 +70,4 @@ character/item/skill/location/quest/state 分类列出本轮涉及项，标「�
 - 实体命名用 lore 规范名，便于逐项核登记。
 - 面板↔图鉴必须一致（见流程 4），不得"面板有而图鉴无"。
 - 数值公式与战斗机制统见 system，本节不重述。
+- 「语言风格」节只许一个 <文件名.md>，须取自 system 语言风格 metadata，不得臆造。

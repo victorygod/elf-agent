@@ -5,6 +5,7 @@ import * as api from '../api/index.js';
 import ConfigField from './ConfigField';
 import SkillManager from './SkillManager';
 import GameStatePanel from './GameStatePanel';
+import LanguageStylesPanel from './LanguageStylesPanel';
 import ConfirmModal from './ConfirmModal';
 import styles from './ConfigDrawer.module.css';
 
@@ -100,6 +101,7 @@ export default function ConfigDrawer({ onClose }) {
                     {readonlyFields.map(renderField)}
                   </>
                 )}
+                {tab.key === 'prompt' && <LanguageStylesPanel agentId={configAgentId} />}
               </>
             )}
           </div>

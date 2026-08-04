@@ -370,4 +370,63 @@ describe('Gateway HTTP Server', () => {
     // v3：agent 未运行时私聊房 /say 直接拒绝（503），不再离线排队
     assert.equal(res.status, 503);
   });
+
+  // ===== 语言风格 styles CRUD（elf-018）=====
+  it('GET /agents/:id/styles 列出风格文件（含 default，body 已剥 frontmatter）', async () => {
+    const res = await fetch(`http://127.0.0.1:${testPort}/agents/elf-018/styles`);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    const def = (data.styles || []).find((s) => s.filename === 'default_style.md');
+    assert.ok(def, '应有 default_style.md');
+    assert.equal(def.isDefault, true);
+    assert.ok(def.description, 'default 带简介');
+    assert.ok(def.body.includes('默认'), 'default 正文已剥 frontmatter');
+  });
+
+  it('styles CRUD：新建→改名→删除（throwaway 名，finally 兜底清理，不污染 canon）', async () => {
+    const base = `http://127.0.0.1:${testPort}/agents/elf-018/styles`;
+    const hdr = { 'Content-Type': 'application/json' };
+    try {
+      const post = await fetch(base, { method: 'POST', headers: hdr, body: JSON.stringify({ name: '_gwtest_a', description: '测试风格', body: '测试正文' }) });
+      assert.equal(post.status, 200);
+      assert.equal((await post.json()).filename, '_gwtest_a.md');
+
+      const list1 = await (await fetch(base)).json();
+      const got = list1.styles.find((s) => s.filename === '_gwtest_a.md');
+      assert.ok(got, '新建后列表含 a');
+      assert.equal(got.description, '测试风格');
+      assert.ok(got.body.includes('测试正文'), '读回正文');
+
+      const put = await fetch(`${base}/_gwtest_a.md`, { method: 'PUT', headers: hdr, body: JSON.stringify({ name: '_gwtest_b', description: '改名后', body: '正文改' }) });
+      assert.equal(put.status, 200);
+      assert.equal((await put.json()).filename, '_gwtest_b.md');
+      const list2 = await (await fetch(base)).json();
+      assert.ok(!list2.styles.some((s) => s.filename === '_gwtest_a.md'), '改名后旧名消失');
+      assert.ok(list2.styles.some((s) => s.filename === '_gwtest_b.md'), '改名后新名出现');
+
+      const del = await fetch(`${base}/_gwtest_b.md`, { method: 'DELETE' });
+      assert.equal(del.status, 200);
+      const list3 = await (await fetch(base)).json();
+      assert.ok(!list3.styles.some((s) => s.filename === '_gwtest_b.md'), '删除后列表不含 b');
+    } finally {
+      for (const f of ['_gwtest_a.md', '_gwtest_b.md']) {
+        try { await fetch(`${base}/${f}`, { method: 'DELETE' }); } catch (e) { /* 兜底清理 */ }
+      }
+    }
+  });
+
+  it('styles 校验：default 不可删/不可新建、非法 name 400、description 必填 400、重名 409', async () => {
+    const base = `http://127.0.0.1:${testPort}/agents/elf-018/styles`;
+    const hdr = { 'Content-Type': 'application/json' };
+    assert.equal((await fetch(`${base}/default_style.md`, { method: 'DELETE' })).status, 400, 'default 不可删');
+    assert.equal((await fetch(base, { method: 'POST', headers: hdr, body: JSON.stringify({ name: 'default_style', description: 'x', body: 'y' }) })).status, 400, 'default 不可新建');
+    assert.equal((await fetch(base, { method: 'POST', headers: hdr, body: JSON.stringify({ name: 'bad name', description: 'x', body: 'y' }) })).status, 400, '非法 name');
+    assert.equal((await fetch(base, { method: 'POST', headers: hdr, body: JSON.stringify({ name: '_gwtest_c', description: '', body: 'y' }) })).status, 400, 'description 必填');
+    try {
+      assert.equal((await fetch(base, { method: 'POST', headers: hdr, body: JSON.stringify({ name: '_gwtest_d', description: 'd', body: 'b' }) })).status, 200);
+      assert.equal((await fetch(base, { method: 'POST', headers: hdr, body: JSON.stringify({ name: '_gwtest_d', description: 'd', body: 'b' }) })).status, 409, '重名 409');
+    } finally {
+      try { await fetch(`${base}/_gwtest_d.md`, { method: 'DELETE' }); } catch (e) { /* 兜底清理 */ }
+    }
+  });
 });

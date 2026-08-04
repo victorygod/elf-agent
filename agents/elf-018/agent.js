@@ -16,10 +16,14 @@ import path from 'path';
 import { Agent } from '../../engine/agent.js';
 import { sendNotice } from '../../engine/notice.js';
 import { createLogger } from '../../shared/logger.js';
-import { buildMetadata } from '../../shared/agents/elf-018/buildMetadata.js';
+import { buildMetadata, buildStyleMetadata } from '../../shared/agents/elf-018/buildMetadata.js';
 import { SUMMARY_PREAMBLE, CONTINUATION_CLAUSE } from '../../engine/message_manager.js';
+import { parseFrontmatter } from '../../engine/skills/parser.js';
 
 const logger = createLogger('dnd-agent');
+
+// 默认语言风格文件名（render system 末尾常驻其正文；大纲点名它或未点名时不在 user 末尾重复注入）。
+const DEFAULT_STYLE_FILE = 'default_style.md';
 
 // ===== 提示词文案（统一管理；注释标明使用位置）=====
 
@@ -145,6 +149,8 @@ export class DNDAgent extends Agent {
     let sys = this.config.get('systemPrompt') || '';
     const md = buildMetadata(this._roots.lore);
     if (md) sys += '\n\n' + md;
+    const smd = buildStyleMetadata(this._stylesDir);   // 语言风格 metadata（<文件名.md> - description）
+    if (smd) sys += '\n\n' + smd;
     return sys;
   }
 
@@ -218,14 +224,15 @@ export class DNDAgent extends Agent {
     }
   }
 
-  /** render messages：system总纲 + 历史(MM压缩摘要+fresh outline文件) + 上一轮正文 + 本轮大纲+新旧面板 + 语言风格reminder。 */
+  /** render messages：system(总纲+默认语言风格正文) + 历史(MM压缩摘要+fresh outline文件) + 上一轮正文 + 本轮大纲+新旧面板 + render任务指令 + 命名语言风格正文(命中且≠默认时)。 */
   _buildRenderMessages() {
     const read = (p) => { try { return p && fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : ''; } catch { return ''; } };
     const N = this._roundNumber;
     const users = this._extractUserMessages();
     const sysPrompt = this.config.get('systemPrompt') || '';
-    const examples = this.config.get('renderExamples') || '';
-    const msgs = [{ role: 'system', content: examples ? sysPrompt + '\n\n' + examples : sysPrompt }];
+    // 默认语言风格正文（剥 frontmatter）常驻 render system 末尾；缺失则只留总纲。
+    const defaultBody = this._loadStyleBody(DEFAULT_STYLE_FILE);
+    const msgs = [{ role: 'system', content: defaultBody ? `${sysPrompt}\n\n${defaultBody}` : sysPrompt }];
 
     // render 不含 metadata（不读 lore，所需设定由大纲抄录）。
     // 历史 = outline loop MM 的压缩摘要（去 preamble）+ 压缩后仍在 MM 的轮（fresh）的 outline 文件全文。
@@ -253,13 +260,36 @@ export class DNDAgent extends Agent {
     const panelPath = path.join(this._roots.lore, this._protagonistFile);
     const prevPanelPath = path.join(this._roots.lore, this._prevFile());
     const panelBlock = `${PANEL_MSG('旧面板(initial)', prevPanelPath, read(prevPanelPath))}\n\n${PANEL_MSG('新面板(final)', panelPath, read(panelPath))}`;
-    // 语言风格 reminder 不单独成消息、不裹 system-reminder 标签，直接拼到当前指令消息尾部
+    // 命名语言风格：解析本轮大纲「## 语言风格」节里的 <xxx.md>，命中且非默认时把该风格正文（剥 frontmatter）
+    //   拼到当前指令消息末尾。默认风格已在 render system 末尾常驻，命中默认/未命中/缺失时不在此重复注入。
     //   当前轮玩家输入 = MM 里最后一条 fresh user（压缩后老轮 user 已进摘要，不能按下标 users[N-1] 取）
     const rem = this.config.get('loop_render_prompt') || '';
     const currentUser = users.length ? users[users.length - 1] : '';
-    msgs.push({ role: 'user', content: `玩家当前指令：${currentUser}\n本轮大纲：\n${outline || ''}\n\n${panelBlock}${rem ? `\n\n${rem}` : ''}` });
+    const namedStyle = this._resolveOutlineStyle(outline);
+    const namedBody = namedStyle && namedStyle !== DEFAULT_STYLE_FILE ? this._loadStyleBody(namedStyle) : '';
+    msgs.push({ role: 'user', content: `玩家当前指令：${currentUser}\n本轮大纲：\n${outline || ''}\n\n${panelBlock}${rem ? `\n\n${rem}` : ''}${namedBody ? `\n\n${namedBody}` : ''}` });
 
     return msgs;
+  }
+
+  /** 读 stylesDir/<fileName> 的正文（剥 frontmatter）；缺失/空返回 '' 并告警。供默认风格常驻 + 命名风格加载。 */
+  _loadStyleBody(fileName) {
+    if (!fileName || !this._stylesDir) return '';
+    const p = path.join(this._stylesDir, fileName);
+    let raw = '';
+    try { raw = fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : ''; } catch { raw = ''; }
+    if (!raw) { logger.warn(`[style] 风格文件缺失：${fileName}（${p}），回退默认`); return ''; }
+    const { body } = parseFrontmatter(raw);
+    return body.trim();
+  }
+
+  /** 解析本轮大纲「## 语言风格」节里的首个 <xxx.md>；限定到该节（不跨节误命中）；无则 ''。 */
+  _resolveOutlineStyle(outline) {
+    if (!outline) return '';
+    const m = outline.match(/##\s*语言风格[^\n]*\n([\s\S]*?)(?=\n##\s|$)/);
+    const section = m ? m[1] : '';
+    const tok = section.match(/<([^\n>]+\.md)>/);
+    return tok ? tok[1].trim() : '';
   }
 
   /** outline loop MM 里最近一次压缩的摘要正文（剥除 SUMMARY_PREAMBLE+CONTINUATION_CLAUSE 前缀）；无则空串。 */

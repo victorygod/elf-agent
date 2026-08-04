@@ -78,7 +78,7 @@ transmission 全程不变:gateway 仍 `fetch http://127.0.0.1:${serverPort}/...`
 
 ## 六、远端(后续阶段,仅留设计空间)
 
-- **反向连接**:agent-server 主动连 gateway(NAT 后 gateway 拨不进)。传输**优先 SSE+POST**(下行 SSE push `req`、上行 POST `event`/`res`,复用现 express+SSE,无新依赖、无 WS);**WS 仅作"高频 token 上行"可选优化,非前提**。
+- **反向连接**:agent-server 主动连 gateway(NAT 后 gateway 拨不进)。传输**优先 SSE+POST**(下行 SSE push `req`、上行 POST `event`/`res`,复用现 express+SSE,无新依赖、无 WS);**WS 仅作"高频 token 上行"可选优化,非前提**。→ 专项研究见 [reverse-connection.md](./reverse-connection.md)。
 - **共享盘迁移**:远端不共盘,agent-server **自拥其盘**,agent 文件经 `req` 访问;**snapshot/rewind 跨盘协调**(gateway 改 room history + `req:rewind` 还原 agent memory + server reload,三步协调 + 失败补偿)是远端最大风险点。
 - 远端鉴权/配对(openclaw 式 device pairing)等远端才引入。
 - **业界印证**:B 是"远端 worker 集群"事实标准(reverse connection / broker–worker);**openclaw** 的 gateway 即同形(单入站 WS、node 主动连声明 caps、远端经 Tailscale/SSH tunnel)。openclaw node ≈ 我们的 agent-server(声明持 agentId 即 caps),gateway ≈ 我们的 gateway(只路由+监督,不背 messaging 面)。

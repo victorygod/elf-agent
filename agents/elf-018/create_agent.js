@@ -49,6 +49,7 @@ export async function createAgent({ runContext, dataDir, model, toolManager } = 
   };
   agent._protagonistFile = 'user_profile.md';
   agent._configDir = configDir;   // 供 clearRuntime 找 seeds 重新播种
+  agent._stylesDir = path.join(configDir, 'styles');   // 语言风格 canon 目录（热读，前端经 gateway 写入）
 
   // 本轮大纲专用工具（有状态：持 agent 实例，按 _roundNumber/_roots 定位本轮文件）。工厂构造、
   // 需 agent 实例，故在此手动注册，不进 config.json tools 数组（自动注册路径在 new Agent 之前、拿不到 agent）。

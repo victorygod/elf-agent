@@ -471,12 +471,18 @@ async ensureServerUp() {
    * 构造 /events 通道断开兜底：共享连接断开 → 所有启用中 agent 的私聊房若仍 streaming，强制结束回合。
    * 防「server 活着但 SSE 静默断开，done 事件发进无人接的连接」沦为孤儿 streaming。
    */
-  _makeDisconnectHandler() {
+  _makeDisconnectHandler(agentId) {
+    // agentId 提供（按 agent 断开）：清该 agent 名下 chat-<id> 的孤儿 streaming。
+    // agentId 缺省（共享 /events 通道断开）：清所有 running agent 的孤儿 streaming（v4 共享 server 语义）。
     return () => {
-      for (const [id, agent] of this.agents) {
-        if (agent.status === 'running' && forceFinishPrivateTurn(`chat-${id}`)) {
+      const clear = (id) => {
+        if (forceFinishPrivateTurn(`chat-${id}`)) {
           logger.warn(`[events] Agent-server SSE 断开，强制结束孤儿 streaming room=chat-${id}`);
         }
+      };
+      if (agentId) { clear(agentId); return; }
+      for (const [id, agent] of this.agents) {
+        if (agent.status === 'running') clear(id);
       }
     };
   }

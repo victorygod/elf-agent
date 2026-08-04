@@ -15,10 +15,6 @@
     "type": "path",
     "content": "loop_render_prompt.md"
   },
-  "renderExamples": {
-    "type": "path",
-    "content": "render_examples.md"
-  },
   "compactPrompt": {
     "type": "path",
     "content": "compact_prompt.md"

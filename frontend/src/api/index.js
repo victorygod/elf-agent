@@ -18,6 +18,53 @@ export async function renameProtagonist(agentId, name) {
   });
   return res.json();
 }
+
+// ===== 语言风格 styles（支持 config/styles 目录的 agent，如 elf-018）=====
+
+/** 列出某 agent 的语言风格文件 */
+export async function getStyles(agentId) {
+  const res = await fetch(`${API_BASE}/agents/${agentId}/styles`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();   // { styles: [{filename,name,description,body,isDefault}], defaultFile }
+}
+
+/** 新建风格文件（name = 文件名 stem，不带 .md） */
+export async function createStyle(agentId, { name, description, body }) {
+  const res = await fetch(`${API_BASE}/agents/${agentId}/styles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, description, body }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return await res.json();
+}
+
+/** 更新风格文件（含改名；filename 为原文件名含 .md） */
+export async function updateStyle(agentId, filename, { name, description, body }) {
+  const res = await fetch(`${API_BASE}/agents/${agentId}/styles/${encodeURIComponent(filename)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, description, body }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return await res.json();
+}
+
+/** 删除风格文件（default 不可删） */
+export async function deleteStyle(agentId, filename) {
+  const res = await fetch(`${API_BASE}/agents/${agentId}/styles/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return await res.json();
+}
 export const HISTORY_PAGE_SIZE = 30;
 
 // ===== Agent 列表 =====

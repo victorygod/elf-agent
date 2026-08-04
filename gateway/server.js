@@ -16,6 +16,7 @@ import { registerRoomRoutes } from './room_routes.js';
 import { createAgentFromTemplate } from './agent_scaffold.js';
 import { agentMemory } from '../shared/profiles_paths.js';
 import { buildMetadata } from '../shared/agents/elf-018/buildMetadata.js';
+import { parseFrontmatter } from '../engine/skills/parser.js';
 import {
   listSkills, getSkillDetail, deleteSkill, installSkill, browseDirs, skillRoot,
 } from './skill_store.js';
@@ -29,6 +30,36 @@ function _parseFm(txt) {
   const name = fm[1].match(/^name:\s*(.+)$/m)?.[1]?.trim();
   const desc = fm[1].match(/^description:\s*(.+)$/m)?.[1]?.trim();
   return name ? { name, description: desc || '' } : null;
+}
+
+// ===== 语言风格 styles（canon: agents/<id>/config/styles/*.md）=====
+const STYLES_NAME_RE = /^[A-Za-z0-9._-]+$/;
+const DEFAULT_STYLE_FILE = 'default_style.md';
+
+/** 校验新建/更新风格入参；通过返回 null，否则返回错误信息。name = 文件名 stem（不带 .md）。 */
+function _validateStyleInput(name, description, body) {
+  if (!name || !STYLES_NAME_RE.test(name)) return 'name 非法（仅 A-Za-z0-9._-，不带 .md）';
+  if (!String(description ?? '').trim()) return 'description 必填';
+  if (!String(body ?? '').trim()) return 'body 必填';
+  return null;
+}
+
+/** 组装风格文件全文：frontmatter 只含 description + 正文。 */
+function assembleStyleFile(description, body) {
+  return `---\ndescription: ${String(description).trim()}\n---\n\n${String(body).trim()}\n`;
+}
+
+/** 风格目录绝对路径。 */
+function stylesDirOf(pm, id) { return path.join(pm.agentsDir, id, 'config', 'styles'); }
+
+/** 解析风格文件名 → 安全绝对路径（防路径逃逸）。 */
+function safeStylePath(pm, id, fileName) {
+  const root = path.resolve(stylesDirOf(pm, id));
+  const resolved = path.resolve(root, fileName);
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    throw Object.assign(new Error('path escape detected'), { statusCode: 400 });
+  }
+  return resolved;
 }
 
 /**
@@ -202,6 +233,69 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // ===== 语言风格 styles CRUD =====
+  // GET /agents/:id/styles — 列全部风格文件（filename 含 .md；name 去 .md；description 来自 frontmatter；body 已剥头；isDefault 标记）
+  app.get('/agents/:id/styles', checkAgentExists, (req, res) => {
+    const dir = stylesDirOf(pm, req.params.id);
+    const out = [];
+    try {
+      for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.md') && !x.endsWith('.prev.md')).sort()) {
+        const { frontmatter, body } = parseFrontmatter(fs.readFileSync(path.join(dir, f), 'utf-8'));
+        out.push({
+          filename: f,
+          name: f.replace(/\.md$/, ''),
+          description: (frontmatter.description || '').trim(),
+          body: body.trim(),
+          isDefault: f === DEFAULT_STYLE_FILE,
+        });
+      }
+    } catch {}
+    res.json({ styles: out, defaultFile: DEFAULT_STYLE_FILE });
+  });
+
+  // POST /agents/:id/styles — 新建。body: { name, description, body }（name = 文件名 stem 不带 .md）
+  app.post('/agents/:id/styles', checkAgentExists, (req, res) => {
+    const { name, description, body } = req.body || {};
+    const err = _validateStyleInput(name, description, body);
+    if (err) return res.status(400).json({ error: err });
+    if (`${name}.md` === DEFAULT_STYLE_FILE) return res.status(400).json({ error: 'default_style 已固定存在，无需新建' });
+    let p;
+    try { p = safeStylePath(pm, req.params.id, `${name}.md`); } catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
+    if (fs.existsSync(p)) return res.status(409).json({ error: `已存在 ${name}.md，请换个名字` });
+    fs.mkdirSync(stylesDirOf(pm, req.params.id), { recursive: true });
+    fs.writeFileSync(p, assembleStyleFile(description, body), 'utf-8');
+    res.json({ ok: true, filename: `${name}.md` });
+  });
+
+  // PUT /agents/:id/styles/:filename — 更新（含改名）。body: { name, description, body }
+  app.put('/agents/:id/styles/:filename', checkAgentExists, (req, res) => {
+    const oldFile = req.params.filename;
+    const { name, description, body } = req.body || {};
+    const err = _validateStyleInput(name, description, body);
+    if (err) return res.status(400).json({ error: err });
+    const newFile = `${name}.md`;
+    if (oldFile === DEFAULT_STYLE_FILE && newFile !== DEFAULT_STYLE_FILE) return res.status(400).json({ error: 'default_style 不可改名' });
+    if (newFile === DEFAULT_STYLE_FILE && oldFile !== DEFAULT_STYLE_FILE) return res.status(400).json({ error: '不可改名为 default_style' });
+    let oldPath, newPath;
+    try { oldPath = safeStylePath(pm, req.params.id, oldFile); newPath = safeStylePath(pm, req.params.id, newFile); }
+    catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
+    if (!fs.existsSync(oldPath)) return res.status(404).json({ error: `${oldFile} 不存在` });
+    if (newFile !== oldFile && fs.existsSync(newPath)) return res.status(409).json({ error: `目标名 ${newFile} 已存在` });
+    fs.writeFileSync(newPath, assembleStyleFile(description, body), 'utf-8');
+    if (newFile !== oldFile) { try { fs.rmSync(oldPath, { force: true }); } catch {} }
+    res.json({ ok: true, filename: newFile });
+  });
+
+  // DELETE /agents/:id/styles/:filename — 删（default 不可删）
+  app.delete('/agents/:id/styles/:filename', checkAgentExists, (req, res) => {
+    const f = req.params.filename;
+    if (f === DEFAULT_STYLE_FILE) return res.status(400).json({ error: 'default_style 不可删除' });
+    let p;
+    try { p = safeStylePath(pm, req.params.id, f); } catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
+    try { fs.rmSync(p, { force: true }); res.json({ ok: true }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   // GET /agents/:id/config-ui — 获取配置 UI 布局和配置数据

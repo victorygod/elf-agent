@@ -36,8 +36,8 @@
 风格文件在 canon config/styles/，gateway 直接读写。新增 4 个端点，模式取自 GET /agents/:id/game-state 的 scan、skill_store 的文件名校验与路径逃逸守卫、protagonist-name 的 frontmatter 重写；统一复用 parseFrontmatter。
 
 - GET /agents/:id/styles：列全部风格，返回 filename / name(去 .md) / description / body(剥头) / isDefault。
-- POST /agents/:id/styles：新建，body { name, description, body }。校验 name 合法、不可为 default_style、description 与 body 必填；同名存在则 409；写入 frontmatter(只 description)+body。
-- PUT /agents/:id/styles/:filename：更新含改名，body { name, description, body }。default 不可改名、不可改名为 default；name 变则写新删旧（rename）。
+- POST /agents/:id/styles：新建，body { name, description, body }。校验 name 合法、不可为 default_style、description 与 body 必填；**name 查重——<name>.md 已存在则 409**；写入 frontmatter(只 description)+body。
+- PUT /agents/:id/styles/:filename：更新含改名，body { name, description, body }。default 不可改名、不可改名为 default；name 变则按新 name 查重，目标名已存在则 409，通过则写新删旧（rename）。
 - DELETE /agents/:id/styles/:filename：删，default 不可删。
 
 不动 engine/config_loader.js（引擎只读不写）；现有 PUT /agents/:id/config 无目录概念，故风格走独立端点。
@@ -45,7 +45,7 @@
 ## 6. 前端（React）
 - frontend/src/api/index.js：加 getStyles / createStyle / updateStyle / deleteStyle 四接口。
 - frontend/src/components/ConfigDrawer.jsx：tab 分发链加一支，type = language-styles 时渲染 <LanguageStylesPanel agentId=…/>。
-- 新 frontend/src/components/LanguageStylesPanel.jsx：复合 GameStatePanel（列表+折叠）、SkillManager（新增/删除+确认弹窗+toast）、ConfigField 的 textarea。形态：刷新拉列表；每行 name（+默认标签）+ description 摘要 + 编辑 + 删除（default 无删）；「+ 新增」打开编辑面板，三个必填框（name = 文件名 stem 不带 .md、description、body）；编辑含 default，default 的 name 锁死、description/body 可改，其余 name 可改（改名）；保存（新建→POST、已有→PUT）后刷新；删除走确认弹窗。
+- 新 frontend/src/components/LanguageStylesPanel.jsx：复合 GameStatePanel（列表+折叠）、SkillManager（新增/删除+确认弹窗+toast）、ConfigField 的 textarea。形态：刷新拉列表；每行 name（+默认标签）+ description 摘要 + 编辑 + 删除（default 无删）；「+ 新增」打开编辑面板，三个必填框（name = 文件名 stem 不带 .md、description、body）；编辑含 default，default 的 name 锁死、description/body 可改，其余 name 可改（改名）；**新建 / 改名时前端预查 name 是否与现有文件重名，重名则禁用保存并提示，后端 409 兜底、失败 toast 报错**；保存（新建→POST、已有→PUT）后刷新；删除走确认弹窗。
 
 字段语义严格对齐要求：name + description 两个独立必填输入框；name = 文件名（不带 .md）；正文就是可编辑正文，不含 name/description（保存时后端用 frontmatter 拼回）。
 
@@ -83,6 +83,6 @@ outline loop system：总纲 + 设定集 metadata + 语言风格 metadata。
 1) 建 config/styles/ + 默认 + 示例；2) buildStyleMetadata + 单测；3) agent.js 改动；4) create_agent.js 设 _stylesDir；5) config.json / config-ui.json 删样例字段、加 tab；6) 两个 prompt 文件改 + 删 render_examples.md；7) gateway 4 端点；8) 前端 api + ConfigDrawer 分发 + LanguageStylesPanel；9) 串行跑 dm-agent / gateway 测试至全绿；10) 前端 build + 手测（编辑 default、新增/改名/删除、跑一轮战斗与一轮感情戏验 render 末尾加载对应正文）。
 
 ## 12. 确认点
-1. 叠加 vs 替换：点名非默认时默认是否仍常驻 system 末尾？本方案取叠加。
+1. 叠加 vs 替换：已确认取**叠加**，不做替换（默认恒在 render system 末尾，命名风格在最近一条 user 末尾）。风格文件按层层叠加编写即可，无需 standalone。
 2. 改名：编辑非默认时 name 可改（后端自动 rename）。只想要新增/删除则 name 编辑态设只读。
-3. body 必填：description 必填（你要的）；body 我也设必填（空风格无意义）。要允许空 body 去掉该校验即可。
+3. body 必填：description 必填；body 也设必填（空风格无意义）。要允许空 body 去掉该校验即可。

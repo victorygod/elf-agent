@@ -23,6 +23,7 @@ import { MessageManager as DNDMessageManager } from '../agents/elf-018/message_m
 import { DNDAgent } from '../agents/elf-018/agent.js';
 import { Agent } from '../engine/agent.js';
 import { LLMModel } from '../engine/models/index.js';
+import { buildStyleMetadata } from '../shared/agents/elf-018/buildMetadata.js';
 
 // 带 frontmatter 的角色卡内容（lore 文件须符合此规范，专版 Write 后置校验）
 const charProfile = (body) => `---\nname: 勇者\ndescription: 玩家角色（主角）\n---\n${body}`;
@@ -641,5 +642,134 @@ describe('lore 作用域工具', () => {
   it('tools 目录无 Glob（已被移除）', () => {
     const dir = fileURLToPath(new URL('../agents/elf-018/tools/', import.meta.url));
     assert.ok(!fs.existsSync(path.join(dir, 'Glob.js')), 'elf-018 不应有 Glob 工具');
+  });
+});
+
+// ========================
+// buildStyleMetadata：扫描 styles 目录 → <文件名.md> - description
+// ========================
+describe('buildStyleMetadata', () => {
+  it('扫描 styles 目录，输出 <文件名.md> - description，无绝对路径；default 不列入', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-sm-'));
+    fs.writeFileSync(path.join(tmp, 'default_style.md'), '---\ndescription: 默认风格简介\n---\n正文');
+    fs.writeFileSync(path.join(tmp, 'combat_style.md'), '---\ndescription: 战斗风格简介\n---\n正文');
+    const md = buildStyleMetadata(tmp);
+    assert.match(md, /## 语言风格 metadata/);
+    assert.doesNotMatch(md, /<default_style\.md>/, 'default 不列入可选 metadata');
+    assert.match(md, /<combat_style\.md> - 战斗风格简介/);
+    assert.doesNotMatch(md, new RegExp(tmp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '不含绝对路径');
+  });
+
+  it('仅含 default_style 时返回空串（无可选场景风格）', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-sm-only-'));
+    fs.writeFileSync(path.join(tmp, 'default_style.md'), '---\ndescription: 默认风格简介\n---\n正文');
+    assert.equal(buildStyleMetadata(tmp), '');
+  });
+
+  it('空目录返回空串', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-sm2-'));
+    assert.equal(buildStyleMetadata(tmp), '');
+  });
+
+  it('无 frontmatter 的文件降级为（无简介）', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-sm3-'));
+    fs.writeFileSync(path.join(tmp, 'plain.md'), '无 frontmatter 的正文');
+    const md = buildStyleMetadata(tmp);
+    assert.match(md, /<plain\.md> - （无简介）/);
+  });
+});
+
+// ========================
+// render 语言风格注入：默认常驻 system 末尾 + 命名风格加载到最近一条 user 末尾
+// ========================
+describe('render 语言风格注入', () => {
+  beforeEach(() => resetReadState());
+
+  const DEFAULT_FM = '---\ndescription: 默认叙事风格\n---\n\n默认风格正文。\n\n## 短例\n默认短例。';
+  const COMBAT_FM = '---\ndescription: 战斗风格\n---\n\n战斗风格正文。';
+
+  function setup({ outlineContent, styleFiles }) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-style-'));
+    const roots = { lore: path.join(tmp, 'lore'), outline: path.join(tmp, 'outline'), scene: path.join(tmp, 'scene') };
+    const stylesDir = path.join(tmp, 'styles');
+    for (const r of [roots.lore, roots.outline, roots.scene, stylesDir]) fs.mkdirSync(r, { recursive: true });
+    fs.mkdirSync(path.join(roots.lore, 'characters'), { recursive: true });
+    fs.writeFileSync(path.join(roots.lore, 'user_profile.md'), charProfile('面板'));
+    fs.writeFileSync(path.join(roots.lore, 'user_profile.prev.md'), charProfile('旧面板'));
+    for (const { file, content } of styleFiles || []) fs.writeFileSync(path.join(stylesDir, file), content);
+    fs.writeFileSync(path.join(roots.outline, 'round-1.md'), outlineContent || '');
+
+    const config = new Config(tmp);
+    config.data = { maxIterations: 10, systemPrompt: '', memoryTokenLimit: 40000, compactPrompt: '总结', compactSystemPrompt: '压缩器', compactMode: 'async', loop_outline_prompt: '', loop_render_prompt: 'RENDER' };
+    const tm = new ToolManager();
+    const mm = new MessageManager({ systemPrompt: '', memoryTokenLimit: 40000, dataDir: path.join(tmp, 'mm'), config });
+    const agent = new DNDAgent({ config, model: new MockModel({ responses: [] }), toolManager: tm, messageManager: mm });
+    agent._roots = roots;
+    agent._stylesDir = stylesDir;
+    agent._protagonistFile = 'user_profile.md';
+    agent._roundNumber = 1;
+    mm.messages.push({ id: 'u1', role: 'user', content: '玩家R1指令' });
+    const msgs = agent._buildRenderMessages();
+    return { agent, msgs };
+  }
+
+  it('默认风格正文常驻 render system 末尾（剥 frontmatter）', () => {
+    const { msgs } = setup({ outlineContent: '## 剧情发展\n推进。', styleFiles: [{ file: 'default_style.md', content: DEFAULT_FM }] });
+    assert.equal(msgs[0].role, 'system');
+    assert.match(msgs[0].content, /默认风格正文/, '默认正文进 system');
+    assert.doesNotMatch(msgs[0].content, /description: 默认叙事风格/, 'system 不带 frontmatter');
+    assert.match(msgs[1].content, /RENDER$/, '未点名命名风格时 user 末尾仍是 render 任务指令');
+    assert.doesNotMatch(msgs[1].content, /默认风格正文/, '默认不在 user 末尾重复');
+  });
+
+  it('大纲点名命名风格 → 命名风格正文加载到最近一条 user 末尾（在 render 任务之后）', () => {
+    const { msgs } = setup({
+      outlineContent: '## 剧情发展\n交战。\n\n## 语言风格\n<combat_style.md>',
+      styleFiles: [{ file: 'default_style.md', content: DEFAULT_FM }, { file: 'combat_style.md', content: COMBAT_FM }],
+    });
+    assert.match(msgs[0].content, /默认风格正文/, '默认仍常驻 system');
+    assert.match(msgs[1].content, /战斗风格正文/, '命名风格正文进 user 末尾');
+    assert.match(msgs[1].content, /RENDER\n\n战斗风格正文/, '命名风格在 render 任务指令之后');
+    assert.doesNotMatch(msgs[1].content, /description: 战斗风格/, '命名风格正文剥 frontmatter');
+  });
+
+  it('大纲点了缺失的风格文件 → 不抛、user 末尾不注入，默认仍兜底', () => {
+    const { msgs } = setup({
+      outlineContent: '## 语言风格\n<nope.md>',
+      styleFiles: [{ file: 'default_style.md', content: DEFAULT_FM }],
+    });
+    assert.match(msgs[0].content, /默认风格正文/, '默认兜底仍在 system');
+    // 缺失文件不注入正文 → user 末尾仍以 RENDER 收尾（无额外风格正文被追加）
+    assert.match(msgs[1].content, /RENDER$/, '缺失文件不注入，user 末尾仍以 render 任务指令结尾');
+  });
+
+  it('大纲点名 default_style.md → 不在 user 末尾重复（默认已在 system）', () => {
+    const { msgs } = setup({
+      outlineContent: '## 语言风格\n<default_style.md>',
+      styleFiles: [{ file: 'default_style.md', content: DEFAULT_FM }],
+    });
+    assert.match(msgs[0].content, /默认风格正文/);
+    assert.doesNotMatch(msgs[1].content, /默认风格正文/, '命中默认时不重复注入到 user 末尾');
+    assert.match(msgs[1].content, /RENDER$/);
+  });
+
+  it('无 _stylesDir 时退化为空默认（system 不含默认正文），不抛', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-style-nodir-'));
+    const roots = { lore: path.join(tmp, 'lore'), outline: path.join(tmp, 'outline'), scene: path.join(tmp, 'scene') };
+    for (const r of Object.values(roots)) fs.mkdirSync(r, { recursive: true });
+    fs.writeFileSync(path.join(roots.outline, 'round-1.md'), '## 剧情发展\n推进。');
+    const config = new Config(tmp);
+    config.data = { maxIterations: 10, systemPrompt: '', memoryTokenLimit: 40000, compactPrompt: '总结', compactSystemPrompt: '压缩器', compactMode: 'async', loop_outline_prompt: '', loop_render_prompt: 'RENDER' };
+    const tm = new ToolManager();
+    const mm = new MessageManager({ systemPrompt: '', memoryTokenLimit: 40000, dataDir: path.join(tmp, 'mm'), config });
+    const agent = new DNDAgent({ config, model: new MockModel({ responses: [] }), toolManager: tm, messageManager: mm });
+    agent._roots = roots;
+    agent._protagonistFile = 'user_profile.md';
+    agent._roundNumber = 1;
+    mm.messages.push({ id: 'u1', role: 'user', content: '玩家R1指令' });
+    // 不设 _stylesDir
+    const msgs = agent._buildRenderMessages();
+    assert.equal(msgs[0].content, '', '无 stylesDir 时 system 只剩空总纲');
+    assert.match(msgs[1].content, /RENDER$/);
   });
 });

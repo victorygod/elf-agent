@@ -13,7 +13,6 @@
         { "key": "systemPrompt", "type": "textarea", "label": "总纲 system_prompt", "hint": "DM 人设总纲 + 正典规则 + 基础世界观（所有 loop 的 system 基底）" },
         { "key": "loop_outline_prompt", "type": "textarea", "label": "outline 大纲任务", "hint": "outline loop 任务：写大纲 + 自查维护 lore/面板/state.md（useAppend 注入末尾）" },
         { "key": "loop_render_prompt", "type": "textarea", "label": "render 渲染任务", "hint": "render loop 渲染指令（system-reminder 注入）" },
-        { "key": "renderExamples", "type": "textarea", "label": "render 描写样例", "hint": "render 风格样例正文（战前轮/战斗/暴击/探索/对话/断章选项），写回 render_examples.md" },
         { "key": "compactPrompt", "type": "textarea", "label": "历史压缩指令", "hint": "_doHistoryCompact 压缩历史大纲的指令前缀" },
         { "key": "compactSystemPrompt", "type": "textarea", "label": "压缩系统提示词（可空）", "hint": "压缩请求的 system，留空则压缩请求不带 system" }
       ]
