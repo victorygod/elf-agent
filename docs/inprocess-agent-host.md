@@ -60,7 +60,7 @@ transmission 全程不变:gateway 仍 `fetch http://127.0.0.1:${serverPort}/...`
 - **实例失败不拖死 server**:`createRoomState` 抛 → `/observe` 返 500 + "agent <id> 实例化失败: <原因>";server 存活、兄弟 agent 不受影响。**catch+上报 ≠ 吞错掩盖**(掩盖是吞了当没发生);与 §七"不吞错"原则一致——错误显式上送给 gateway 标该 agent `error`。
 - **server 失败全员躺**:ProcessManager spawn 捕获 → 标 server `error` → 名下 agent 全派生 `server-down`(由 server 状态推导,不逐个探活)。
 - **群聊同套**:群成员在线 = 其 server 在跑 + 启用;observe 失败走 `room_bus` 现有 `_onAgentOffline` 标该成员离线。无群聊专属在线概念。
-- `start agent X` = 确保 server 在跑 + 标 X 启用;`stop agent X` = 标 X 禁用(server 不杀,兄弟还在用);全局停 server 才杀进程。
+- `start agent X` = 确保 server 在跑 + 标 X 私聊实例启用;`stop agent X` = 标 X 私聊实例禁用 + 中断在飞私聊回合(`/abort chat-<id>`)。**私聊实例与群聊实例独立生命周期**——私聊 stop 不碰群聊实例(群聊由群成员退订管),群聊拉活不碰私聊 enable。全局停 server 才杀进程。UI 文案:`启动实例`/`停止实例`(不再是"启动/停止服务"——服务是共享 server,非 per-agent)。
 
 ## 五、现状功能适配(本期本地)
 
@@ -103,4 +103,5 @@ transmission 全程不变:gateway 仍 `fetch http://127.0.0.1:${serverPort}/...`
 
 - **per-agent 日志(AsyncLocalStorage)**:`agent-server` 进程经 `enableAgentLogRouting()` 启用;`agent.receive()` 包 `withAgentLog(agentId)`,回合内所有 logger 写 `profiles/logs/agent-<agentId>.log`;上下文外(建房/生命周期/compact 异步等)落 `agent-server.log`。gateway 进程不启用,继续 `gateway.log`。
 - **`ensureServerUp` 串行化**:并发 `startAgent`(典型:恢复多成员房间 `ensureReplicasAlive` 的 `Promise.all`)共享同一次 spawn,防多路同时 listen 8180 的 EADDRINUSE 竞态。
-- **已知缺口:`stop` 语义在群聊不生效**。`stopAgent(id)` 只标 `stopped`(禁用标志),不退群、不通知 server dispose 实例;`room_bus._broadcastToAgents` 投 `/observe` 不查 `getAgentStatus` → 群聊里被 stop 的 agent 仍收消息、仍响应。**仅私聊被挡**(503)。触发 `stopAgent` 的唯一入口:用户在 agent 配置页点"停止服务"(`POST /agents/:id/stop`)。补法:`stopAgent` 触发该 agent 在所有群的 `stopReplica`(退订 + `/clear` 带 agentId 通知 dispose)+ broadcaster 投递前 gating。待做。
+- **实例语义已重定义(原 stop 缺口,按实例视角解决)**:`start/stop` 不再是"服务起停"(服务是共享 server),而是**私聊实例 enable/disable**。`stopAgent` = 标私聊禁用 + `/abort chat-<id>` 中断在飞私聊回合(不清 memory、不 dispose RoomState;私聊实例 PrivateChatPlugin 无自驱定时器,挡新消息+中断在飞即 inert)。**群聊实例独立**(由群成员退订 `stopReplica` 管,dispose 群 RoomState + 停 observe 定时器)——故私聊 stop 不影响群聊、群聊拉活不影响私聊,是设计如此,非缺口。
+- **群拉活改为群聊实例范围**:`ensureAgentPresent` 不再调 `pm.startAgent`(那是私聊启用,会 spill 解锁私聊),改 `pm.ensureServerUp()`(平台级)+ `pm.getServerPort()`(server 端口,与私聊 status 无关)+ 订阅本群广播。群聊实例首条消息时 server 懒建。`stopReplica`/`clearMemberMemory` 群路径端口兜底同步改 `getServerPort`(原 `getAgentPort` 被私聊 status 门控,群路径不该用)。

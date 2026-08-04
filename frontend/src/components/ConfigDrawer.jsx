@@ -44,11 +44,11 @@ export default function ConfigDrawer({ onClose }) {
         <div className={styles.headerActions}>
           {agent?.status === 'running' ? (
             <button className={`${styles.btn} ${styles.btnDanger} ${styles.btnSm}`} onClick={handleStop}>
-              {isStopping ? '停止中...' : '停止服务'}
+              {isStopping ? '停止中...' : '停止实例'}
             </button>
           ) : (
             <button className={`${styles.btn} ${styles.btnPrimary} ${styles.btnSm}`} onClick={handleStart} disabled={isStarting}>
-              {isStarting ? '启动中...' : '启动服务'}
+              {isStarting ? '启动中...' : '启动实例'}
             </button>
           )}
         </div>

@@ -295,7 +295,15 @@ async ensureServerUp() {
       throw Object.assign(new Error('Agent already stopped'), { statusCode: 409 });
     }
     agent.status = 'stopped';
-    logger.info(`Agent ${id} 已停用（共享 agent-server 保留）`);
+    // 私聊实例语义：标 disabled（私聊 /say 已 503 挡新消息）+ 中断在飞回合。
+    //   私聊实例（PrivateChatPlugin）无自驱定时器，挡住新消息 + 中断在飞即 inert；不清 memory、不 dispose RoomState（start 后可续）。
+    //   群聊实例独立生命周期（群成员退订管），私聊 stop 不碰。
+    if (this.server.status === 'running' && this.server.port) {
+      try {
+        await fetch(`http://127.0.0.1:${this.server.port}/abort/chat-${encodeURIComponent(id)}`, { method: 'POST', signal: AbortSignal.timeout(3000) });
+      } catch (e) { /* server 未起或无在飞回合，忽略 */ }
+    }
+    logger.info(`Agent ${id} 已停用私聊实例（inert，共享 server 保留，群聊实例不受影响）`);
     return { agentId: id, status: 'stopped' };
   }
 

@@ -493,8 +493,9 @@ export class RoomManager {
   }
 
   /**
-   * 确保某 agent 在场并订阅本群广播。v4：复用共享 agent-server（经 pm.startAgent，懒起 + 幂等），
-   *   /observe 经 payload 的 (agentId, roomId) 路由到 server 内 RoomState（懒建）。不再 spawn 副本、不再写 run.json。
+   * 确保某 agent 在场并订阅本群广播。v4：群聊实例范围——只确保共享 server 在跑 + 订阅本群广播，
+   *   **不碰私聊实例的 enable 状态**（pm.startAgent 是私聊实例启用，群拉活不该 spill 到私聊）。
+   *   群聊实例 (agentId,roomId) 首条消息时由 server 懒建。
    * @returns {Promise<{port, pid, status}>}
    */
   async ensureAgentPresent(roomId, agentId) {
@@ -505,15 +506,14 @@ export class RoomManager {
       room.members.set(agentId, { port: null, pid: null, status: MEMBER_STATUS.OFFLINE });
       throw new Error(`agent 不存在: ${agentId}`);
     }
-    // 复用共享 agent-server（pm.startAgent 幂等：已运行直接返回，没起则懒起）。
-    if (this.pm.getAgentStatus?.(agentId) !== 'running') {
-      await this.pm.startAgent(agentId);
-    }
-    const port = this.pm.getAgentPort(agentId);
-    const pid = this.pm.getAgent?.(agentId)?.pid ?? null;
+    // 群拉活只管：共享 server 在跑 + 订阅本群广播。端口用 server 级 getServerPort（与私聊 status 无关），
+    //   不调 pm.startAgent（那是私聊实例启用，会 spill 解锁私聊）。
+    await this.pm.ensureServerUp();
+    const port = this.pm.getServerPort?.() ?? null;
+    const pid = this.pm.server?.pid ?? null;
     room.members.set(agentId, { port, pid, status: MEMBER_STATUS.RUNNING });
     room.broadcaster.subscribeAgent(agentId, port);
-    logger.info(`ensureAgentPresent ${roomId}/${agentId} 复用共享 server (port ${port})`);
+    logger.info(`ensureAgentPresent ${roomId}/${agentId} 订阅本群（共享 server port ${port}）`);
     return { port, pid, status: MEMBER_STATUS.RUNNING };
   }
 
@@ -562,7 +562,7 @@ export class RoomManager {
     room.broadcaster.unsubscribeAgent(agentId);
     room.members.set(agentId, { port: null, pid: null, status: MEMBER_STATUS.STOPPED });
     // 通知 server 该 (agentId, roomId) 实例 /clear（群聊需带 agentId 走复合键路由），停其观测定时器；不可达靠下次进房复活。
-    const leavePort = m?.port ?? this.pm?.getAgentPort?.(agentId) ?? null;
+    const leavePort = m?.port ?? this.pm?.getServerPort?.() ?? null;
     if (leavePort) {
       fetch(`http://127.0.0.1:${leavePort}/clear/${encodeURIComponent(roomId)}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -949,7 +949,7 @@ export class RoomManager {
       let ok = false;
       let reason = null;
       // 1) 取 port：内存态优先，缺失回退 pm.getAgentPort（共享 server 端口）
-      let port = room.members.get(agentId)?.port ?? this.pm?.getAgentPort?.(agentId) ?? null;
+      let port = room.members.get(agentId)?.port ?? this.pm?.getServerPort?.() ?? null;
       // 2) 有 port → 调 server /clear/:roomId（群聊需带 agentId 走复合键路由）；不可达/非 200 走删盘兜底
       if (port) {
         try {

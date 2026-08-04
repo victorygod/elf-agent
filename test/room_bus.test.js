@@ -328,14 +328,17 @@ describe('RoomManager', () => {
   });
 
 
-  /** pm 桩：v4 共享 agent-server 模型。getAgentStatus='running'（ensureAgentPresent 跳过 startAgent），
-   *   getAgentPort 返回 portFor(id)（共享 server 端口；默认 9999 无人监听，/clear 类 fetch 失败走删盘兜底）。 */
+  /** pm 桩：v4 共享 agent-server 模型。ensureAgentPresent 用 ensureServerUp + getServerPort（群拉活不碰私聊 status）。
+   *   portFor() = 共享 server 端口（默认 9999 无人监听，/clear 类 fetch 失败走删盘兜底）。 */
   function makePm(portFor = () => 9999) {
     const started = [];
     return {
       started,
+      server: { pid: 9999 },
       getAgentStatus: () => 'running',
       async startAgent(id) { started.push(id); return { agentId: id, status: 'running', pid: 9999 }; },
+      async ensureServerUp() { /* 共享 server 假定已起 */ },
+      getServerPort: () => portFor(),
       getAgentPort: (id) => portFor(id),
       getAgent: (id) => ({ pid: 9999 }),
     };
