@@ -197,7 +197,18 @@ export class TurnStreamServer {
 
     // ── 终结：flush 尾 + 空 turn 兜底 ──
     let finished = false;
-    if (eventName === 'done' || eventName === 'aborted' || eventName === 'error') {
+    if (eventName === 'aborted') {
+      // 中断：丢弃本轮已累积的 partial（不落盘 history），与 elf-018 auto-rewind 一致——
+      //   用户点终止 = 不要这半截产出，回退到 user 前。done/error 仍走 flush 保留完整/错误产出。
+      //   mid-round 已 flush 进 history.jsonl 的工具气泡（如 elf-018 outline→render 切换时落盘的 outline 气泡）
+      //   不在内存 partial 之列,须把 history.jsonl 截到最近 user(含)一并清掉,否则与 context.json/runtime 不一致。
+      st.streaming = false;
+      finished = true;
+      st.assistantContent = '';
+      st.toolCalls = [];
+      st._hasHistoryOutput = false;
+      this._historyStore?.rewindToLastUser?.(roomId);
+    } else if (eventName === 'done' || eventName === 'error') {
       st.streaming = false;
       finished = true;
       this._flushBubble(roomId);

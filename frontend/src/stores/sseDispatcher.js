@@ -346,33 +346,10 @@ export function handleSSEEvent(agentId, event, data) {
     }
 
     case 'aborted': {
-      const chatAborted = getState().chats.get(agentId);
-      const atAborted = chatAborted?.activeTurn;
-      if (atAborted) {
-        const lastBubble = atAborted.assistantBubbles[atAborted.assistantBubbles.length - 1];
-        // 中断收尾：把还没跑完（仍 executing）的工具统一标 canceled——它本是软中止，
-        //   后端只对已杀进程的工具回 error tool_result，没轮到的会悬在 executing。
-        //   aborted 到来时已是收尾，前面 error 结果已先到并定位（非 executing 了），故只覆盖仍 executing 的。
-        if (lastBubble?.toolCalls && lastBubble.toolCalls.some(tc => tc.status === 'executing')) {
-          const canceledToolCalls = lastBubble.toolCalls.map(tc =>
-            tc.status === 'executing' ? { ...tc, status: 'canceled' } : tc
-          );
-          const allSettled = !canceledToolCalls.some(tc => tc.status === 'executing');
-          const updatedBubble = {
-            ...lastBubble,
-            toolCalls: canceledToolCalls,
-            sealed: allSettled ? true : lastBubble.sealed,
-          };
-          const sealBubbles = atAborted.assistantBubbles.map((b, i) => i === atAborted.assistantBubbles.length - 1 ? updatedBubble : b);
-          _patchChat(agentId, { activeTurn: { ...atAborted, assistantBubbles: sealBubbles } });
-        }
-        if (lastBubble?.compactLoading && lastBubble.compactSummary == null && !lastBubble.compactError) {
-          const updatedBubble = { ...lastBubble, compactLoading: undefined, compactError: '记忆压缩已终止', sealed: true };
-          const newBubbles = atAborted.assistantBubbles.map((b, i) => i === atAborted.assistantBubbles.length - 1 ? updatedBubble : b);
-          _patchChat(agentId, { activeTurn: { ...atAborted, assistantBubbles: newBubbles } });
-        }
-      }
-      finalizeActiveTurn(agentId);
+      // 中断 = 丢弃本轮 partial：与 elf-018 auto-rewind（rewindToLastUser）一致——
+      //   用户点终止即回退到 user 前，partial 不入 turns、不保留。后端 history 也同步丢弃。
+      //   （旧逻辑 finalizeActiveTurn 把 partial 存为可见 turn，与 auto-rewind 设计冲突。）
+      _patchChat(agentId, { activeTurn: null });
       _pushNotice(agentId, { text: '已停止生成' });
       break;
     }

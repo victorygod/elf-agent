@@ -41,7 +41,13 @@ export function makeEditOutline(agent) {
 
       const escaped = oldString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const count = (content.match(new RegExp(escaped, 'g')) || []).length;
-      if (count === 0) return 'Error: old_string not found in 本轮大纲';
+      if (count === 0) {
+        // old_string 未命中时返回大纲全文（cat -n 格式），方便定位上下文
+        const lines = content.split('\n');
+        if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+        const body = lines.map((line, idx) => `${idx + 1}\t${line}`).join('\n');
+        return `Error: old_string not found in 本轮大纲。\n当前大纲内容：\n${body}`;
+      }
       if (count > 1 && !replaceAll) return `Error: old_string matched ${count} times in 本轮大纲. Set replace_all=true or provide more context.`;
 
       const newContent = replaceAll ? content.split(oldString).join(newString) : content.replace(oldString, newString);

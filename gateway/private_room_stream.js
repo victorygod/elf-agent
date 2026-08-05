@@ -50,6 +50,7 @@ function _makeHistoryStore(history) {
       history.addMessage(roomId, role, content, toolCalls, extraFields),
     updateCompact: (roomId, id, patch) => history.updateCompactRecord(roomId, id, patch),
     recent: (roomId, limit) => history.getRecent(roomId, limit),
+    rewindToLastUser: (roomId) => history.rewindToLastUser(roomId),
   };
 }
 

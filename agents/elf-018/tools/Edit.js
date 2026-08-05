@@ -10,7 +10,7 @@
 import fs from 'fs';
 import path from 'path';
 import { Edit as GenericEdit } from '../../../engine/tools/index.js';
-import { isInsideLore, validateFrontmatter, applyEdit } from './loreGuard.js';
+import { isInsideLore, validateFrontmatter, applyEdit, parseFrontmatterName, isUnderCharacters } from './loreGuard.js';
 import { markRead } from '../../../engine/tools/read_state.js';
 
 export function makeEdit(agent) {
@@ -59,6 +59,24 @@ export function makeEdit(agent) {
       }
       if (!validateFrontmatter(r.result)) {
         return `Error: 改后内容不符合 lore frontmatter 规范（须以 ---\\nname: ...\\ndescription: ...\\n--- 开头）`;
+      }
+
+      // 主角守卫：禁止编辑 characters/ 下的主角同名角色卡
+      if (isUnderCharacters(fp, agent._roots.lore)) {
+        const editedName = parseFrontmatterName(r.result);
+        if (editedName) {
+          const profilePath = path.join(agent._roots.lore, agent._protagonistFile);
+          let protagonistName = '';
+          try {
+            if (fs.existsSync(profilePath)) {
+              const pc = fs.readFileSync(profilePath, 'utf-8');
+              protagonistName = parseFrontmatterName(pc);
+            }
+          } catch {}
+          if (protagonistName && editedName === protagonistName) {
+            return `Error: 主角（${protagonistName}）已在 ${agent._protagonistFile} 中管理，禁止编辑 characters/ 下的主角角色卡`;
+          }
+        }
       }
 
       try {

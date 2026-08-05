@@ -17,6 +17,7 @@ import fs from 'fs';
 import path from 'path';
 import { createLogger } from '../shared/logger.js';
 import { agentMemory } from '../shared/profiles_paths.js';
+import { readCpMeta, cpSeq, listCheckpointDirs } from '../shared/checkpoint_meta.js';
 
 const logger = createLogger('snapshot', 'gateway.log');
 
@@ -95,6 +96,9 @@ export function snapshotBeforeSend(agentId, prompt, roomHistoryPath) {
   try {
     // context.json 此时一定存在（首次对话已在上方创建空文件）
     fs.copyFileSync(contextFile, path.join(cpDir, 'context.json'));
+    // sync_cursor.json（如有）
+    const syncCursorFile = path.join(dataDir, 'sync_cursor.json');
+    if (fs.existsSync(syncCursorFile)) fs.copyFileSync(syncCursorFile, path.join(cpDir, 'sync_cursor.json'));
     if (fs.existsSync(toolResultsDir) && fs.statSync(toolResultsDir).isDirectory()) {
       _copyDir(toolResultsDir, path.join(cpDir, 'tool-results'));
     }
@@ -134,7 +138,7 @@ function _evictOld(agentId) {
     .filter(e => e.isDirectory())
     .map(e => {
       const cpDir = path.join(root, e.name);
-      return { name: e.name, seq: _cpSeq(cpDir), cpDir };
+      return { name: e.name, seq: cpSeq(cpDir), cpDir };
     })
     .sort((a, b) => b.seq - a.seq); // 新→旧（按栈序）
   for (let i = MAX_CHECKPOINTS; i < dirs.length; i++) {
@@ -148,47 +152,16 @@ function _fmtList(list) {
 }
 
 /**
- * 读 meta.json
- */
-function _readMeta(cpDir) {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(cpDir, 'meta.json'), 'utf-8'));
-  } catch {
-    return null;
-  }
-}
-
-/** checkpoint 栈序号：meta.seq 权威（创建时入栈分配、单调），老数据无 seq 退化为 createdAt 毫秒 */
-function _seqOf(meta) {
-  if (meta && typeof meta.seq === 'number') return meta.seq;
-  if (meta && meta.createdAt) { const t = Date.parse(meta.createdAt); if (!Number.isNaN(t)) return t; }
-  return 0;
-}
-
-/** 读 cpDir 的栈序号（列表排序/滑窗淘汰/rewind 出栈删统一用此，不再用毫秒墙钟） */
-function _cpSeq(cpDir) {
-  return _seqOf(_readMeta(cpDir));
-}
-
-/**
- * 列出所有快照包（按 createdAt 升序，最旧在前）
- * @returns {Array<{ id, createdAt, prompt }>}
+ * 列出所有快照包（按 seq 升序，最旧在前）
+ * @returns {Array<{ id, createdAt, prompt, seq }>}
  */
 export function listCheckpoints(agentId) {
   const root = _checkpointsDir(agentId);
-  if (!fs.existsSync(root)) return [];
-  const entries = fs.readdirSync(root, { withFileTypes: true })
-    .filter(e => e.isDirectory())
-    .map(e => {
-      const cpDir = path.join(root, e.name);
-      const meta = _readMeta(cpDir);
-      const seq = _seqOf(meta);
-      return meta
-        ? { id: meta.id, createdAt: meta.createdAt, prompt: meta.prompt, seq }
-        : { id: e.name, createdAt: null, prompt: null, seq };
-    });
-  entries.sort((a, b) => a.seq - b.seq);   // 按栈序升序（最旧在前）
-  return entries;
+  return listCheckpointDirs(root).map(({ cpDir, meta, seq }) =>
+    meta
+      ? { id: meta.id, createdAt: meta.createdAt, prompt: meta.prompt, seq }
+      : { id: path.basename(cpDir), createdAt: null, prompt: null, seq }
+  );
 }
 
 /**
@@ -231,16 +204,20 @@ export function rewindTo(agentId, checkpointId, roomHistoryPathOpt) {
 
   const root = _checkpointsDir(agentId);
   const targetCpDir = path.join(root, list[idx].id);
-  const meta = _readMeta(targetCpDir);
+  const meta = readCpMeta(targetCpDir);
   if (!meta) return { ok: false, restoredPrompt: null, error: 'checkpoint meta missing' };
 
   const dataDir = _dataDir(agentId);
   const roomHistoryPath = roomHistoryPathOpt || null;
   try {
-    // 1. 整份覆盖 context.json
+    // 1. 整份覆盖 context.json + sync_cursor.json
     const cpContext = path.join(targetCpDir, 'context.json');
     if (fs.existsSync(cpContext)) {
       fs.copyFileSync(cpContext, path.join(dataDir, 'context.json'));
+    }
+    const cpSyncCursor = path.join(targetCpDir, 'sync_cursor.json');
+    if (fs.existsSync(cpSyncCursor)) {
+      fs.copyFileSync(cpSyncCursor, path.join(dataDir, 'sync_cursor.json'));
     }
     // 2. 整份覆盖 tool-results/（先清空再拷入，保证删掉快照后的产物）
     const cpToolResults = path.join(targetCpDir, 'tool-results');

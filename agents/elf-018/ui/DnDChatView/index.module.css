@@ -1,0 +1,271 @@
+.layout {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}
+
+.chatArea {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.sidePanel {
+  width: 340px;
+  border-left: 1px solid #e0e0e0;
+  overflow-y: auto;
+  background: #fafafa;
+  padding: 12px;
+  flex-shrink: 0;
+}
+
+.loading {
+  padding: 16px;
+  color: #999;
+  font-size: 13px;
+}
+
+/* 主角 */
+.protagonistBox {
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  background: #fff;
+}
+
+.protagonistBody {
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 6px 0 0 0;
+  color: #444;
+}
+
+/* 分类区块 */
+.loreBlock {
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  background: #fff;
+}
+
+.blockTitle {
+  font-size: 13px;
+  color: #666;
+  margin: 0 0 6px 0;
+}
+
+.empty {
+  color: #ccc;
+  font-size: 12px;
+}
+
+/* 折叠条目 */
+.collapsible {
+  margin-bottom: 2px;
+}
+
+.itemRow {
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1.5;
+  padding: 2px 0;
+  border-radius: 3px;
+  transition: background 0.15s;
+}
+
+.itemRow:hover {
+  background: #f0f0f0;
+}
+
+.chevron {
+  margin-right: 4px;
+  font-size: 10px;
+  color: #999;
+}
+
+.itemName {
+  color: #333;
+}
+
+.itemDesc {
+  color: #777;
+}
+
+.itemBody {
+  padding: 8px 10px;
+  margin: 4px 0 4px 16px;
+  background: #f5f5f5;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+}
+
+/* metadata */
+.metadataBody {
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+  color: #555;
+}
+
+/* 移动端响应：侧栏折叠到下方 */
+@media (max-width: 900px) {
+  .layout {
+    flex-direction: column;
+  }
+  .sidePanel {
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid #e0e0e0;
+    max-height: 40%;
+  }
+}
+
+/* ===== 初始设定页 ===== */
+
+.setupPanel {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 32px 16px;
+  background: #f5f5f5;
+}
+
+.setupInner {
+  max-width: 680px;
+  width: 100%;
+  background: #fff;
+  border-radius: 10px;
+  padding: 28px 32px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+
+.setupTitle {
+  margin: 0 0 6px 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #333;
+}
+
+.setupHint {
+  margin: 0 0 20px 0;
+  font-size: 13px;
+  color: #999;
+}
+
+.setupSection {
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.setupSection:last-of-type {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+
+.setupSectionTitle {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #555;
+}
+
+.setupRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.setupFooter {
+  margin: 16px 0 0 0;
+  font-size: 12px;
+  color: #bbb;
+  text-align: center;
+}
+
+/* lore 条目行 */
+.loreRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.loreRow:hover {
+  background: #f5f5f5;
+}
+
+.loreRowClick {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 3px 4px;
+  border-radius: 3px;
+  min-width: 0;
+}
+
+.loreRowClick:hover {
+  background: #eaeaea;
+}
+
+.loreDelBtn {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #ccc;
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+
+.loreDelBtn:hover {
+  background: #ff4d4f;
+  color: #fff;
+}
+
+.loreName {
+  color: #333;
+  min-width: 80px;
+}
+
+.loreDesc {
+  flex: 1;
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.fromSeed {
+  font-size: 11px;
+  color: #fa8c16;
+  border: 1px solid #fa8c16;
+  border-radius: 3px;
+  padding: 0 4px;
+}
+

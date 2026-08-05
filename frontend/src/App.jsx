@@ -4,6 +4,8 @@ import ChatPanel from './components/ChatPanel';
 import ConfigDrawer from './components/ConfigDrawer';
 import RoomChatPanel from './components/RoomChatPanel';
 import RoomConfigDrawer from './components/RoomConfigDrawer';
+import AgentPageRenderer from './components/AgentPageRenderer';
+import { getAgentManifest } from './pluginRegistry';
 import useAgentStore from './stores/agentStore';
 import { useRoomStore } from './stores/roomStore';
 import useAgents from './hooks/useAgents';
@@ -105,7 +107,11 @@ export default function App() {
         {/* 聊天区域：私聊/群聊互斥渲染（同时有 activeAgentId+activeRoomId 时群聊优先,防双面板） */}
         <div className={styles.chatArea}>
           {activeRoomId ? <RoomChatPanel key={activeRoomId} roomId={activeRoomId} />
-            : activeAgentId ? <ChatPanel key={activeAgentId} agentId={activeAgentId} /> : null}
+            : activeAgentId ? (
+              getAgentManifest(activeAgentId)?.page?.chatView
+                ? <AgentPageRenderer key={activeAgentId} agentId={activeAgentId} />
+                : <ChatPanel key={activeAgentId} agentId={activeAgentId} />
+            ) : null}
         </div>
       </div>
 

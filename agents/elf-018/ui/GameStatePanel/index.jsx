@@ -1,6 +1,16 @@
+/**
+ * 游戏状态标签卡（elf-018 DM 用）
+ *
+ * 原位置：frontend/src/components/GameStatePanel.jsx
+ * 迁移至：agents/elf-018/ui/GameStatePanel/index.jsx
+ *
+ * 通过 @spa 别名引用主 SPA 的 API 与 store。
+ * Phase 3 后将逐步改为 bridge-only 模式。
+ */
+
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import * as api from '../api/index.js';
-import useAgentStore from '../stores/agentStore';
+import * as api from '@spa/api/index.js';
+import useAgentStore from '@spa/stores/agentStore.js';
 
 const preStyle = { whiteSpace: 'pre-wrap', margin: 0, fontSize: '13px', lineHeight: '1.5' };
 
@@ -17,14 +27,10 @@ export default function GameStatePanel({ agentId }) {
     api.getGameState(agentId).then(setState).catch(() => setState(null)).finally(() => setLoading(false));
   };
 
-  // 初次加载
   useEffect(() => { load(); }, [agentId]);
 
-  // streaming 从 true→false（一轮回复结束 = reviewer 改完 lore）时自动刷新
   useEffect(() => {
-    if (prevStreamingRef.current && !streaming) {
-      load();
-    }
+    if (prevStreamingRef.current && !streaming) load();
     prevStreamingRef.current = streaming;
   }, [streaming]);
 
@@ -37,11 +43,10 @@ export default function GameStatePanel({ agentId }) {
 
   const CollapsibleItem = ({ item }) => {
     const [open, setOpen] = useState(false);
-    // content 去掉 frontmatter（标题行已显示 name + description）
     const body = (item.content || '').replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
     return (
       <div>
-        <div style={itemStyle} onClick={() => setOpen((v) => !v)}>
+        <div style={itemStyle} onClick={() => setOpen(v => !v)}>
           <span style={{ marginRight: '4px' }}>{open ? '▼' : '▶'}</span>
           <strong>{item.name}</strong> — {item.description}
         </div>
@@ -68,7 +73,6 @@ export default function GameStatePanel({ agentId }) {
         {loading && <span style={{ fontSize: '12px', color: '#aaa' }}>刷新中…</span>}
       </div>
 
-      {/* 主角完整展示，无滚动 */}
       {state.protagonist && (
         <div style={{ border: '1px solid #d0d0d0', borderRadius: '6px', padding: '8px 12px', marginBottom: '8px' }}>
           <p style={{ ...titleStyle, margin: '0 0 4px 0' }}>主角：{state.protagonist.name}</p>

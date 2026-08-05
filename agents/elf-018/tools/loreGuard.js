@@ -30,6 +30,28 @@ export function validateFrontmatter(content) {
   return /^name:\s*\S/m.test(fm) && /^description:\s*\S/m.test(fm);
 }
 
+/** 从 frontmatter 提取 name 字段值 */
+export function parseFrontmatterName(content) {
+  if (typeof content !== 'string') return '';
+  const lines = content.split('\n');
+  if (lines[0] !== '---') return '';
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i] === '---') break;
+    const m = lines[i].match(/^name:\s*(.+)/);
+    if (m) return m[1].trim();
+  }
+  return '';
+}
+
+/** 检查 filePath 是否落在 lore/characters 目录内 */
+export function isUnderCharacters(filePath, loreRoot) {
+  if (!filePath || !loreRoot) return false;
+  const charsDir = path.join(path.resolve(loreRoot), 'characters');
+  const fp = path.resolve(filePath);
+  const rel = path.relative(charsDir, fp);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
 /** 预算替换结果（不写盘）。ok=false 时 error 给出原因；ok=true 时 result 为改后全文。 */
 export function applyEdit(content, oldString, newString, replaceAll) {
   if (oldString === newString) return { ok: false, error: 'old_string and new_string are identical' };

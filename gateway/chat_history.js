@@ -296,4 +296,29 @@ export class ChatHistory {
       throw err;
     }
   }
+
+  /**
+   * 截断到最近一条 user 记录（含），删除其后所有 assistant 记录（含 mid-round 已 flush 的工具气泡）。
+   * 用途:用户中止本轮后,把已落盘的本轮 partial/工具气泡清掉,与 agent 侧
+   *   MessageManager.rewindToLastUser(context.json) 保持一致。找不到 user 或末条已是 user 则不动。
+   * @returns {boolean} 是否实际截断
+   */
+  rewindToLastUser(agentId) {
+    const all = this._readAll(agentId);
+    let lastUserIdx = -1;
+    for (let i = all.length - 1; i >= 0; i--) {
+      if (all[i].role === 'user') { lastUserIdx = i; break; }
+    }
+    if (lastUserIdx < 0 || lastUserIdx === all.length - 1) return false;   // 无 user / 其后无内容
+    const kept = all.slice(0, lastUserIdx + 1);
+    const filePath = this._getFilePath(agentId);
+    try {
+      fs.writeFileSync(filePath, kept.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf-8');
+      logger.info(`rewindToLastUser: ${agentId} 截断到最近 user(idx=${lastUserIdx}),删 ${all.length - kept.length} 条`);
+      return true;
+    } catch (err) {
+      logger.error(`rewindToLastUser 失败 (${agentId}): ${err.message}`);
+      return false;
+    }
+  }
 }

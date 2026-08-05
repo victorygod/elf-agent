@@ -10,7 +10,7 @@
 import fs from 'fs';
 import path from 'path';
 import { Write as GenericWrite } from '../../../engine/tools/index.js';
-import { isInsideLore, validateFrontmatter } from './loreGuard.js';
+import { isInsideLore, validateFrontmatter, parseFrontmatterName, isUnderCharacters } from './loreGuard.js';
 import { markRead } from '../../../engine/tools/read_state.js';
 
 export function makeWrite(agent) {
@@ -33,6 +33,24 @@ export function makeWrite(agent) {
       const content = args && args.content;
       if (!validateFrontmatter(content)) {
         return `Error: lore 文件须以 frontmatter 开头且含 name 与 description（---\\nname: ...\\ndescription: ...\\n---）`;
+      }
+
+      // 主角守卫：禁止在 characters/ 下创建主角同名角色卡
+      if (isUnderCharacters(fp, agent._roots.lore)) {
+        const writtenName = parseFrontmatterName(content);
+        if (writtenName) {
+          const profilePath = path.join(agent._roots.lore, agent._protagonistFile);
+          let protagonistName = '';
+          try {
+            if (fs.existsSync(profilePath)) {
+              const pc = fs.readFileSync(profilePath, 'utf-8');
+              protagonistName = parseFrontmatterName(pc);
+            }
+          } catch {}
+          if (protagonistName && writtenName === protagonistName) {
+            return `Error: 主角（${protagonistName}）已在 ${agent._protagonistFile} 中管理，禁止在 characters/ 下重复创建`;
+          }
+        }
       }
 
       // 自行写盘（不要求先 Read、不做 hasRead/陈旧检查）：建父目录 → 写盘 → markRead

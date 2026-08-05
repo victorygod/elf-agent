@@ -517,6 +517,150 @@ describe('render 空内容自愈 + reloadConfig', () => {
     assert.ok(!fs.existsSync(path.join(roots.scene, 'round-1.md')), '终止后不应落 scene/round-1.md');
   });
 
+  describe('abort 全量还原 runtime/tool-results（与 ⟲ rewind 一致）', () => {
+  beforeEach(() => resetReadState());
+
+  // 生产布局:_roots 在 mm.dataDir/runtime/{lore,outline,scene}(对齐 create_agent._roots),
+  //   这样 _restoreRoundState 经 mm.dataDir/checkpoints 还原的 runtime/ 才会落到 _roots 同路径。
+  //   responses 用工厂传入:charPath 在装配时才确定,避免外层引用未初始化变量(TDZ)。
+  function buildProdAgent(tmp, makeResponses) {
+    const mmDataDir = path.join(tmp, 'mm');
+    const runtimeDir = path.join(mmDataDir, 'runtime');
+    const roots = {
+      lore: path.join(runtimeDir, 'lore'),
+      outline: path.join(runtimeDir, 'outline'),
+      scene: path.join(runtimeDir, 'scene'),
+    };
+    fs.mkdirSync(path.join(roots.lore, 'characters'), { recursive: true });
+    for (const r of Object.values(roots)) fs.mkdirSync(r, { recursive: true });
+    fs.writeFileSync(path.join(roots.lore, 'metadata.md'), 'metadata');
+    fs.writeFileSync(path.join(roots.lore, 'user_profile.md'), '主角面板-初始');
+    const charPath = path.join(roots.lore, 'user_profile.md');
+
+    const model = new MockModel({ responses: makeResponses(charPath) });
+    const config = new Config(tmp);
+    config.data = {
+      maxIterations: 10, systemPrompt: '', memoryTokenLimit: 40000,
+      compactPrompt: '总结', compactSystemPrompt: '压缩器', compactMode: 'async',
+      loop_outline_prompt: 'outline prompt', loop_render_prompt: 'render prompt',
+    };
+    const tm = new ToolManager();
+    [Read, Write, Edit, Grep, Roll].forEach((t) => tm.register(t));
+    const mm = new MessageManager({ systemPrompt: '', memoryTokenLimit: 40000, dataDir: mmDataDir, config });
+    const agent = new DNDAgent({ config, model, toolManager: tm, messageManager: mm });
+    agent._roots = roots;
+    agent._protagonistFile = 'user_profile.md';
+    tm.register(makeWriteOutline(agent));
+    tm.register(makeEditOutline(agent));
+    tm.register(makeRead(agent));
+    tm.register(makeWrite(agent));
+    tm.register(makeEdit(agent));
+    return { agent, mm, roots, model, charPath, mmDataDir, runtimeDir };
+  }
+
+  function copyDir(src, dest) {
+    fs.mkdirSync(dest, { recursive: true });
+    for (const e of fs.readdirSync(src, { withFileTypes: true })) {
+      const s = path.join(src, e.name), d = path.join(dest, e.name);
+      if (e.isDirectory()) copyDir(s, d);
+      else if (e.isFile()) fs.copyFileSync(s, d);
+    }
+  }
+
+  /** 在 mm.dataDir/checkpoints/cp_pre 打一个 pre-round 快照(整份 runtime + tool-results + sync_cursor)。 */
+  function seedCheckpoint(mmDataDir, runtimeDir) {
+    const cpDir = path.join(mmDataDir, 'checkpoints', 'cp_pre');
+    fs.mkdirSync(cpDir, { recursive: true });
+    fs.writeFileSync(path.join(cpDir, 'meta.json'), JSON.stringify({ id: 'cp_pre', createdAt: '2020-01-01T00:00:00.000Z', prompt: '玩家本轮指令', seq: 0 }));
+    copyDir(runtimeDir, path.join(cpDir, 'runtime'));
+    fs.mkdirSync(path.join(cpDir, 'tool-results'), { recursive: true });
+    fs.writeFileSync(path.join(cpDir, 'tool-results', 'old.json'), 'old-tr');
+    fs.writeFileSync(path.join(cpDir, 'sync_cursor.json'), JSON.stringify({ cursor: 'pre' }));
+    return cpDir;
+  }
+
+  const writeOutlineFor = (c) => ({ id: 'c_wo', type: 'function', function: { name: 'WriteOutline', arguments: JSON.stringify({ content: c }) } });
+  const writeFor = (fp, c) => ({ id: `c_${fp}`, type: 'function', function: { name: 'Write', arguments: JSON.stringify({ file_path: fp, content: c }) } });
+  const outlineResponses = (charPath) => [
+    { tool_calls: [writeOutlineFor('大纲初稿')] },
+    { tool_calls: [writeFor(charPath, charProfile('主角面板-final'))] },
+    { content: '完成' },
+  ];
+
+  it('中止后 lore/面板从 pre-round checkpoint 整份还原,context 保留本轮 user,round 文件清掉', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-abort-restore-'));
+    const { agent, mm, roots, model, mmDataDir, runtimeDir } = buildProdAgent(tmp, (cp) => [
+      ...outlineResponses(cp),
+      { content: '剧情正文内容' },   // render:流到首字即被中止
+    ]);
+    agent._scene = {};
+    mm.addUserMessage('玩家本轮指令');
+    const userIdx = mm.messages.length - 1;
+    const userId = mm.messages[userIdx].id;
+    const cpDir = seedCheckpoint(mmDataDir, runtimeDir);
+
+    // 本轮 outline 会 WriteOutline(落 outline/round-1.md) + Write(把面板写成"主角面板-final")
+    const realChatStream = model.chatStream.bind(model);
+    let callCount = 0, aborted = false;
+    const events = []; const emit = (e) => events.push(e);
+    model.chatStream = async function (messages, tools, options) {
+      callCount++;
+      const origOnChunk = options.onChunk;
+      if (callCount === 4) {   // render 首 token 后中止
+        options.onChunk = (chunk) => { if (origOnChunk) origOnChunk(chunk); if (!aborted) { aborted = true; agent.abort(); } };
+      }
+      return realChatStream(messages, tools, options);
+    };
+
+    await agent.reasoning(null, { skipAddUser: true, emit });
+
+    assert.ok(aborted, 'render 首 token 后触发 abort');
+    // lore 整份还原:面板回到 pre-round("主角面板-初始"),而非 outline 写入的"主角面板-final"
+    assert.equal(fs.readFileSync(path.join(roots.lore, 'user_profile.md'), 'utf-8'), '主角面板-初始', 'lore 面板应从 checkpoint 还原,而非残留 outline 脏写');
+    // round 半成品清掉
+    assert.ok(!fs.existsSync(path.join(roots.outline, 'round-1.md')), 'outline/round-1.md 应被 checkpoint 还原删除');
+    assert.ok(!fs.existsSync(path.join(roots.scene, 'round-1.md')), 'scene/round-1.md 不应残留');
+    // tool-results 回到 checkpoint(只 old.json,本轮孤儿清掉) + sync_cursor 回 pre
+    assert.deepStrictEqual(fs.readdirSync(path.join(mmDataDir, 'tool-results')).sort(), ['old.json']);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(mmDataDir, 'sync_cursor.json'), 'utf-8')), { cursor: 'pre' });
+    // context.json 保留本轮 user(rewindToLastUser 语义)
+    const onDisk = JSON.parse(fs.readFileSync(path.join(mm.dataDir, 'context.json'), 'utf-8'));
+    assert.equal(onDisk.length, userIdx + 1, 'context.json 截断到本轮 user(含)');
+    assert.equal(onDisk[onDisk.length - 1].id, userId, '末条即本轮 user');
+    assert.ok(!onDisk.some((m) => m.role === 'assistant' || m.role === 'tool'), 'partial 正文/工具全清');
+    // checkpoint 未被出栈(abort 不 pop,保留供后续 ⟲)
+    assert.ok(fs.existsSync(cpDir), 'pre-round checkpoint 保留(abort 不出栈)');
+  });
+
+  it('无 checkpoint(快照失败)→ 退回 _discardCurrentRoundArtifacts,不抛、删 round 文件', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-abort-nocp-'));
+    const { agent, mm, roots, model } = buildProdAgent(tmp, (cp) => [
+      ...outlineResponses(cp),
+      { content: '剧情正文内容' },
+    ]);
+    agent._scene = {};
+    mm.addUserMessage('玩家本轮指令');
+    // 不 seed checkpoint
+
+    const realChatStream = model.chatStream.bind(model);
+    let callCount = 0, aborted = false;
+    const events = []; const emit = (e) => events.push(e);
+    model.chatStream = async function (messages, tools, options) {
+      callCount++;
+      const origOnChunk = options.onChunk;
+      if (callCount === 4) { options.onChunk = (chunk) => { if (origOnChunk) origOnChunk(chunk); if (!aborted) { aborted = true; agent.abort(); } }; }
+      return realChatStream(messages, tools, options);
+    };
+
+    await agent.reasoning(null, { skipAddUser: true, emit });
+    assert.ok(aborted, '触发 abort');
+    // fallback:只删 round 文件,面板保留 outline 脏写(无 checkpoint 可还原)
+    assert.ok(!fs.existsSync(path.join(roots.outline, 'round-1.md')), 'fallback 删 outline/round-1.md');
+    assert.ok(!fs.existsSync(path.join(roots.scene, 'round-1.md')), 'fallback 不留 scene');
+    assert.equal(fs.readFileSync(path.join(roots.lore, 'user_profile.md'), 'utf-8'), charProfile('主角面板-final'), '无 checkpoint → 面板未还原(留脏),证明走的是 fallback 而非 restore');
+  });
+});
+
   it('reloadConfig modelKey 守卫：提示词类编辑不重建 model，base_url 变了才重建', () => {
     // stub config：load() 推进 getModelConfig 返回的配置序号（模拟真实 load 从盘读到新配置）。
     //   序列：[初始/构造]→idx0；第1次 reload（仅提示词变,mc 不变）→idx1；第2次 reload（base_url 变）→idx2。
@@ -547,7 +691,7 @@ describe('lore 作用域工具', () => {
   beforeEach(() => resetReadState());
 
   function makeAgent(loreRoot) {
-    return { _roots: { lore: loreRoot } };
+    return { _roots: { lore: loreRoot }, _protagonistFile: 'user_profile.md' };
   }
 
   it('Write 非法路径（lore 外）被前置校验拒', async () => {
