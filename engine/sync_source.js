@@ -200,7 +200,7 @@ export class SyncSource {
         const { latestSeq } = await resp.json();
         if (latestSeq != null) this._cursor.advance(latestSeq);
       }
-    } catch (err) { /* 非致命 */ }
+    } catch (err) { cursorLogger.warn(`_seed 拉取失败（非致命）: ${err.message}`); }
   }
 
   /**

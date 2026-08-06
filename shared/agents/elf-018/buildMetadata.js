@@ -13,7 +13,7 @@ import { parseFrontmatter } from '../../../engine/skills/parser.js';
  * @returns {string} metadata 文本（空则返回 ''）
  */
 export function buildMetadata(loreDir) {
-  const read = (p) => { try { return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : ''; } catch { return ''; } };
+  const read = (p) => { try { return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : ''; } catch (e) { console.warn(`[buildMetadata] 读 ${p} 失败: ${e.message}`); return ''; } };
   const parseMd = (txt) => {
     const fm = txt.match(/^---\n([\s\S]*?)\n---/);
     if (!fm) return null;
@@ -30,7 +30,7 @@ export function buildMetadata(loreDir) {
         const e = parseMd(read(path.join(dir, f)));
         if (e) items.push(e);
       }
-    } catch {}
+    } catch (e) { if (e?.code !== 'ENOENT') console.warn(`[buildMetadata] 扫 ${dir} 失败: ${e.message}`); }
     return { pattern, items };
   };
 
@@ -71,7 +71,7 @@ export function buildMetadata(loreDir) {
  */
 export function buildStyleMetadata(stylesDir) {
   const DEFAULT_STYLE_FILE = 'default_style.md';   // 默认风格恒在 render system 末尾常驻，不列入可选 metadata
-  const read = (p) => { try { return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : ''; } catch { return ''; } };
+  const read = (p) => { try { return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : ''; } catch (e) { console.warn(`[buildStyleMetadata] 读 ${p} 失败: ${e.message}`); return ''; } };
   const items = [];
   try {
     const files = fs.readdirSync(stylesDir)
@@ -81,7 +81,7 @@ export function buildStyleMetadata(stylesDir) {
       const { frontmatter } = parseFrontmatter(read(path.join(stylesDir, f)));
       items.push({ file: f, desc: (frontmatter.description || '').trim() });
     }
-  } catch {}
+  } catch (e) { if (e?.code !== 'ENOENT') console.warn(`[buildStyleMetadata] 扫 ${stylesDir} 失败: ${e.message}`); }
   if (!items.length) return '';
   const lines = ['## 语言风格 metadata（default_style 常驻 system 不在此列；大纲「语言风格」节点名一个 `<文件名.md>`，无契合则写「无」）'];
   for (const it of items) lines.push(`- <${it.file}> - ${it.desc || '（无简介）'}`);

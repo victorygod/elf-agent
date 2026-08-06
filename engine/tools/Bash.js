@@ -183,7 +183,8 @@ function persistOutput(command, stdout, stderr, exitCode) {
                         : `${banner}${stdout}`;
     fs.writeFileSync(filePath, body, 'utf-8');
     return filePath;
-  } catch {
+  } catch (e) {
+    console.warn(`[Bash] 落盘失败: ${e.message}`);
     return null;
   }
 }

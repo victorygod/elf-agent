@@ -195,7 +195,7 @@ export class RoomBroadcaster {
   /** 关闭所有订阅者连接 */
   removeAll() {
     for (const sub of this._sseSubscribers) {
-      try { if (sub.res.writable) sub.res.end(); } catch (e) { /* ignore */ }
+      try { if (sub.res.writable) sub.res.end(); } catch (e) { logger.warn(`关闭订阅连接失败: ${e.message}`); }
     }
     this._sseSubscribers = [];
     this._agentSubscribers.clear();
@@ -598,7 +598,7 @@ export class RoomManager {
     room.config.removeMember(agentId);
     // 清该成员对本群的记忆目录 profiles/agents/<id>/rooms/<rid>/（context/tool-results）
     const memberRoomDir = agentRoomState(agentId, roomId);
-    try { fs.rmSync(memberRoomDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    try { fs.rmSync(memberRoomDir, { recursive: true, force: true }); } catch (e) { logger.warn(`删成员记忆目录失败 ${memberRoomDir}: ${e.message}`); }
     return this.getRoom(roomId);
   }
 
@@ -612,17 +612,17 @@ export class RoomManager {
     if (!cfg) throw new Error(`群不存在: ${roomId}`);
     // 停所有副本（v3 pm 模式仅退订，不动共享 agent 进程）
     for (const agentId of cfg.members) {
-      await this.stopReplica(roomId, agentId).catch(() => { /* ignore */ });
+      await this.stopReplica(roomId, agentId).catch((e) => { logger.warn(`停副本失败 ${roomId}/${agentId}: ${e.message}`); });
     }
     // 关订阅者
     room.broadcaster.removeAll();
     // 删 <roomsDir>/<rid>/ 整目录（含 room.json / history.jsonl / run/<id>.json）
-    try { fs.rmSync(path.join(this.roomsDir, roomId), { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    try { fs.rmSync(path.join(this.roomsDir, roomId), { recursive: true, force: true }); } catch (e) { logger.warn(`删群目录失败 ${roomId}: ${e.message}`); }
     // 各成员 agent 对该群的记忆目录 profiles/agents/<id>/rooms/<rid>/（context/tool-results）一并清，
     //   私聊记忆 profiles/agents/<id>/memory/ 不动（成员保留私聊历史）。
     for (const agentId of cfg.members) {
       const memberRoomDir = agentRoomState(agentId, roomId);
-      try { fs.rmSync(memberRoomDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+      try { fs.rmSync(memberRoomDir, { recursive: true, force: true }); } catch (e) { logger.warn(`删成员群记忆目录失败 ${memberRoomDir}: ${e.message}`); }
     }
     // 清内存态
     this.rooms.delete(roomId);
@@ -639,7 +639,7 @@ export class RoomManager {
         const data = JSON.parse(raw);
         return data?.name || agentId;
       }
-    } catch (err) { /* 容错：回退 agentId */ }
+    } catch (err) { logger.warn(`读 config.json 的 name 失败（回退 agentId）: ${err.message}`); }
     return agentId;
   }
 
@@ -653,7 +653,7 @@ export class RoomManager {
         const data = JSON.parse(raw);
         return data?.avatar || null;
       }
-    } catch (err) { /* 容错 */ }
+    } catch (err) { logger.warn(`读 config.json 的 avatar 失败（返回 null）: ${err.message}`); }
     return null;
   }
 
@@ -990,7 +990,7 @@ export class RoomManager {
             if (fs.existsSync(ctxFile)) { fs.writeFileSync(ctxFile, '[]', 'utf-8'); clearedAny = true; }
           } catch (err) { logger.error(`删 context.json 失败 ${roomId}/${agentId} (${d}): ${err.message}`); }
           const trDir = path.join(d, 'tool-results');
-          try { if (fs.existsSync(trDir)) fs.rmSync(trDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+          try { if (fs.existsSync(trDir)) fs.rmSync(trDir, { recursive: true, force: true }); } catch (e) { logger.warn(`删 tool-results 失败 ${trDir}: ${e.message}`); }
         }
         if (clearedAny) {
           ok = true;

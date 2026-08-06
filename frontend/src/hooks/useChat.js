@@ -14,12 +14,13 @@
 import { useCallback } from 'react';
 import * as api from '../api/index.js';
 import useAgentStore from '../stores/agentStore.js';
+import { chatKey } from '../stores/authStore.js';
 import { handleSSEEvent, finalizeActiveTurn } from '../stores/sseDispatcher.js';
 
 export default function useChat(agentId) {
   // ===== 发送消息 =====
   const send = useCallback(async (message) => {
-    const chat = useAgentStore.getState().chats.get(agentId);
+    const chat = useAgentStore.getState().chats.get(chatKey(agentId));
     if (!chat) return;
 
     const agent = useAgentStore.getState().getAgent(agentId);

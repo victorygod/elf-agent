@@ -54,7 +54,8 @@ export const Glob = {
       let entries;
       try {
         entries = fs.readdirSync(dir, { withFileTypes: true });
-      } catch {
+      } catch (e) {
+        console.warn(`[Glob] 读目录失败 ${dir}: ${e.message}`);
         return; // 权限不足等跳过
       }
 
@@ -89,8 +90,8 @@ export const Glob = {
               const st = fs.statSync(fullPath);
               mtimeMs = Math.floor(st.mtimeMs);
               if (entry.isFile()) size = st.size;
-            } catch {
-              // ignore
+            } catch (e) {
+              console.warn(`[Glob] stat 失败 ${fullPath}: ${e.message}`);
             }
             const type = isDir ? 'directory' : 'file';
             const sizeStr = entry.isFile() ? `, ${formatSize(size)}` : '';

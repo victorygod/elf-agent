@@ -47,3 +47,12 @@ export const useAuthStore = create((set, get) => ({
 export function privateRoomId(uid, agentId) {
   return `chat-${uid}-${agentId}`;
 }
+
+/**
+ * agentStore.chats 的复合 key：<uid>:<agentId>。
+ * 换用户后同一 agentId 不再命中旧用户的 chat（配合登录态变化时 reset store 双保险）。
+ */
+export function chatKey(agentId) {
+  const uid = useAuthStore.getState().user?.uid || 'anon';
+  return `${uid}:${agentId}`;
+}

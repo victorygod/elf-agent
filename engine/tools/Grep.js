@@ -249,7 +249,8 @@ function grepFallback({ pattern, searchPath, outputMode, glob, ignoreCase, showL
   if (glob) {
     try {
       globRegex = globToRegex(glob.replace(/\\/g, '/'));
-    } catch {
+    } catch (e) {
+      console.warn(`[Grep] glob 编译失败: ${e.message}`);
       globRegex = null;
     }
   }
@@ -262,7 +263,8 @@ function grepFallback({ pattern, searchPath, outputMode, glob, ignoreCase, showL
     let entries;
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
+    } catch (e) {
+      console.warn(`[Grep] 读目录失败 ${dir}: ${e.message}`);
       return;
     }
     for (const entry of entries) {
@@ -364,7 +366,8 @@ function grepFile({ filePath, regex, ignoreCase, outputMode, showLineNumbers, aC
   let stat;
   try {
     stat = fs.statSync(filePath);
-  } catch {
+  } catch (e) {
+    console.warn(`[Grep] stat 失败 ${filePath}: ${e.message}`);
     return null;
   }
 
@@ -373,7 +376,8 @@ function grepFile({ filePath, regex, ignoreCase, outputMode, showLineNumbers, aC
   let content;
   try {
     content = fs.readFileSync(filePath, 'utf-8');
-  } catch {
+  } catch (e) {
+    console.warn(`[Grep] 读文件失败 ${filePath}: ${e.message}`);
     return null;
   }
 

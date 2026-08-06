@@ -1,5 +1,6 @@
 import React, { useCallback, useState, useEffect, useRef } from 'react';
 import Avatar from './Avatar';
+import ConfirmModal from './ConfirmModal';
 import useAgentStore from '../stores/agentStore';
 import { useRoomStore } from '../stores/roomStore';
 import { useAuthStore } from '../stores/authStore';
@@ -68,6 +69,14 @@ export default function Sidebar({ onSelect }) {
   const [settingsAvatarPreview, setSettingsAvatarPreview] = useState(null);
   // 标记用户是否点了"移除头像"（清空既有头像）
   const [avatarRemoved, setAvatarRemoved] = useState(false);
+  // 注销确认弹窗
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+  // 修改密码表单
+  const [oldPassword, setOldPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newPassword2, setNewPassword2] = useState('');
+  const [passMsg, setPassMsg] = useState(null);   // { type: 'ok'|'error', text }
+  const [passBusy, setPassBusy] = useState(false);
 
   useEffect(() => { loadUserName(); }, [loadUserName]);
 
@@ -76,6 +85,10 @@ export default function Sidebar({ onSelect }) {
     setPendingAvatarFile(null);
     setSettingsAvatarPreview(null);
     setAvatarRemoved(false);
+    setOldPassword('');
+    setNewPassword('');
+    setNewPassword2('');
+    setPassMsg(null);
     setShowSettings(true);
   };
 
@@ -209,6 +222,26 @@ export default function Sidebar({ onSelect }) {
     setAvatarRemoved(true);
   }, []);
 
+  // 修改密码：校验两次一致 → 调后端 → 成功后清 token 强制重新登录
+  const handleChangePassword = useCallback(async () => {
+    if (passBusy) return;
+    if (!oldPassword) { setPassMsg({ type: 'error', text: '请输入旧密码' }); return; }
+    if (!newPassword || newPassword.length < 4) { setPassMsg({ type: 'error', text: '新密码至少 4 位' }); return; }
+    if (newPassword !== newPassword2) { setPassMsg({ type: 'error', text: '两次输入的新密码不一致' }); return; }
+    setPassBusy(true);
+    setPassMsg(null);
+    try {
+      await api.changePassword(oldPassword, newPassword);
+      setShowSettings(false);
+      useAgentStore.getState().showToast('密码已修改，请重新登录');
+      logout();
+    } catch (e) {
+      setPassMsg({ type: 'error', text: e.message || '修改失败' });
+    } finally {
+      setPassBusy(false);
+    }
+  }, [oldPassword, newPassword, newPassword2, passBusy, logout]);
+
   const handleRefresh = useCallback(async () => {
     setSpinning(true);
     await refreshAgents();
@@ -244,7 +277,6 @@ export default function Sidebar({ onSelect }) {
             title="刷新状态"
           >↻</button>
           <button className={styles.btnIconSm} onClick={openSettings} title="全局设置">⚙</button>
-          <button className={styles.btnIconSm} onClick={logout} title="退出登录">⏻</button>
         </div>
         <div className={styles.subtitle}>
           {userName ? `你好，${userName}` : 'AI Agent 平台'}
@@ -292,9 +324,73 @@ export default function Sidebar({ onSelect }) {
               <button onClick={() => setShowSettings(false)}>取消</button>
               <button className={styles.nameEditSave} onClick={handleSaveSettings}>保存</button>
             </div>
+
+            {/* 修改密码 */}
+            <div style={{ borderTop: '1px solid #eee', paddingTop: '12px', marginTop: '4px' }}>
+              <div className={styles.nameEditTitle} style={{ marginBottom: '4px' }}>修改密码</div>
+              <label className={styles.settingLabel}>旧密码</label>
+              <input
+                className={styles.nameEditInput}
+                type="password"
+                value={oldPassword}
+                onChange={e => setOldPassword(e.target.value)}
+                placeholder="旧密码"
+                style={{ marginBottom: '8px' }}
+              />
+              <label className={styles.settingLabel}>新密码（至少 4 位）</label>
+              <input
+                className={styles.nameEditInput}
+                type="password"
+                value={newPassword}
+                onChange={e => setNewPassword(e.target.value)}
+                placeholder="新密码"
+                style={{ marginBottom: '8px' }}
+              />
+              <label className={styles.settingLabel}>确认新密码</label>
+              <input
+                className={styles.nameEditInput}
+                type="password"
+                value={newPassword2}
+                onChange={e => setNewPassword2(e.target.value)}
+                placeholder="确认新密码"
+                style={{ marginBottom: '8px' }}
+              />
+              {passMsg && (
+                <div style={{ fontSize: '12px', color: passMsg.type === 'error' ? '#cf1322' : '#389e0d', marginBottom: '8px' }}>
+                  {passMsg.text}
+                </div>
+              )}
+              <div className={styles.nameEditActions}>
+                <button onClick={() => { setOldPassword(''); setNewPassword(''); setNewPassword2(''); setPassMsg(null); }}>清空</button>
+                <button className={styles.nameEditSave} onClick={handleChangePassword} disabled={passBusy}>
+                  {passBusy ? '提交中…' : '修改密码'}
+                </button>
+              </div>
+            </div>
+
+            {/* 退出登录 */}
+            <div style={{ borderTop: '1px solid #eee', paddingTop: '12px' }}>
+              <button
+                style={{
+                  width: '100%', padding: '8px 0', borderRadius: '6px', cursor: 'pointer',
+                  border: '1px solid #e53935', background: 'none', color: '#e53935', fontSize: '13px',
+                }}
+                onClick={() => setLogoutConfirmOpen(true)}
+              >退出登录</button>
+            </div>
           </div>
         </div>
       )}
+
+      <ConfirmModal
+        open={logoutConfirmOpen}
+        title="退出登录"
+        message="确定要退出当前账号吗？"
+        confirmText="退出"
+        tone="danger"
+        onCancel={() => setLogoutConfirmOpen(false)}
+        onConfirm={() => { setLogoutConfirmOpen(false); setShowSettings(false); logout(); }}
+      />
 
       <div className={styles.list}>
         {/* 群聊区段 */}

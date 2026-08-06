@@ -618,3 +618,15 @@ export async function uploadUserAvatar(data, type) {
   }
   return await res.json();
 }
+
+/** 修改密码（成功需重新登录：前端清 token 回登录页） */
+export async function changePassword(oldPassword, newPassword) {
+  const res = await authFetch(`${API_BASE}/settings/password`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ oldPassword, newPassword }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}

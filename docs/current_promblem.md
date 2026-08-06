@@ -186,3 +186,18 @@ name和description不应该填在上面的单独的对话框里么？是因为�
 4. **问题 1b**：setup 临时目录（elf-018 api.js 结构调整，依赖第 3 步的日志便于排查）。
 5. **问题 5/6**：登录注册改密码、注销迁移（相互独立的小改）。
 6. **问题 2**：18 个 agent 的 manifest 迁移（批量文件操作，无代码，可最后做）。
+
+---
+
+## 实现状态（2026-08-06 已落地，未跑测试）
+
+| # | 落地内容 | 涉及文件 |
+|---|---|---|
+| 1a | 新增 `stripFence()`（检测首尾 ``` 围栏再剥，含 BOM/前导空行容错）；`polishLore` 解析前先 `stripFence`；`POLISH_SYS` 加「以 `---` 开头、禁止代码块包裹」 | `engine/skills/parser.js`、`agents/elf-018/ui/api.js` |
+| 1b | setup 临时目录 `profiles/agents/<id>/rooms/chat-<uid>-<id>/setup/lore/`：`/seeds` 仅在目录缺失时从 seeds 物化；lore CRUD / user-profile / polish 支持 `mode=setup`（读写临时目录）；新增 `POST /setup/commit`（临时目录 → 正式 `runtime/lore`，临时目录保留）；前端 setup 页只读 `/seeds`，保存/删除/润色带 `mode=setup`，开始游戏 = PUT user-profile → commit → send；移除种子标 | `agents/elf-018/ui/api.js`、`agents/elf-018/ui/DnDChatView/GameSetupPanel.jsx`、`index.module.css` |
+| 2 | elf-001~017 全部新建 `ui/manifest.json`（config-ui.json 的 tabs 原样迁入），删除各自 `config-ui.json`；`useConfig` 默认 tab 改为 manifest 首个 | 17 个 `agents/<id>/ui/manifest.json`、`frontend/src/hooks/useConfig.js` |
+| 3 | `snapshotBeforeSend` 先 `mkdirSync(dataDir)` 再写 context.json（首条消息 ENOENT 修复，已本地验证 turn1/turn2 均出快照）；`rewindTo` 防御性 mkdir；`updateUserProfile` 写前 mkdir；全量空 catch 补日志（gateway/engine/shared/elf-018 工具/elf-002 mm，读取容错类按 ENOENT 静默、其余 warn） | `gateway/snapshot.js`、`gateway/room_routes.js`、`agents/elf-018/ui/api.js` 及约 30 个文件 |
+| 4 | `authStore` 新增 `chatKey()`（`<uid>:<agentId>` 复合 key）；`agentStore.chats` / `sseDispatcher` / `useChat` / `useBridge` / `ChatPanel` 全部改复合 key；`agentStore` / `roomStore` 新增 `reset()`；`App.jsx` 登录态（uid）变化时 reset 两 store + 清 URL hash（历史由 SSE snapshot / ChatPanel init force 自动补齐，无需手动 loadHistory） | `frontend/src/stores/{authStore,agentStore,roomStore,sseDispatcher}.js`、`useChat.js`、`useBridge.js`、`ChatPanel.jsx`、`App.jsx` |
+| 5/6 | 后端 `changeUserPassword` + `PUT /settings/password`（校验旧密码 → bcrypt 更新 → 前端清 token 强制重登）；注册加确认密码 + 前端校验；注销确认弹窗（复用 ConfirmModal）；⏻ 从侧栏顶栏移入 ⚙ 齿轮弹窗（「退出登录」按钮）；齿轮弹窗加「修改密码」表单 | `gateway/auth.js`、`gateway/server.js`、`frontend/src/api/index.js`、`LoginPage.jsx`、`Sidebar.jsx` |
+
+> 前端已 `npm run build` 通过（573 modules）；后端改动文件 `node --check` 语法通过；本地跑过两条针对性冒烟（stripFence 解析、snapshot 首条消息 mkdir），**未运行测试套件**——按约定等你确认后再跑。

@@ -148,6 +148,21 @@ export const useRoomStore = create((set, get) => ({
     if (room) get()._patchChat(roomId, { members: room.members, users: room.users || [] });
   },
 
+  /**
+   * 重置 store 到初始状态（多用户：登录/登出/换号时由 App 调，清空上一个用户的房间数据）。
+   */
+  reset: () => set({
+    rooms: [],
+    activeRoomId: null,
+    roomChats: new Map(),
+    userName: 'user',
+    userAvatar: null,
+    userUid: 'default_userid',
+    sidebarOrder: { rooms: [], agents: [] },
+    roomToastList: [],
+    _roomToastKey: 0,
+  }),
+
   /** 上翻加载更早的群历史(滚到顶触发),与私聊 loadMoreHistory 同构 */
   loadMoreHistory: async (roomId) => {
     const chat = get().roomChats.get(roomId);

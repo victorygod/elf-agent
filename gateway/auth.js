@@ -118,6 +118,25 @@ export function verifyUser(username, password) {
   return user;
 }
 
+/**
+ * 修改密码：校验旧密码 → 更新 passwordHash。
+ * @returns {{ ok: true } | { error: string, statusCode: number }}
+ */
+export function changeUserPassword(uid, oldPassword, newPassword) {
+  const user = getUser(uid);
+  if (!user) return { error: '用户不存在', statusCode: 404 };
+  if (typeof oldPassword !== 'string' || !bcrypt.compareSync(oldPassword, user.passwordHash)) {
+    return { error: '旧密码错误', statusCode: 400 };
+  }
+  if (typeof newPassword !== 'string' || newPassword.length < 4) {
+    return { error: '新密码至少 4 位', statusCode: 400 };
+  }
+  user.passwordHash = bcrypt.hashSync(newPassword, 10);
+  saveUser(user);
+  logger.info(`用户 ${user.username} 已修改密码`);
+  return { ok: true };
+}
+
 // ──────────────────────────── JWT ────────────────────────────
 
 let _jwtSecret = null;

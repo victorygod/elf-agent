@@ -46,7 +46,7 @@ export function makeWrite(agent) {
               const pc = fs.readFileSync(profilePath, 'utf-8');
               protagonistName = parseFrontmatterName(pc);
             }
-          } catch {}
+          } catch (e) { console.warn(`[Write] 读主角面板失败 ${profilePath}: ${e.message}`); }
           if (protagonistName && writtenName === protagonistName) {
             return `Error: 主角（${protagonistName}）已在 ${agent._protagonistFile} 中管理，禁止在 characters/ 下重复创建`;
           }

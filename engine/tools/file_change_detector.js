@@ -104,7 +104,9 @@ export async function detectChangedFiles(messageManager) {
         const diskContent = fs.readFileSync(filePath, 'utf-8');
         if (st.content && hashContent(diskContent) === st.contentHash) return; // 哈希相同 → 跳过
         currentContent = diskContent;
-      } catch {
+      } catch (err) {
+        if (err?.code === 'ENOENT') { try { deleteReadState(filePath); } catch (e) { console.warn(`[file-change] 清 readState 失败 ${filePath}: ${e.message}`); } }
+        else console.warn(`[file-change] 读文件失败 ${filePath}: ${err.message}`);
         return;
       }
 
@@ -123,7 +125,9 @@ export async function detectChangedFiles(messageManager) {
     } catch (err) {
       if (err?.code === 'ENOENT') {
         // 文件被删 → 清理状态
-        try { deleteReadState(filePath); } catch {}
+        try { deleteReadState(filePath); } catch (e) { console.warn(`[file-change] 清 readState 失败 ${filePath}: ${e.message}`); }
+      } else {
+        console.warn(`[file-change] 检测 ${filePath} 变更失败: ${err.message}`);
       }
     }
   }));

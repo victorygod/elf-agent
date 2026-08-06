@@ -21,6 +21,16 @@ export default function App() {
   const loadMe = useAuthStore(s => s.loadMe);
   useEffect(() => { loadMe(); }, [loadMe]);
 
+  // 登录态变化（登录/登出/换号）：重置两个业务 store，防上一个用户的数据（chats/房间）串入。
+  //   chats 复合 key 已按 uid 隔离，这里再兜底清空 + 清 URL hash。历史加载由现有机制自动补齐：
+  //   running agent 靠聚合 SSE 重连补发 snapshot；stopped agent 靠 ChatPanel init force loadHistory。
+  const authUid = useAuthStore(s => s.user?.uid);
+  useEffect(() => {
+    useAgentStore.getState().reset();
+    useRoomStore.getState().reset();
+    if (typeof window !== 'undefined' && window.location.hash) window.location.hash = '';
+  }, [authUid]);
+
   const { agents } = useAgents(authChecked && authUser); // 登录后才初始化加载
   useAggregatedSubscription(); // app 级聚合 SSE(登录后建连;见 docs/sse-aggregation-design.md)
   const activeAgentId = useAgentStore(s => s.activeAgentId);

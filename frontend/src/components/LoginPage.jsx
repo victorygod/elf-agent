@@ -12,13 +12,25 @@ export default function LoginPage() {
   const [mode, setMode] = useState('login');   // 'login' | 'register'
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const setAuth = useAuthStore(s => s.setAuth);
 
+  const switchMode = (m) => {
+    setMode(m);
+    setError('');
+    setPassword('');
+    setConfirmPassword('');
+  };
+
   const submit = async () => {
     const u = username.trim();
     if (!u || !password) { setError('请输入用户名和密码'); return; }
+    if (mode === 'register') {
+      if (password.length < 4) { setError('密码至少 4 位'); return; }
+      if (password !== confirmPassword) { setError('两次输入的密码不一致'); return; }
+    }
     setBusy(true);
     setError('');
     try {
@@ -54,6 +66,16 @@ export default function LoginPage() {
           onChange={e => setPassword(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') submit(); }}
         />
+        {mode === 'register' && (
+          <input
+            style={styles.input}
+            type="password"
+            placeholder="确认密码"
+            value={confirmPassword}
+            onChange={e => setConfirmPassword(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+          />
+        )}
 
         {error && <div style={styles.error}>{error}</div>}
 
@@ -63,9 +85,9 @@ export default function LoginPage() {
 
         <div style={styles.switchRow}>
           {mode === 'login' ? (
-            <span>还没有账户？<a style={styles.link} onClick={() => { setMode('register'); setError(''); }}>注册</a></span>
+            <span>还没有账户？<a style={styles.link} onClick={() => switchMode('register')}>注册</a></span>
           ) : (
-            <span>已有账户？<a style={styles.link} onClick={() => { setMode('login'); setError(''); }}>登录</a></span>
+            <span>已有账户？<a style={styles.link} onClick={() => switchMode('login')}>登录</a></span>
           )}
         </div>
       </div>

@@ -319,7 +319,7 @@ export class DNDAgent extends Agent {
       if (fs.existsSync(dst)) continue;
       const src = path.join(seedsDir, name);
       if (!fs.existsSync(src)) continue;
-      try { this._copyDir(src, dst); } catch (e) { /* 种子拷贝失败不阻断 */ }
+      try { this._copyDir(src, dst); } catch (e) { logger.warn(`种子拷贝失败 ${src} → ${dst}: ${e.message}`); }
     }
   }
 

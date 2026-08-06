@@ -85,7 +85,10 @@ export function loadGatewayConfig() {
  * @param {object} updates - 要更新的平台级字段（如 port/agentServerPort）
  */
 export function saveGatewayConfig(updates = {}) {
-  const merged = { ...(() => { try { return JSON.parse(fs.readFileSync(_configPath(), 'utf-8')); } catch { return {}; } })(), ...updates };
+  const merged = { ...(() => {
+    try { return JSON.parse(fs.readFileSync(_configPath(), 'utf-8')); }
+    catch (e) { logger.warn(`读 gateway.json 失败，按空配置合并: ${e.message}`); return {}; }
+  })(), ...updates };
   fs.writeFileSync(_configPath(), JSON.stringify(merged, null, 2), 'utf-8');
   return loadGatewayConfig();
 }

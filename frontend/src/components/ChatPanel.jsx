@@ -9,6 +9,7 @@ import ToastStack from './Toast';
 import useChat from '../hooks/useChat';
 import useAgentStore from '../stores/agentStore';
 import { useRoomStore } from '../stores/roomStore';
+import { chatKey } from '../stores/authStore';
 import styles from './ChatPanel.module.css';
 
 /**
@@ -150,16 +151,16 @@ const TurnView = React.memo(function TurnView({ turn, agentId, agent, isStreamin
 });
 
 export default function ChatPanel({ agentId }) {
-  const turns = useAgentStore(useCallback(state => state.chats.get(agentId)?.turns ?? [], [agentId]));
-  const activeTurn = useAgentStore(useCallback(state => state.chats.get(agentId)?.activeTurn ?? null, [agentId]));
-  const streaming = useAgentStore(useCallback(state => state.chats.get(agentId)?.streaming ?? false, [agentId]));
-  const historyLoaded = useAgentStore(useCallback(state => state.chats.get(agentId)?.historyLoaded ?? false, [agentId]));
-  const draft = useAgentStore(useCallback(state => state.chats.get(agentId)?.draft ?? '', [agentId]));
-  const _savedScrollTop = useAgentStore(useCallback(state => state.chats.get(agentId)?._savedScrollTop ?? 0, [agentId]));
-  const isActive = useAgentStore(useCallback(state => state.chats.get(agentId)?._isActive ?? false, [agentId]));
-  const currentLoop = useAgentStore(useCallback(state => state.chats.get(agentId)?._currentLoop ?? null, [agentId]));
-  const noticeQueue = useAgentStore(useCallback(state => state.chats.get(agentId)?.noticeQueue ?? [], [agentId]));
-  const pendingRestorePrompt = useAgentStore(useCallback(state => state.chats.get(agentId)?.pendingRestorePrompt ?? null, [agentId]));
+  const turns = useAgentStore(useCallback(state => state.chats.get(chatKey(agentId))?.turns ?? [], [agentId]));
+  const activeTurn = useAgentStore(useCallback(state => state.chats.get(chatKey(agentId))?.activeTurn ?? null, [agentId]));
+  const streaming = useAgentStore(useCallback(state => state.chats.get(chatKey(agentId))?.streaming ?? false, [agentId]));
+  const historyLoaded = useAgentStore(useCallback(state => state.chats.get(chatKey(agentId))?.historyLoaded ?? false, [agentId]));
+  const draft = useAgentStore(useCallback(state => state.chats.get(chatKey(agentId))?.draft ?? '', [agentId]));
+  const _savedScrollTop = useAgentStore(useCallback(state => state.chats.get(chatKey(agentId))?._savedScrollTop ?? 0, [agentId]));
+  const isActive = useAgentStore(useCallback(state => state.chats.get(chatKey(agentId))?._isActive ?? false, [agentId]));
+  const currentLoop = useAgentStore(useCallback(state => state.chats.get(chatKey(agentId))?._currentLoop ?? null, [agentId]));
+  const noticeQueue = useAgentStore(useCallback(state => state.chats.get(chatKey(agentId))?.noticeQueue ?? [], [agentId]));
+  const pendingRestorePrompt = useAgentStore(useCallback(state => state.chats.get(chatKey(agentId))?.pendingRestorePrompt ?? null, [agentId]));
 
   const agent = useAgentStore(useCallback(state => state.getAgent(agentId), [agentId]));
   const loadHistory = useAgentStore(s => s.loadHistory);
@@ -359,7 +360,7 @@ export default function ChatPanel({ agentId }) {
   const historyNavRef = useRef({ index: -1, draft: '' });
 
   const getUserInputs = useCallback(() => {
-    const chat = useAgentStore.getState().chats.get(agentId);
+    const chat = useAgentStore.getState().chats.get(chatKey(agentId));
     if (!chat) return [];
     const inputs = [];
     for (const t of chat.turns) {
@@ -496,7 +497,7 @@ export default function ChatPanel({ agentId }) {
   selectedRef.current = rewindSelected;
   useEffect(() => {
     const onGlobalKeyDown = (e) => {
-      const chat = useAgentStore.getState().chats.get(agentId);
+      const chat = useAgentStore.getState().chats.get(chatKey(agentId));
 
       // —— 菜单打开时：所有导航键归菜单消费（必须 stopPropagation，否则 Enter 会冒泡到 textarea 触发 handleSend，把回填的 prompt 自动发出去）——
       if (rewindOpen) {

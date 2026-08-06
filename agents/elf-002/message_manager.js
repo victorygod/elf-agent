@@ -592,7 +592,7 @@ export class MessageManager extends BaseMessageManager {
           try {
             fs.unlinkSync(path.join(this.toolResultsDir, file));
             deleted++;
-          } catch (e) { /* 单个文件删除失败不阻塞 */ }
+          } catch (e) { logger.warn(`删孤儿 tool-result 失败 ${file}: ${e.message}`); }
         }
       }
       logger.info(`清理 tool-results: 删 ${deleted} 个孤儿文件, 保留 ${files.length - deleted} 个`);

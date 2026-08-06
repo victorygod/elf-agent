@@ -303,7 +303,7 @@ async ensureServerUp() {
     if (this.server.status === 'running' && this.server.port) {
       try {
         await fetch(`http://127.0.0.1:${this.server.port}/abort-agent/${encodeURIComponent(id)}`, { method: 'POST', signal: AbortSignal.timeout(3000) });
-      } catch (e) { /* server 未起或无在飞回合，忽略 */ }
+      } catch (e) { logger.warn(`abort-agent 失败（server 未起或无在飞回合，忽略）: ${e.message}`); }
       // gateway 侧兜底：清所有该 agent 用户房的孤儿 streaming
       forceFinishRoomsForAgent(id);
     }

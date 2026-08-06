@@ -123,45 +123,31 @@ export default function GameSetupPanel({ bridge }) {
   const [playerName, setPlayerName] = useState('');
   const [profileBody, setProfileBody] = useState('');
   const [openingMessage, setOpeningMessage] = useState('出发吧');
-  const [seeds, setSeeds] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loreLists, setLoreLists] = useState({});
   const [loreEditor, setLoreEditor] = useState(null);
 
-  // 读取种子 + 现有 lore
+  // 读取 setup 临时目录（后端在目录不存在时自动从 seeds 物化；存在则保留上次内容）。
+  // 开场白也固化在 setup 目录（opening.md，setup/seeds 特有，不 commit 进 lore），回退到 setup 后继续沿用。
   useEffect(() => {
     async function init() {
       try {
-        const [seedData, state] = await Promise.all([
-          bridge.call('GET', '/seeds'),
-          bridge.call('GET', '/game-state'),
-        ]);
-        setSeeds(seedData);
-
-        if (state?.protagonist) {
-          setPlayerName(state.protagonist.name || '');
-          const body = (state.protagonist.content || '').replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
-          setProfileBody(body);
-        } else if (seedData?.userProfile) {
-          setPlayerName(seedData.userProfile.name || '');
-          setProfileBody(seedData.userProfile.body || '');
+        const setupData = await bridge.call('GET', '/setup');
+        if (setupData?.userProfile) {
+          setPlayerName(setupData.userProfile.name || '');
+          setProfileBody(setupData.userProfile.body || '');
+        }
+        if (typeof setupData?.opening === 'string' && setupData.opening) {
+          setOpeningMessage(setupData.opening);
         }
 
         const lists = {};
         for (const { key } of LORE_TYPES) {
-          const existing = state?.[key] || [];
-          if (existing.length > 0) {
-            lists[key] = existing.map(e => ({
-              name: e.name,
-              description: e.description,
-              body: (e.content || '').replace(/^---\n[\s\S]*?\n---\n?/, '').trim(),
-              fromSeed: false,
-            }));
-          } else if (seedData?.[key]) {
-            lists[key] = seedData[key].map(e => ({ ...e, fromSeed: true }));
-          } else {
-            lists[key] = [];
-          }
+          lists[key] = (setupData?.[key] || []).map(e => ({
+            name: e.name,
+            description: e.description,
+            body: e.body,
+          }));
         }
         setLoreLists(lists);
       } catch (e) {
@@ -173,33 +159,33 @@ export default function GameSetupPanel({ bridge }) {
     init();
   }, []);
 
-  // 失焦保存玩家设定
+  // 失焦保存玩家设定（写入 setup 临时目录）
   const handleBlurProfile = useCallback(() => {
-    bridge.call('PUT', '/user-profile', { name: playerName, body: profileBody }).catch(() => {});
+    bridge.call('PUT', '/user-profile', { name: playerName, body: profileBody, mode: 'setup' }).catch(() => {});
   }, [playerName, profileBody, bridge]);
 
-  // 创建/更新 lore
+  // 创建/更新 lore（读写 setup 临时目录）
   const handleLoreSave = useCallback(async ({ name, description, body }) => {
     const { type, isNew } = loreEditor;
     if (isNew) {
-      await bridge.call('POST', '/lore/' + type, { name, description, body });
+      await bridge.call('POST', '/lore/' + type, { name, description, body, mode: 'setup' });
     } else {
-      await bridge.call('PUT', '/lore/' + type + '/' + encodeURIComponent(loreEditor.filename), { name, description, body });
+      await bridge.call('PUT', '/lore/' + type + '/' + encodeURIComponent(loreEditor.filename), { name, description, body, mode: 'setup' });
     }
-    const data = await bridge.call('GET', '/lore/' + type);
-    setLoreLists(prev => ({ ...prev, [type]: data.entities.map(e => ({ ...e, fromSeed: false })) }));
+    const data = await bridge.call('GET', '/lore/' + type + '?mode=setup');
+    setLoreLists(prev => ({ ...prev, [type]: data.entities.map(e => ({ name: e.name, description: e.description, body: e.body })) }));
   }, [loreEditor, bridge]);
 
-  // AI 润色：调 /polish-lore，返回 {ok, description, body}（ok=false 时 modal 保留原 state）
+  // AI 润色：调 /polish-lore（setup 模式，参考上下文读临时目录），返回 {ok, description, body}
   const handlePolish = useCallback(async ({ type, name, description, body }) => {
-    return await bridge.call('POST', '/polish-lore', { type, name, description, body });
+    return await bridge.call('POST', '/polish-lore', { type, name, description, body, mode: 'setup' });
   }, [bridge]);
 
-  // 删除 lore
+  // 删除 lore（setup 模式）
   const handleDeleteLore = useCallback(async (type, filename) => {
     if (!confirm('确定删除该条目？')) return;
     try {
-      await bridge.call('DELETE', '/lore/' + type + '/' + encodeURIComponent(filename));
+      await bridge.call('DELETE', '/lore/' + type + '/' + encodeURIComponent(filename), { mode: 'setup' });
       setLoreLists(prev => ({
         ...prev,
         [type]: (prev[type] || []).filter(e => (e.name.replace(/[^\w.一-鿿-]/g, '_') + '.md') !== filename),
@@ -209,10 +195,12 @@ export default function GameSetupPanel({ bridge }) {
     }
   }, [bridge]);
 
-  // 开始游戏
+  // 开始游戏：先把玩家设定写入临时目录 → 固化开场白 → commit lore 到正式 runtime/lore → 发送开场白
   const handleStartGame = useCallback(async () => {
     try {
-      await bridge.call('PUT', '/user-profile', { name: playerName, body: profileBody });
+      await bridge.call('PUT', '/user-profile', { name: playerName, body: profileBody, mode: 'setup' });
+      await bridge.call('PUT', '/setup/opening', { opening: openingMessage });
+      await bridge.call('POST', '/setup/commit');
       bridge.send(openingMessage);
     } catch (e) {
       alert('开始游戏失败: ' + e.message);
@@ -262,7 +250,6 @@ export default function GameSetupPanel({ bridge }) {
                     <span className={styles.loreRowClick} onClick={() => openEditLore(key, entity, filename)}>
                       <strong className={styles.loreName}>{entity.name}</strong>
                       <span className={styles.loreDesc}>{entity.description}</span>
-                      {entity.fromSeed && <span className={styles.fromSeed}>种子</span>}
                     </span>
                     <button className={styles.loreDelBtn} onClick={() => handleDeleteLore(key, filename)}>×</button>
                   </div>

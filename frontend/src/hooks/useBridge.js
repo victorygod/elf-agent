@@ -7,6 +7,7 @@
 
 import { useMemo, useCallback, useRef, useEffect } from 'react';
 import useAgentStore from '../stores/agentStore';
+import { chatKey } from '../stores/authStore';
 import * as api from '../api/index.js';
 
 /**
@@ -25,7 +26,7 @@ export default function useBridge(agentId) {
   const eventHandlersRef = useRef(new Set());
 
   const bridge = useMemo(() => {
-    const chat = chats.get(agentId);
+    const chat = chats.get(chatKey(agentId));
 
     return {
       /** 当前 agentId */
@@ -42,7 +43,7 @@ export default function useBridge(agentId) {
       // ===== 操作 =====
       send: (text) => {
         const store = useAgentStore.getState();
-        const s = store.chats.get(agentId);
+        const s = store.chats.get(chatKey(agentId));
         if (s?.streaming || s?.activeTurn) return;
 
         // 创建本地 message + turn（与 useChat send 一致）
@@ -90,7 +91,7 @@ export default function useBridge(agentId) {
         if (!res.ok) {
           // 优先用服务端 error 文案，并挂 status 方便按状态码分支处理（如 409 重名）
           let serverMsg = '';
-          try { serverMsg = (await res.json()).error || ''; } catch {}
+          try { serverMsg = (await res.json()).error || ''; } catch (e) { console.warn('[bridge] 解析错误响应失败:', e); }
           const err = new Error(serverMsg || `HTTP ${res.status}`);
           err.status = res.status;
           throw err;

@@ -77,7 +77,7 @@ function _seedRuntime(seedsDir, runtimeDir) {
     if (fs.existsSync(dst)) continue;
     const src = path.join(seedsDir, name);
     if (!fs.existsSync(src)) continue;
-    try { _copyDir(src, dst); } catch (e) { /* 种子拷贝失败不阻断 */ }
+    try { _copyDir(src, dst); } catch (e) { console.warn(`[create_agent] 种子拷贝失败 ${src} → ${dst}: ${e.message}`); }
   }
 }
 

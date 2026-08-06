@@ -12,7 +12,7 @@
  */
 export function registerPrefixSuffixInjectors(assembler, config) {
   const get = (k) => {
-    try { return config?.get?.(k) || ''; } catch { return ''; }
+    try { return config?.get?.(k) || ''; } catch (e) { console.warn(`[injectors] 读 config 字段 ${k} 失败: ${e.message}`); return ''; }
   };
   // 群聊模式跳过 prefix/suffix（只由 RoomPlugin 注册 roster 注入器）
   const isRoom = (ctx) => ctx?.agent?.runContext?.mode === 'room';

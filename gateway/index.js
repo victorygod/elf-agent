@@ -27,7 +27,7 @@ async function main() {
 
   // profiles 布局：agent 记忆落 profiles/agents/<id>/memory，房间数据落 profiles/rooms/<rid>。
   //   snapshot/rewind 直接用 profiles_paths 的 agentMemory(id)，无需借 pm 字段拼路径。
-  try { fs.mkdirSync(profilesRoot(), { recursive: true }); } catch (e) { /* ignore */ }
+  try { fs.mkdirSync(profilesRoot(), { recursive: true }); } catch (e) { logger.warn(`创建 profiles 目录失败: ${e.message}`); }
 
   // 3. 扫描 agents/ 目录
   await pm.discoverAgents();
@@ -45,7 +45,7 @@ async function main() {
 
   // 5. 初始化群聊管理器 + 私聊 room 历史管理器（房间数据落 profiles/rooms/<rid>）
   const roomsRootDir = roomsRoot();
-  try { fs.mkdirSync(roomsRootDir, { recursive: true }); } catch (e) { /* ignore */ }
+  try { fs.mkdirSync(roomsRootDir, { recursive: true }); } catch (e) { logger.warn(`创建 rooms 目录失败: ${e.message}`); }
   const roomManager = new RoomManager(roomsRootDir, config.port, {
     pm,
     gatewayUrl: `http://127.0.0.1:${config.port}`,

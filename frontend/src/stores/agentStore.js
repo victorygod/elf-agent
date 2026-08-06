@@ -8,11 +8,31 @@
  * Toast 通知：
  *   toastMessage  — 当前显示的 toast 文本（null = 不显示）
  *   _toastKey     — 递增 key，每次新 toast 触发重新计时
+ *
+ * 多用户：chats 用复合 key（<uid>:<agentId>，见 authStore.chatKey）——换用户后同一
+ * agentId 不会命中旧用户数据；登录态变化（login/logout/换号）时由 App 调 reset() 清空。
  */
 import { create } from 'zustand';
 import * as api from '../api/index.js';
+import { chatKey } from './authStore.js';
 
 const HISTORY_PAGE_SIZE = 30;
+
+const initialState = {
+  agents: [],
+  activeAgentId: null,
+  chats: new Map(),       // chatKey(agentId) → chat state object
+  configDrawerOpen: false,
+  configAgentId: null,
+
+  // ===== Toast 通知 =====
+  toastList: [],
+  toastMessage: null,
+  _toastKey: 0,
+
+  // 头像缓存破坏计数器
+  _avatarBuster: 0,
+};
 
 /**
  * 从 history.jsonl 消息数组还原为 Turn 数组
@@ -40,19 +60,9 @@ function historyToTurns(messages) {
 }
 
 const useAgentStore = create((set, get) => ({
-  // ===== 状态 =====
-  agents: [],
-  activeAgentId: null,
-  chats: new Map(),       // agentId → chat state object
-  configDrawerOpen: false,
-  configAgentId: null,
+  ...initialState,
 
   // ===== Toast 通知（多条竖排，各自独立计时） =====
-  // toasts: [{ id, fields }] —— fields 为 string 或 notice 字段对象。
-  toastList: [],
-  toastMessage: null,   // 兼容旧引用（仅最后一条的字符串镜像）
-  _toastKey: 0,
-
   showToast: (fields) => set(s => {
     const id = s._toastKey + 1;
     const next = [...s.toastList, { id, fields }];
@@ -68,9 +78,6 @@ const useAgentStore = create((set, get) => ({
   clearToast: () => set({ toastList: [] }),
 
   // ===== Agent 列表 =====
-
-  // 头像缓存破坏计数器：每次 refreshAgents 递增，附加到头像 URL 防止浏览器缓存旧图
-  _avatarBuster: 0,
 
   loadAgents: async () => {
     try {
@@ -113,15 +120,17 @@ const useAgentStore = create((set, get) => ({
 
     // 隐藏当前 chat
     if (activeAgentId) {
-      const prevChat = newChats.get(activeAgentId);
+      const prevKey = chatKey(activeAgentId);
+      const prevChat = newChats.get(prevKey);
       if (prevChat) {
-        newChats.set(activeAgentId, { ...prevChat, _isActive: false });
+        newChats.set(prevKey, { ...prevChat, _isActive: false });
       }
     }
 
+    const key = chatKey(agentId);
     // 懒创建 chat
-    if (!newChats.has(agentId)) {
-      newChats.set(agentId, {
+    if (!newChats.has(key)) {
+      newChats.set(key, {
         turns: [],
         activeTurn: null,
         hasMore: false,
@@ -135,7 +144,7 @@ const useAgentStore = create((set, get) => ({
     } else {
       // 重新激活已存在的 chat：常驻 SSE subscribe 在场期间持续更新 store，切 tab 不丢异步事件，
       //   切回无需重建。仅标 _isActive（historyLoaded 已由 SSE snapshot 置位；未 running 的由 ChatPanel init force 兜底）。
-      newChats.set(agentId, { ...newChats.get(agentId), _isActive: true });
+      newChats.set(key, { ...newChats.get(key), _isActive: true });
     }
 
     set({ activeAgentId: agentId, chats: newChats });
@@ -159,10 +168,11 @@ const useAgentStore = create((set, get) => ({
 
   _patchChat: (agentId, updates) => {
     const chats = new Map(get().chats);
-    const chat = chats.get(agentId);
+    const key = chatKey(agentId);
+    const chat = chats.get(key);
     const defaults = { streaming: false, activeTurn: null, turns: [], historyLoaded: false, hasMore: false, noticeQueue: [] };
     // SSE subscribe 可能在 ChatPanel mount 前就收到 snapshot——chat 不存在时懒创建，防止事件被丢弃。
-    chats.set(agentId, chat ? { ...chat, ...updates } : { ...defaults, ...updates });
+    chats.set(key, chat ? { ...chat, ...updates } : { ...defaults, ...updates });
     set({ chats });
   },
 
@@ -172,7 +182,8 @@ const useAgentStore = create((set, get) => ({
     // 初始历史由 SSE snapshot 提供（single source）。本方法仅 rewind 后 force 重建用。
     if (!force) return;
     const chats = new Map(get().chats);
-    const chat = chats.get(agentId);
+    const key = chatKey(agentId);
+    const chat = chats.get(key);
     if (!chat) return;
     api.log('INFO', `[loadHistory] agent=${agentId} force 重建（rewind）`);
     try {
@@ -180,7 +191,7 @@ const useAgentStore = create((set, get) => ({
       const messages = data.messages || [];
       const turns = historyToTurns(messages);
       api.log('INFO', `[loadHistory] agent=${agentId} REST 返回 ${messages.length} 条，降为 ${turns.length} turns`);
-      chats.set(agentId, {
+      chats.set(key, {
         ...chat,
         turns,
         activeTurn: null,
@@ -196,9 +207,10 @@ const useAgentStore = create((set, get) => ({
 
   loadMoreHistory: async (agentId) => {
     const chats = new Map(get().chats);
-    const chat = chats.get(agentId);
+    const key = chatKey(agentId);
+    const chat = chats.get(key);
     if (!chat || chat.loadingHistory || !chat.hasMore || chat.turns.length === 0) return;
-    chats.set(agentId, { ...chat, loadingHistory: true });
+    chats.set(key, { ...chat, loadingHistory: true });
     set({ chats });
     // 游标取当前最旧 turn 内的真实消息 id（jsonl 里存在的 id）。
     // turns[0].id 可能是 historyToTurns 给孤儿 assistant 造的合成前缀 "turn_…",
@@ -213,9 +225,10 @@ const useAgentStore = create((set, get) => ({
       const messages = data.messages || [];
       const olderTurns = historyToTurns(messages);
       const chats2 = new Map(get().chats);
-      const chat2 = chats2.get(agentId);
+      const key2 = chatKey(agentId);
+      const chat2 = chats2.get(key2);
       if (chat2) {
-        chats2.set(agentId, {
+        chats2.set(key2, {
           ...chat2,
           turns: [...olderTurns, ...chat2.turns],
           hasMore: data.hasMore || false,
@@ -288,9 +301,10 @@ const useAgentStore = create((set, get) => ({
 
   updateChatField: (agentId, updates) => {
     const chats = new Map(get().chats);
-    const chat = chats.get(agentId);
+    const key = chatKey(agentId);
+    const chat = chats.get(key);
     if (!chat) return;
-    chats.set(agentId, { ...chat, ...updates });
+    chats.set(key, { ...chat, ...updates });
     set({ chats });
   },
 
@@ -299,6 +313,11 @@ const useAgentStore = create((set, get) => ({
   getAgent: (agentId) => {
     return get().agents.find(a => a.agentId === agentId);
   },
+
+  /**
+   * 重置 store 到初始状态（多用户：登录/登出/换号时由 App 调，清空上一个用户的 chats）。
+   */
+  reset: () => set({ ...initialState, chats: new Map() }),
 }));
 
 export default useAgentStore;

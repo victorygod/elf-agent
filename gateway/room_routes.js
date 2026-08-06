@@ -230,7 +230,7 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
       if (privateRoomHistory) privateRoomHistory.clear(rid);
       // 清空历史连带清 rewind 栈：checkpoints 是对私聊房历史/记忆的快照，历史清了栈也整体作废。
       const p = req.privateRoom;
-      try { clearCheckpoints(p.agentId, rid); } catch (e) { /* 清栈失败不阻塞清历史 */ }
+      try { clearCheckpoints(p.agentId, rid); } catch (e) { logger.warn(`清 rewind 栈失败 (${rid}): ${e.message}`); }
     } else {
       roomManager.getHistory(rid).clear();
     }
@@ -313,7 +313,8 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
           return res.status(503).json({ error: '你已停用与该 Agent 的私聊' });
         }
         // rewind 快照：写 user 进 jsonl 前打一个"说话前"状态快照包（含 v3 私聊房 history）。
-        try { snapshotBeforeSend(agentId, req.params.rid, content, privateRoomHistoryPath(req.params.rid)); } catch (e) { /* 快照失败不阻塞 */ }
+        try { snapshotBeforeSend(agentId, req.params.rid, content, privateRoomHistoryPath(req.params.rid)); }
+        catch (e) { logger.warn(`打快照失败 (${req.params.rid})，本轮无可回退项: ${e.message}`); }
         let rec = null;
         if (privateRoomHistory) {
           rec = privateRoomHistory.addMessage(req.params.rid, 'user', content);
@@ -431,7 +432,7 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
       fetch(`http://127.0.0.1:${port}/reload/${encodeURIComponent(rid)}`, { method: 'POST' })
         .then(r => r.json().catch(() => ({})))
         .then(() => {})
-        .catch(err => { /* reload 失败不语义阻塞，下条消息自然重载 */ });
+        .catch(err => { logger.warn(`rewind 后 reload 失败 (${rid}): ${err.message}（下条消息自然重载）`); });
     }
     const remaining = listCheckpoints(agentId, rid);
     res.json({ status: 'ok', restoredPrompt: result.restoredPrompt, checkpoints: remaining });
@@ -446,14 +447,15 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
     if (status === 'running') {
       const port = pm?.getAgentPort?.(agentId);
       try { await fetch(`http://127.0.0.1:${port}/clear/${encodeURIComponent(rid)}`, { method: 'POST', signal: AbortSignal.timeout(5000) }); }
-      catch (err) { /* 清内存失败不阻塞，盘上兜底 */ }
+      catch (err) { logger.warn(`清内存失败 (${rid})，走盘上兜底: ${err.message}`); }
     } else {
       // 私聊房记忆目录 = profiles/agents/<id>/rooms/chat-<uid>-<id>/
       const dataDir = agentRoomState(agentId, rid);
       try {
+        fs.mkdirSync(dataDir, { recursive: true });
         const ctx = path.join(dataDir, 'context.json');
         if (fs.existsSync(ctx)) fs.writeFileSync(ctx, '[]', 'utf-8');
-      } catch (e) { /* ignore */ }
+      } catch (e) { logger.warn(`清盘上 context.json 失败 (${rid}): ${e.message}`); }
     }
     // 同时清私聊房 history
     if (privateRoomHistory) privateRoomHistory.clear(rid);

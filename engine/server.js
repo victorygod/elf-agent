@@ -257,7 +257,7 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
     let count = 0;
     if (m) {
       for (const room of m.values()) {
-        try { room.agent.abort(); count++; } catch (e) { /* 单个房 abort 失败不阻塞其余 */ }
+        try { room.agent.abort(); count++; } catch (e) { logger.warn(`abort 房间失败: ${e.message}`); }
       }
     }
     res.json({ status: 'ok', aborted: count });
@@ -318,7 +318,7 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
       const emit = async (event) => {
         const data = `event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`;
         for (const r of currentResponses) {
-          try { if (!r.write(data)) await new Promise(rs => r.once('drain', rs)); } catch (e) { /* 流可能已关闭 */ }
+          try { if (!r.write(data)) await new Promise(rs => r.once('drain', rs)); } catch (e) { logger.warn(`SSE 写入失败（流可能已关闭）: ${e.message}`); }
         }
         // 同时经 /events 转发（带 roomId），让 gateway 新路径也能收到，且不丢旧 SSE 直写。
         serverPushEvent(event.event, { ...(event.data || {}), _roomId: defaultRoom.roomId });
@@ -333,7 +333,7 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
         logger.error(`请求处理失败: ${err.message}`);
         for (const r of currentResponses) {
           if (!r.headersSent) { r.writeHead(500, { 'Content-Type': 'application/json' }); r.end(JSON.stringify({ error: err.message })); }
-          else { try { r.write(`event: error\ndata: ${JSON.stringify({ message: err.message })}\n\n`); r.end(); } catch (e) {} }
+          else { try { r.write(`event: error\ndata: ${JSON.stringify({ message: err.message })}\n\n`); r.end(); } catch (e) { logger.warn(`SSE 错误事件写入失败: ${e.message}`); } }
         }
       } finally {
         isProcessing = false;
@@ -348,7 +348,7 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
       if (modelConfig.provider !== 'mock') {
         const missing = config.getModelMissingFields();
         if (missing) {
-          try { config.load(); } catch (e) {}
+          try { config.load(); } catch (e) { logger.warn(`配置重载失败: ${e.message}`); }
           const missingAfterReload = config.getModelMissingFields();
           if (missingAfterReload) {
             res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
@@ -412,11 +412,11 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
     if (typeof a.messageManager._cleanupToolResults === 'function') a.messageManager._cleanupToolResults();
     else if (a.messageManager.dataDir) {
       const trDir = path.join(a.messageManager.dataDir, 'tool-results');
-      try { if (fs.existsSync(trDir)) fs.rmSync(trDir, { recursive: true, force: true }); } catch (e) {}
+      try { if (fs.existsSync(trDir)) fs.rmSync(trDir, { recursive: true, force: true }); } catch (e) { logger.warn(`清 tool-results 失败 ${trDir}: ${e.message}`); }
     }
     if (a.runContext?.dataDir) {
       const cursorFile = path.join(a.runContext.dataDir, 'sync_cursor.json');
-      try { if (fs.existsSync(cursorFile)) fs.unlinkSync(cursorFile); } catch (e) {}
+      try { if (fs.existsSync(cursorFile)) fs.unlinkSync(cursorFile); } catch (e) { logger.warn(`清 sync_cursor 失败 ${cursorFile}: ${e.message}`); }
     }
     if (scene && Array.isArray(scene._buffer)) { scene._buffer.length = 0; scene._bufferHasMention = false; }
     if (typeof a.clearRuntime === 'function') a.clearRuntime();   // DM agent 等清运行时文档（rm runtime + re-seed）
@@ -447,7 +447,7 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
     const dataDir = room.agent.messageManager.dataDir || room.runContext?.dataDir;
     if (dataDir) {
       const trDir = path.join(dataDir, 'tool-results');
-      try { if (fs.existsSync(trDir)) fs.rmSync(trDir, { recursive: true, force: true }); } catch (e) {}
+      try { if (fs.existsSync(trDir)) fs.rmSync(trDir, { recursive: true, force: true }); } catch (e) { logger.warn(`reload 清 tool-results 失败 ${trDir}: ${e.message}`); }
     }
     logger.info(`RoomState[${room.roomId}] 已 reload context + 清 tool-results`);
   }

@@ -11,7 +11,8 @@ import path from 'path';
 export function readCpMeta(cpDir) {
   try {
     return JSON.parse(fs.readFileSync(path.join(cpDir, 'meta.json'), 'utf-8'));
-  } catch {
+  } catch (e) {
+    console.warn(`[checkpoint-meta] 读 ${cpDir}/meta.json 失败: ${e.message}`);
     return null;
   }
 }

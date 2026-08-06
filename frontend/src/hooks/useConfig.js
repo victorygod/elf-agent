@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import * as api from '../api/index.js';
 import useAgentStore from '../stores/agentStore';
+import { getAgentManifest } from '../pluginRegistry';
 
 /**
  * useConfig — 配置面板操作 hook
@@ -46,8 +47,9 @@ export default function useConfig() {
           }
 
           setFormData(initial);
-          // 设置默认选项卡
-          const tabs = data.layout?.tabs || buildDefaultTabs();
+          // 设置默认选项卡（manifest 优先——config-ui.json 废弃后 layout 恒 null，取 manifest 首个 tab）
+          const manifestTabs = getAgentManifest(configAgentId)?.config?.tabs;
+          const tabs = manifestTabs || data.layout?.tabs || buildDefaultTabs();
           if (tabs.length > 0) setActiveTab(tabs[0].key);
         }
       }).catch(() => {});

@@ -68,7 +68,7 @@ export const SetObserveConfig = {
     // 兜底：无 scene（纯工具测试用）——自行写文件，不合并名字
     const filePath = path.join(rc.dataDir, 'observe_status.json');
     let cur = {};
-    try { if (fs.existsSync(filePath)) cur = JSON.parse(fs.readFileSync(filePath, 'utf-8')); } catch (e) {}
+    try { if (fs.existsSync(filePath)) cur = JSON.parse(fs.readFileSync(filePath, 'utf-8')); } catch (e) { console.warn(`[SetObserveConfig] 读 ${filePath} 失败: ${e.message}`); }
     delete cur.silentRetries;
     const cleaned = (Array.isArray(args?.keywords) ? args.keywords : [])
       .map(k => String(k ?? '').trim())

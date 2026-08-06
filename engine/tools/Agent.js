@@ -125,7 +125,7 @@ export const Agent = {
     } finally {
       if (signal) signal.removeEventListener('abort', onParentAbort);
       // 跑完清临时目录（L1 tool-results + context.json，不污染主 agent data/）
-      try { fs.rmSync(subDataDir, { recursive: true, force: true }); } catch (_) {}
+      try { fs.rmSync(subDataDir, { recursive: true, force: true }); } catch (e) { console.warn(`[Agent tool] 清子 agent 临时目录失败 ${subDataDir}: ${e.message}`); }
     }
 
     return finalText;

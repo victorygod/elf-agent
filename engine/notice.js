@@ -12,6 +12,9 @@
  * @param {{ kind:'retry'|'error'|'info', agentId:string, memberName?:string, attempt?:number, maxRetries?:number, error?:string, final?:boolean }} fields
  */
 import { internalAuthHeaders } from '../shared/internal_auth.js';
+import { createLogger } from '../shared/logger.js';
+
+const logger = createLogger('notice');
 
 export function sendNotice(ctx, fields) {
   try {
@@ -31,7 +34,7 @@ export function sendNotice(ctx, fields) {
         headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': rc.agentId, ...internalAuthHeaders() },
         body,
         // 不传 signal：notice 不应被 abort 信号取消（即便用户中断，已发的重试提示仍可见）。
-      }).catch(() => {});
+      }).catch((e) => { logger.warn(`群聊 notice 发送失败: ${e.message}`); });
       return;
     }
     // 私聊：走 emit（reasoning 同款 channel），经 _onAgentEvent chat- 前缀转发到私聊 SSE。
@@ -39,7 +42,8 @@ export function sendNotice(ctx, fields) {
     if (typeof emit === 'function') {
       emit({ event: 'notice', data: { ...fields, memberName: fields.memberName || rc?.agentId || fields.agentId } });
     }
-  } catch {
-    /* swallow: notice 不影响主流程 */
+  } catch (e) {
+    // notice 是"尽力而为"的 UI 提示，失败不影响主流程，但必须留痕
+    logger.warn(`notice 发送异常: ${e.message}`);
   }
 }

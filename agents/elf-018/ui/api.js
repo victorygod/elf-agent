@@ -9,7 +9,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { buildMetadata } from '../../../shared/agents/elf-018/buildMetadata.js';
-import { parseFrontmatter } from '../../../engine/skills/parser.js';
+import { parseFrontmatter, stripFence } from '../../../engine/skills/parser.js';
 import { LLMModel } from '../../../engine/models/llm.js';
 import { agentRoomState, roomsRoot } from '../../../shared/profiles_paths.js';
 import { createLogger } from '../../../shared/logger.js';
@@ -67,10 +67,101 @@ export default function register(pm, agentId, opts = {}) {
     return `chat-${req.user.uid}-${agentId}`;
   }
 
+  // ===== setup 临时目录（1b：初始设定在临时目录编辑，开始游戏才 commit 到正式 runtime/lore）=====
+  /** setup 临时目录：<房数据目录>/setup（lore/ 与正式 runtime/lore 同构；opening.md 开场白为 setup/seeds 特有，不 commit 进 lore）。 */
+  function setupDir(req) {
+    return path.join(roomDataDir(req), 'setup');
+  }
+  /** setup 临时 lore 根：<setup>/lore。 */
+  function setupLoreDir(req) {
+    return path.join(setupDir(req), 'lore');
+  }
+  /** 按 mode 选 lore 根：'setup' → setup 临时目录；否则正式 runtime/lore。 */
+  function loreRootDir(req, mode) {
+    return mode === 'setup' ? setupLoreDir(req) : path.join(roomDataDir(req), 'runtime', 'lore');
+  }
+  /** 从 seeds 物化 setup 临时目录：仅当目录不存在时生成；存在则保留旧内容（rewind 回 setup 后继续编辑）。 */
+  function ensureSetupLore(req) {
+    const dest = setupLoreDir(req);
+    if (fs.existsSync(dest)) return dest;
+    fs.mkdirSync(dest, { recursive: true });
+    if (fs.existsSync(seedsDir)) {
+      try { _copyDir(seedsDir, dest); } catch (e) { logger.warn(`[setup] seeds 物化失败: ${e.message}`); }
+    }
+    return dest;
+  }
+  /** 开场白文件路径：<setup>/opening.md；seeds 里有 opening.md 则作为初始模板，否则前端默认值。 */
+  function openingFilePath(req) {
+    return path.join(setupDir(req), 'opening.md');
+  }
+
+  // ===== GET /setup — setup 状态（开场白 + lore 列表 + userProfile；目录不存在先从 seeds 物化）=====
+  const getSetup = async (req, res) => {
+    ensureSetupLore(req);
+    const out = {};
+    // 开场白：读 <setup>/opening.md；缺失时若 seeds 有模板则物化并返回模板，否则返回前端默认值「出发吧」
+    const opPath = openingFilePath(req);
+    if (fs.existsSync(opPath)) {
+      out.opening = fs.readFileSync(opPath, 'utf-8').trim();
+    } else if (fs.existsSync(path.join(seedsDir, '..', 'opening.md'))) {
+      const seedOp = fs.readFileSync(path.join(seedsDir, '..', 'opening.md'), 'utf-8');
+      fs.writeFileSync(opPath, seedOp, 'utf-8');
+      out.opening = seedOp.trim();
+    } else {
+      out.opening = '';
+    }
+    // lore 列表 + userProfile（setup 目录）
+    const loreDir = setupLoreDir(req);
+    for (const type of ['characters', 'items', 'locations', 'skills', 'quests']) {
+      const typeDir = path.join(loreDir, type);
+      const files = [];
+      try {
+        for (const f of fs.readdirSync(typeDir).filter(x => x.endsWith('.md'))) {
+          const txt = fs.readFileSync(path.join(typeDir, f), 'utf-8');
+          const { frontmatter, body } = parseFrontmatter(txt);
+          files.push({
+            filename: f,
+            name: f.replace(/\.md$/, ''),
+            description: (frontmatter.description || '').trim(),
+            body: body.trim(),
+          });
+        }
+      } catch (e) { if (e?.code !== 'ENOENT') logger.warn(`[setup] 读 ${typeDir} 失败: ${e.message}`); }
+      out[type] = files;
+    }
+    const upPath = path.join(loreDir, 'user_profile.md');
+    try {
+      const txt = fs.readFileSync(upPath, 'utf-8');
+      const { frontmatter, body } = parseFrontmatter(txt);
+      out.userProfile = {
+        name: (frontmatter.name || '').trim(),
+        description: (frontmatter.description || '').trim(),
+        body: body.trim(),
+      };
+    } catch (e) {
+      if (e?.code !== 'ENOENT') logger.warn(`[setup] 读 ${upPath} 失败: ${e.message}`);
+      out.userProfile = null;
+    }
+    res.json(out);
+  };
+
+  // ===== PUT /setup/opening — 固化开场白到 <setup>/opening.md =====
+  const saveOpening = async (req, res) => {
+    const { opening } = req.body || {};
+    try {
+      fs.mkdirSync(setupDir(req), { recursive: true });
+      fs.writeFileSync(openingFilePath(req), String(opening ?? ''), 'utf-8');
+      res.json({ ok: true });
+    } catch (e) {
+      logger.error(`[setup] 开场白写盘失败 ${roomIdOf(req)}: ${e.message}`);
+      res.status(500).json({ error: e.message });
+    }
+  };
+
   // ===== GET /game-state =====
   const gameState = async (req, res) => {
     const loreDir = path.join(roomDataDir(req), 'runtime', 'lore');
-    const readFull = (p) => { try { return fs.readFileSync(p, 'utf-8'); } catch { return ''; } };
+    const readFull = (p) => { try { return fs.readFileSync(p, 'utf-8'); } catch (e) { if (e?.code !== 'ENOENT') logger.warn(`[game-state] 读 ${p} 失败: ${e.message}`); return ''; } };
     const scan = (sub) => {
       const dir = path.join(loreDir, sub);
       const out = [];
@@ -80,7 +171,7 @@ export default function register(pm, agentId, opts = {}) {
           const e = parseFm(txt);
           if (e) out.push({ ...e, content: txt, path: path.join(dir, f) });
         }
-      } catch {}
+      } catch (e) { if (e?.code !== 'ENOENT') logger.warn(`[game-state] 扫 ${dir} 失败: ${e.message}`); }
       return out;
     };
 
@@ -118,7 +209,7 @@ export default function register(pm, agentId, opts = {}) {
           isDefault: f === DEFAULT_STYLE_FILE,
         });
       }
-    } catch {}
+    } catch (e) { if (e?.code !== 'ENOENT') logger.warn(`[styles] 列 ${dir} 失败: ${e.message}`); }
     res.json({ styles: out, defaultFile: DEFAULT_STYLE_FILE });
   };
 
@@ -151,7 +242,7 @@ export default function register(pm, agentId, opts = {}) {
     if (!fs.existsSync(oldPath)) return res.status(404).json({ error: oldFile + ' 不存在' });
     if (newFile !== oldFile && fs.existsSync(newPath)) return res.status(409).json({ error: '目标名 ' + newFile + ' 已存在' });
     fs.writeFileSync(newPath, assembleStyleFile(description, body), 'utf-8');
-    if (newFile !== oldFile) { try { fs.rmSync(oldPath, { force: true }); } catch {} }
+    if (newFile !== oldFile) { try { fs.rmSync(oldPath, { force: true }); } catch (e) { logger.warn(`[styles] 删旧文件失败 ${oldPath}: ${e.message}`); } }
     res.json({ ok: true, filename: newFile });
   };
 
@@ -168,15 +259,16 @@ export default function register(pm, agentId, opts = {}) {
   // ===== seeds 读取 =====
   const seedsDir = path.join(pm.agentsDir, agentId, 'config', 'seeds', 'lore');
 
-  /** 递归读取 seeds 目录，返回每个 lore 类型的种子列表 */
+  /** 读取 setup 临时目录（不存在则先从 seeds 物化），返回每个 lore 类型的条目 + userProfile。 */
   const getSeeds = async (req, res) => {
+    const dir = ensureSetupLore(req);
     const out = {};
     for (const type of ['characters', 'items', 'locations', 'skills', 'quests']) {
-      const dir = path.join(seedsDir, type);
+      const typeDir = path.join(dir, type);
       const files = [];
       try {
-        for (const f of fs.readdirSync(dir).filter(x => x.endsWith('.md'))) {
-          const txt = fs.readFileSync(path.join(dir, f), 'utf-8');
+        for (const f of fs.readdirSync(typeDir).filter(x => x.endsWith('.md'))) {
+          const txt = fs.readFileSync(path.join(typeDir, f), 'utf-8');
           const { frontmatter, body } = parseFrontmatter(txt);
           files.push({
             filename: f,
@@ -185,11 +277,11 @@ export default function register(pm, agentId, opts = {}) {
             body: body.trim(),
           });
         }
-      } catch {}
+      } catch (e) { if (e?.code !== 'ENOENT') logger.warn(`[setup] 读 ${typeDir} 失败: ${e.message}`); }
       out[type] = files;
     }
-    // 读 user_profile 种子模板
-    const upPath = path.join(seedsDir, 'user_profile.md');
+    // 读 user_profile 模板（setup 临时目录内）
+    const upPath = path.join(dir, 'user_profile.md');
     try {
       const txt = fs.readFileSync(upPath, 'utf-8');
       const { frontmatter, body } = parseFrontmatter(txt);
@@ -198,7 +290,8 @@ export default function register(pm, agentId, opts = {}) {
         description: (frontmatter.description || '').trim(),
         body: body.trim(),
       };
-    } catch {
+    } catch (e) {
+      if (e?.code !== 'ENOENT') logger.warn(`[setup] 读 ${upPath} 失败: ${e.message}`);
       out.userProfile = null;
     }
     res.json(out);
@@ -207,12 +300,17 @@ export default function register(pm, agentId, opts = {}) {
   // ===== 记录集通用工具（lore 实体，文件名含中文等字符）=====
   const LORE_TYPES = new Set(['characters', 'items', 'locations', 'skills', 'quests']);
 
-  function loreDirOf(req, type) {
-    return path.join(roomDataDir(req), 'runtime', 'lore', type);
+  function loreDirOf(req, type, mode) {
+    return path.join(loreRootDir(req, mode), type);
   }
 
-  function safeLorePath(req, type, fileName) {
-    const root = path.resolve(loreDirOf(req, type));
+  /** 从 query/body 解析 mode：'setup' → 编辑 setup 临时目录；否则正式 runtime/lore。 */
+  function resolveMode(req) {
+    return (req.query?.mode || req.body?.mode || '') === 'setup' ? 'setup' : '';
+  }
+
+  function safeLorePath(req, type, fileName, mode) {
+    const root = path.resolve(loreDirOf(req, type, mode));
     const resolved = path.resolve(root, fileName);
     if (resolved !== root && !resolved.startsWith(root + path.sep)) {
       throw Object.assign(new Error('path escape detected'), { statusCode: 400 });
@@ -229,7 +327,9 @@ export default function register(pm, agentId, opts = {}) {
   const listLore = async (req, res) => {
     const type = req.params.type;
     if (!LORE_TYPES.has(type)) return res.status(400).json({ error: '无效的 lore 类型' });
-    const dir = loreDirOf(req, type);
+    const mode = resolveMode(req);
+    if (mode === 'setup') ensureSetupLore(req);
+    const dir = loreDirOf(req, type, mode);
     const out = [];
     try {
       for (const f of fs.readdirSync(dir).filter(x => x.endsWith('.md') && !x.endsWith('.prev.md')).sort()) {
@@ -242,7 +342,7 @@ export default function register(pm, agentId, opts = {}) {
           body: body.trim(),
         });
       }
-    } catch {}
+    } catch (e) { if (e?.code !== 'ENOENT') logger.warn(`[lore] 列 ${dir} 失败: ${e.message}`); }
     res.json({ entities: out });
   };
 
@@ -250,14 +350,15 @@ export default function register(pm, agentId, opts = {}) {
   const createLore = async (req, res) => {
     const type = req.params.type;
     if (!LORE_TYPES.has(type)) return res.status(400).json({ error: '无效的 lore 类型' });
+    const mode = resolveMode(req);
     const { name, description, body } = req.body || {};
     if (!name || !String(name).trim()) return res.status(400).json({ error: 'name 必填' });
     // 文件名规范化：中英文数字下划线连字符点
     const fileName = name.trim().replace(/[^\w.一-鿿-]/g, '_') + '.md';
     let p;
-    try { p = safeLorePath(req, type, fileName); } catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
+    try { p = safeLorePath(req, type, fileName, mode); } catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
     if (fs.existsSync(p)) return res.status(409).json({ error: '已存在同名文件' });
-    fs.mkdirSync(loreDirOf(req, type), { recursive: true });
+    fs.mkdirSync(loreDirOf(req, type, mode), { recursive: true });
     fs.writeFileSync(p, assembleLoreFile(name.trim(), description, body), 'utf-8');
     res.json({ ok: true, filename: fileName });
   };
@@ -266,17 +367,18 @@ export default function register(pm, agentId, opts = {}) {
   const updateLore = async (req, res) => {
     const type = req.params.type;
     if (!LORE_TYPES.has(type)) return res.status(400).json({ error: '无效的 lore 类型' });
+    const mode = resolveMode(req);
     const oldFile = req.params.filename;
     const { name, description, body } = req.body || {};
     if (!name || !String(name).trim()) return res.status(400).json({ error: 'name 必填' });
     const newFileName = name.trim().replace(/[^\w.一-鿿-]/g, '_') + '.md';
     let oldPath, newPath;
-    try { oldPath = safeLorePath(req, type, oldFile); newPath = safeLorePath(req, type, newFileName); }
+    try { oldPath = safeLorePath(req, type, oldFile, mode); newPath = safeLorePath(req, type, newFileName, mode); }
     catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
     if (!fs.existsSync(oldPath)) return res.status(404).json({ error: oldFile + ' 不存在' });
     if (newFileName !== oldFile && fs.existsSync(newPath)) return res.status(409).json({ error: '目标名 ' + newFileName + ' 已存在' });
     fs.writeFileSync(newPath, assembleLoreFile(name.trim(), description, body), 'utf-8');
-    if (newFileName !== oldFile) { try { fs.rmSync(oldPath, { force: true }); } catch {} }
+    if (newFileName !== oldFile) { try { fs.rmSync(oldPath, { force: true }); } catch (e) { logger.warn(`[lore] 删旧文件失败 ${oldPath}: ${e.message}`); } }
     res.json({ ok: true, filename: newFileName });
   };
 
@@ -284,9 +386,10 @@ export default function register(pm, agentId, opts = {}) {
   const deleteLore = async (req, res) => {
     const type = req.params.type;
     if (!LORE_TYPES.has(type)) return res.status(400).json({ error: '无效的 lore 类型' });
+    const mode = resolveMode(req);
     const f = req.params.filename;
     let p;
-    try { p = safeLorePath(req, type, f); } catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
+    try { p = safeLorePath(req, type, f, mode); } catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
     try { fs.rmSync(p, { force: true }); res.json({ ok: true }); }
     catch (e) { res.status(500).json({ error: e.message }); }
   };
@@ -294,8 +397,12 @@ export default function register(pm, agentId, opts = {}) {
   // ===== PUT /user-profile — 写主角面板（name + body，全量覆盖）=====
   const updateUserProfile = async (req, res) => {
     const { name, body } = req.body || {};
-    const protPath = path.join(roomDataDir(req), 'runtime', 'lore', 'user_profile.md');
+    const mode = resolveMode(req);
+    const protDir = loreRootDir(req, mode);
+    const protPath = path.join(protDir, 'user_profile.md');
     try {
+      // 先确保目录存在再写（setup 首次失焦保存 / runtime 尚未建目录时都会 ENOENT）
+      fs.mkdirSync(protDir, { recursive: true });
       let txt = '';
       if (fs.existsSync(protPath)) txt = fs.readFileSync(protPath, 'utf-8');
       const nameVal = String(name ?? '').trim();
@@ -377,7 +484,7 @@ export default function register(pm, agentId, opts = {}) {
       try {
         const outlineDir = path.join(memoryDir, 'runtime', 'outline');
         round = fs.readdirSync(outlineDir).filter(f => /^round-[1-9]\d*\.md$/.test(f)).length;
-      } catch {}
+      } catch (e) { if (e?.code !== 'ENOENT') logger.warn(`[save] 数 outline 轮次失败: ${e.message}`); }
       fs.writeFileSync(path.join(dest, 'meta.json'), JSON.stringify({
         name: saveName,
         round,
@@ -403,7 +510,7 @@ export default function register(pm, agentId, opts = {}) {
           try {
             const meta = JSON.parse(fs.readFileSync(path.join(full, 'meta.json'), 'utf-8'));
             round = meta.round || 0;
-          } catch {}
+          } catch (e) { if (e?.code !== 'ENOENT') logger.warn(`[saves] 读存档元信息失败 ${full}: ${e.message}`); }
           out.push({
             name: entry,
             createdAt: stat.birthtimeMs || stat.mtimeMs,
@@ -411,7 +518,7 @@ export default function register(pm, agentId, opts = {}) {
           });
         }
       }
-    } catch {}
+    } catch (e) { if (e?.code !== 'ENOENT') logger.warn(`[saves] 列存档失败: ${e.message}`); }
     out.sort((a, b) => b.createdAt - a.createdAt);
     res.json({ saves: out });
   };
@@ -500,6 +607,7 @@ export default function register(pm, agentId, opts = {}) {
 
 输出格式：
 - 完整的 Markdown 文件（含 frontmatter，frontmatter 含 name、description）
+- **直接输出 Markdown 原文，以 \`---\` 开头；禁止用 \`\`\` 代码块包裹输出（禁止 \`\`\`markdown 开头/结尾）**
 - 正文直接写内容，不要标题行（# xxx 一律不写）
 - 不额外解释`;
 
@@ -521,7 +629,7 @@ export default function register(pm, agentId, opts = {}) {
         if (excludeName && (frontmatter.name || '').trim() === excludeName) continue;   // 排除自身
         out.push({ filename: f, content: txt });
       }
-    } catch {}
+    } catch (e) { if (e?.code !== 'ENOENT') logger.warn(`[polish] 采样 ${dir} 失败: ${e.message}`); }
     return out;
   }
 
@@ -534,18 +642,20 @@ export default function register(pm, agentId, opts = {}) {
 
     logger.info(`[polish] 开始 agent=${agentId} type=${type} name=${name} desc.len=${(description||'').length} body.len=${(body||'').length}`);
     try {
-      const loreDir = path.join(roomDataDir(req), 'runtime', 'lore');
+      const mode = resolveMode(req);
+      if (mode === 'setup') ensureSetupLore(req);
+      const loreDir = loreRootDir(req, mode);
 
       // 1. 读 system_prompt
       const sysPrompt = (() => {
         try { return fs.readFileSync(path.join(pm.agentsDir, agentId, 'config', 'system_prompt.md'), 'utf-8'); }
-        catch { return ''; }
+        catch (e) { if (e?.code !== 'ENOENT') logger.warn(`[polish] 读 system_prompt 失败: ${e.message}`); return ''; }
       })();
 
       // 2. 读 user_profile
       const userProfile = (() => {
         try { return fs.readFileSync(path.join(loreDir, 'user_profile.md'), 'utf-8'); }
-        catch { return ''; }
+        catch (e) { if (e?.code !== 'ENOENT') logger.warn(`[polish] 读 user_profile 失败: ${e.message}`); return ''; }
       })();
 
       // 3. 各类型交叉参考（每类 ≤2，排除自身）
@@ -590,9 +700,10 @@ export default function register(pm, agentId, opts = {}) {
       ]);
       logger.info(`[polish] LLM 返回 len=${(llmOutput||'').length}`);
 
-      // 7. parse frontmatter；name 由 modal 保留原值（前端不取 LLM 的 name），故不校验、不拒绝
+      // 7. parse frontmatter；name 由 modal 保留原值（前端不取 LLM 的 name），故不校验、不拒绝。
+      //   LLM 输出可能被 ```markdown 代码块包裹 → 先 stripFence 剥围栏再解析（否则整段被当正文）。
       //   llmBody 与外层 body（用户草稿）同名会触发 TDZ，改名 llmBody 消歧
-      const { frontmatter, body: llmBody } = parseFrontmatter(llmOutput);
+      const { frontmatter, body: llmBody } = parseFrontmatter(stripFence(llmOutput));
       const genName = (frontmatter.name || '').trim();
       if (genName && genName !== String(name).trim()) {
         logger.info(`[polish] AI 改名 复写 原=${name} 生成=${genName}（已忽略，用原名）`);
@@ -603,6 +714,24 @@ export default function register(pm, agentId, opts = {}) {
       res.json({ ok: true, description: outDesc, body: outBody });
     } catch (e) {
       logger.error(`[polish] 失败 agent=${agentId} type=${type} name=${name}: ${e.message}`);
+      res.status(500).json({ error: e.message });
+    }
+  };
+
+  // ===== POST /setup/commit — 开始游戏前：把 setup 临时目录复制到正式 runtime/lore =====
+  //   临时目录保留（rewind 回第一步进 setup 时继续展示旧内容，无需重新从 seeds 生成）。
+  const commitSetup = async (req, res) => {
+    const src = setupLoreDir(req);
+    const dest = path.join(roomDataDir(req), 'runtime', 'lore');
+    try {
+      if (!fs.existsSync(src)) return res.status(400).json({ error: '暂无设定内容，请先完成初始设定' });
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      if (fs.existsSync(dest)) fs.rmSync(dest, { recursive: true, force: true });
+      _copyDir(src, dest);
+      logger.info(`[setup] ${roomIdOf(req)} commit 完成（${src} → ${dest}）`);
+      res.json({ ok: true });
+    } catch (e) {
+      logger.error(`[setup] commit 失败 ${roomIdOf(req)}: ${e.message}`);
       res.status(500).json({ error: e.message });
     }
   };
@@ -624,5 +753,8 @@ export default function register(pm, agentId, opts = {}) {
     { method: 'POST',   path: '/load-save',             handler: loadSave },
     { method: 'DELETE', path: '/save/:name',            handler: deleteSave },
     { method: 'POST',   path: '/polish-lore',           handler: polishLore },
+    { method: 'GET',    path: '/setup',                 handler: getSetup },
+    { method: 'PUT',    path: '/setup/opening',         handler: saveOpening },
+    { method: 'POST',   path: '/setup/commit',          handler: commitSetup },
   ];
 }

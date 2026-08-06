@@ -75,6 +75,10 @@ export function snapshotBeforeSend(agentId, roomId, prompt, roomHistoryPath) {
   const contextFile = path.join(dataDir, 'context.json');
   const toolResultsDir = path.join(dataDir, 'tool-results');
 
+  // ★ 先确保数据目录存在再写：首条消息时 agent-server 尚未收到 /observe（RoomState 懒创建），
+  //   目录可能还不存在，直接 writeFileSync 会 ENOENT（旧 bug：首条消息永远打不出快照 → rewind 无选项）。
+  fs.mkdirSync(dataDir, { recursive: true });
+
   // 【改动1】首次对话也打快照：如果 context.json 不存在，先创建空文件再 snapshot
   //   （agent 记忆的 history.jsonl 已废用——room 模式聊天内容落 profiles/rooms/<id>/history.jsonl，
   //    memory 内不再有 history 这条腿，snapshot/rewind 不再触碰它。）
@@ -211,6 +215,8 @@ export function rewindTo(agentId, roomId, checkpointId, roomHistoryPathOpt) {
   const dataDir = _dataDir(agentId, roomId);
   const roomHistoryPath = roomHistoryPathOpt || null;
   try {
+    // 防御：确保目标目录存在（快照在 dataDir 内，正常必有；缺失时避免 copyFileSync ENOENT）
+    fs.mkdirSync(dataDir, { recursive: true });
     // 1. 整份覆盖 context.json + sync_cursor.json
     const cpContext = path.join(targetCpDir, 'context.json');
     if (fs.existsSync(cpContext)) {

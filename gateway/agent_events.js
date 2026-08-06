@@ -81,7 +81,7 @@ export function connectAgentEvents(agentId, port, onEvent, onDisconnect) {
                 try {
                   const data = JSON.parse(trimmed.slice(6));
                   onEvent(currentEvent, data);
-                } catch (e) { /* ignore parse error */ }
+                } catch (e) { logger.warn(`[events] Agent ${agentId} 事件 JSON 解析失败: ${e.message}`); }
               } else if (trimmed === '') {
                 currentEvent = '';
               }

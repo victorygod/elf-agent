@@ -72,7 +72,7 @@ export function makeEdit(agent) {
               const pc = fs.readFileSync(profilePath, 'utf-8');
               protagonistName = parseFrontmatterName(pc);
             }
-          } catch {}
+          } catch (e) { console.warn(`[Edit] 读主角面板失败 ${profilePath}: ${e.message}`); }
           if (protagonistName && editedName === protagonistName) {
             return `Error: 主角（${protagonistName}）已在 ${agent._protagonistFile} 中管理，禁止编辑 characters/ 下的主角角色卡`;
           }

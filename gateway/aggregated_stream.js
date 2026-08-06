@@ -104,11 +104,11 @@ export class AggregatedBroadcaster {
         if (!isRoomEnabledForUser(user.uid, a.agentId)) continue;   // 用户停用了自己的私聊 → 不订阅
         rooms.push({ roomId: `chat-${user.uid}-${a.agentId}`, type: 'chat' });
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) { logger.warn(`聚合订阅：列 running agent 失败: ${e.message}`); }
     try {
       const groupRooms = this._roomManager.listRooms?.() || [];
       for (const r of groupRooms) rooms.push({ roomId: r.roomId, type: 'room' });
-    } catch (e) { /* ignore */ }
+    } catch (e) { logger.warn(`聚合订阅：列群聊失败: ${e.message}`); }
     return rooms;
   }
 
@@ -146,7 +146,7 @@ export class AggregatedBroadcaster {
     if (info.type === 'chat') {
       removePrivateSubscriber(roomId, res);
     } else if (info.handle) {
-      try { this._roomManager.getBroadcaster(roomId)?.removeSubscriber(info.handle); } catch (e) { /* ignore */ }
+      try { this._roomManager.getBroadcaster(roomId)?.removeSubscriber(info.handle); } catch (e) { logger.warn(`移除群订阅失败 (${roomId}): ${e.message}`); }
     }
     subs?.delete(roomId);
   }

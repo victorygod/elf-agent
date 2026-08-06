@@ -149,7 +149,7 @@ export class RoomPlugin extends ScenePlugin {
         this._agentNames.set(room.userUid, room.userName);
         this._agentNames.set(room.userName, room.userName);
       }
-    } catch (err) { /* 不阻断 */ }
+    } catch (err) { this._logger()?.warn?.(`_refreshRoster 失败: ${err.message}`); }
     // roster 刷新后保证 observe_status.json 存在 + 名字底料（改名热同步）
     this._ensureObserveStatus();
   }
@@ -272,7 +272,7 @@ export class RoomPlugin extends ScenePlugin {
     try {
       const fp = path.join(dir, OBSERVE_STATUS_FILE);
       if (fs.existsSync(fp)) return JSON.parse(fs.readFileSync(fp, 'utf-8')) || {};
-    } catch (e) { /* 容错 */ }
+    } catch (e) { this._logger()?.warn?.(`读 observe_status.json 失败: ${e.message}`); }
     return {};
   }
 
@@ -347,7 +347,7 @@ export class RoomPlugin extends ScenePlugin {
         const lastSlash = k.lastIndexOf('/');
         const pattern = k.slice(1, lastSlash);
         const flags = k.slice(lastSlash + 1);
-        try { if (new RegExp(pattern, flags).test(text)) return true; } catch (e) { /* 坏正则降级子串 */ }
+        try { if (new RegExp(pattern, flags).test(text)) return true; } catch (e) { this._logger()?.warn?.(`观测关键词坏正则（降级子串匹配）: ${k}`); }
       }
       if (text.includes(k)) return true;
     }

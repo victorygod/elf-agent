@@ -22,7 +22,7 @@ import { handleAvatarUpload } from './avatar.js';
 import { registerRoomRoutes } from './room_routes.js';
 import { createAgentFromTemplate } from './agent_scaffold.js';
 import { registerAgentAPIs } from './plugin-loader.js';
-import { createAuthRouter, setJwtSecret, saveUser, setRoomEnabledForUser } from './auth.js';
+import { createAuthRouter, setJwtSecret, saveUser, setRoomEnabledForUser, changeUserPassword } from './auth.js';
 import { createAuthMiddleware, requireAdmin } from './auth_middleware.js';
 import { userDir } from '../shared/profiles_paths.js';
 import {
@@ -358,7 +358,7 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
       const dir = userDir(u.uid);
       for (const ext of ['png', 'jpg', 'gif', 'webp']) {
         const f = path.join(dir, `avatar.${ext}`);
-        if (fs.existsSync(f)) { try { fs.unlinkSync(f); } catch (e) { /* ignore */ } }
+        if (fs.existsSync(f)) { try { fs.unlinkSync(f); } catch (e) { logger.warn(`删旧头像失败 ${f}: ${e.message}`); } }
       }
       u.userAvatar = null;
     }
@@ -371,6 +371,16 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
     }
     saveUser(u);
     res.json({ userName: u.userName, userAvatar: u.userAvatar ?? null, userUid: u.uid, role: u.role, sidebarOrder: u.sidebarOrder });
+  });
+
+  // 修改密码（校验旧密码；前端成功后清 token 强制重新登录）
+  app.put('/settings/password', (req, res) => {
+    const u = req.user;
+    if (!u) return res.status(401).json({ error: '未登录' });
+    const { oldPassword, newPassword } = req.body || {};
+    const result = changeUserPassword(u.uid, oldPassword, newPassword);
+    if (result.error) return res.status(result.statusCode || 400).json({ error: result.error });
+    res.json({ status: 'ok' });
   });
 
   // 侧栏排序：单独端点保存，避免与 PUT /settings 的校验耦合
@@ -411,7 +421,7 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
       for (const oldExt of ['png', 'jpg', 'gif', 'webp']) {
         const oldFile = path.join(dir, `avatar.${oldExt}`);
         if (fs.existsSync(oldFile)) {
-          try { fs.unlinkSync(oldFile); } catch (e) { /* ignore */ }
+          try { fs.unlinkSync(oldFile); } catch (e) { logger.warn(`删旧头像失败 ${oldFile}: ${e.message}`); }
         }
       }
       const base64Data = data.replace(/^data:image\/\w+;base64,/, '');

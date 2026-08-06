@@ -5,18 +5,21 @@
  * 所有 store 读写经 useAgentStore.getState/setState，按 agentId 分发。token 事件用
  * rAF batching 合并高频写，raf 状态存模块级 Map（agent 级隔离），不依赖任何 ref/组件实例。
  *
+ * 多用户：chats 读写一律经 chatKey(agentId) 复合 key（见 authStore），换用户后旧数据不串。
+ *
  * 来源：原 useChat._handleSSEEvent + 顶部三个纯函数（_findBubbleByCompactId/_applyCompactResult/_formatCompactError）。
  */
 
 import * as api from '../api/index.js';
 import useAgentStore from './agentStore.js';
+import { chatKey } from './authStore.js';
 import { rebuildFromSnapshot, applyToken, applyToolCall, applyToolResult } from '../lib/turn-stream-client-core.js';
 
 // ===== 压缩气泡 compactId 锚定辅助（纯函数，跨 turn 定位气泡）=====
 
 function _findBubbleByCompactId(state, agentId, compactId) {
   if (!compactId) return null;
-  const chat = state.chats.get(agentId);
+  const chat = state.chats.get(chatKey(agentId));
   if (!chat) { api.log('INFO', `[compact-bubble] find: no chat for ${agentId}`); return null; }
   if (chat.activeTurn) {
     const ids = chat.activeTurn.assistantBubbles.map(b => b.id);
@@ -36,7 +39,7 @@ function _findBubbleByCompactId(state, agentId, compactId) {
 
 function _applyCompactResult(agentId, compactId, patch, fallbackPatch) {
   const chats = new Map(useAgentStore.getState().chats);
-  const chat = chats.get(agentId);
+  const chat = chats.get(chatKey(agentId));
   if (!chat) { api.log('INFO', `[compact-bubble] _applyCompactResult: no chat for ${agentId}`); return; }
 
   api.log('INFO', `[compact-bubble] _applyCompactResult: agent=${agentId} compactId=${compactId} patch=${JSON.stringify(patch)} activeTurn=${!!chat.activeTurn} turns=${chat.turns.length}`);
@@ -52,12 +55,12 @@ function _applyCompactResult(agentId, compactId, patch, fallbackPatch) {
     const updatedBubbles = found.turn.assistantBubbles.map((b, i) => i === found.bubbleIdx ? updated : b);
     const updatedTurn = { ...found.turn, assistantBubbles: updatedBubbles };
     if (found.inActive) {
-      chats.set(agentId, { ...chat, activeTurn: updatedTurn });
+      chats.set(chatKey(agentId), { ...chat, activeTurn: updatedTurn });
     } else {
       const turns = [...chat.turns];
       const turnIdx = chat.turns.indexOf(found.turn);
       turns[turnIdx] = updatedTurn;
-      chats.set(agentId, { ...chat, turns });
+      chats.set(chatKey(agentId), { ...chat, turns });
     }
     useAgentStore.setState({ chats });
     return;
@@ -70,7 +73,7 @@ function _applyCompactResult(agentId, compactId, patch, fallbackPatch) {
   if (!last) return;
   const updated = { ...last, ...fallbackPatch, compactLoading: undefined, sealed: true };
   const newBubbles = at.assistantBubbles.map((b, i) => i === at.assistantBubbles.length - 1 ? updated : b);
-  chats.set(agentId, { ...chat, activeTurn: { ...at, assistantBubbles: newBubbles } });
+  chats.set(chatKey(agentId), { ...chat, activeTurn: { ...at, assistantBubbles: newBubbles } });
   useAgentStore.setState({ chats });
 }
 
@@ -81,9 +84,9 @@ function _formatCompactError(data) {
   return `记忆压缩失败${attemptPart}`;
 }
 
-// ===== rAF batching（模块级，agent 级隔离）=====
+// ===== rAF batching（模块级，复合 key 隔离，换用户不串 pending）=====
 // token 高频，累积 pendingContent，每帧 flush 一次写 store。
-const _rafState = new Map(); // agentId → { rafId, pendingContent, pendingLoop }
+const _rafState = new Map(); // chatKey(agentId) → { rafId, pendingContent, pendingLoop }
 
 function _patchChat(agentId, updates) {
   useAgentStore.getState()._patchChat(agentId, updates);
@@ -92,18 +95,20 @@ function _patchChat(agentId, updates) {
 /** 入该房 noticeQueue(按房隔离:激活时 ChatPanel effect 显示,切房显积压,不全局串房)。 */
 function _pushNotice(agentId, fields) {
   const chats = new Map(useAgentStore.getState().chats);
-  const chat = chats.get(agentId);
+  const key = chatKey(agentId);
+  const chat = chats.get(key);
   if (chat) {
-    chats.set(agentId, { ...chat, noticeQueue: [...(chat.noticeQueue || []), fields] });
+    chats.set(key, { ...chat, noticeQueue: [...(chat.noticeQueue || []), fields] });
   } else {
     // chat 尚未建(notice 先于 snapshot 到达):懒创建带 noticeQueue
-    chats.set(agentId, { streaming: false, activeTurn: null, turns: [], historyLoaded: false, hasMore: false, noticeQueue: [fields] });
+    chats.set(key, { streaming: false, activeTurn: null, turns: [], historyLoaded: false, hasMore: false, noticeQueue: [fields] });
   }
   useAgentStore.setState({ chats });
 }
 
 function _flushRaf(agentId) {
-  const st = _rafState.get(agentId);
+  const key = chatKey(agentId);
+  const st = _rafState.get(key);
   if (!st) return;
   if (st.rafId) {
     cancelAnimationFrame(st.rafId);
@@ -118,7 +123,7 @@ function _flushRaf(agentId) {
   //   rAF 是异步帧，在「上一次 token」与「flush」之间活跃 activeTurn 可能被 tool_call/tool_result
   //   改动（loop 边界尤甚）。若用陈旧快照 applyToken 后 _patchChat 整体覆盖，会把中间改动连同刚
   //   累积的文本一起冲掉——render 流式不出来、刷新才有，即此覆盖丢失。读最新态续接则不会丢。
-  const at = useAgentStore.getState().chats.get(agentId)?.activeTurn;
+  const at = useAgentStore.getState().chats.get(key)?.activeTurn;
   if (!at) return;   // activeTurn 已被 finalize 收走（done 后）→ 丢弃残留 pending
   // content 续接走 client-core（sealed 契约决定续接/新建）；带 _loop 给纯文本 bubble 盖戳，
   //   防止后续 loop 切换后回退 currentLoop 误判（reviewer 文本被盖成 render 即此因）。
@@ -132,7 +137,7 @@ function _flushRaf(agentId) {
 /** activeTurn 收入 turns（done/aborted/error/发消息失败时调） */
 export function finalizeActiveTurn(agentId) {
   _flushRaf(agentId);
-  const chat = useAgentStore.getState().chats.get(agentId);
+  const chat = useAgentStore.getState().chats.get(chatKey(agentId));
   if (!chat || !chat.activeTurn) return;
   const at = chat.activeTurn;
   const sealedBubbles = at.assistantBubbles.map(b => b.sealed ? b : { ...b, sealed: true });
@@ -148,7 +153,7 @@ export function finalizeActiveTurn(agentId) {
  */
 export function handleSSEEvent(agentId, event, data) {
   const getState = useAgentStore.getState;
-  const chat = getState().chats.get(agentId);
+  const chat = getState().chats.get(chatKey(agentId));
 
   switch (event) {
     case 'snapshot': {
@@ -184,7 +189,7 @@ export function handleSSEEvent(agentId, event, data) {
       const rebuilt = rebuildFromSnapshot(data);
       // 重连 merge:保留已上翻的 olderTurns(snapshot 只含最新窗口),按 turn.id 去重,
       //   不丢上翻历史(§4.7)。activeTurn 由 snapshot 直接覆盖(optimistic local_ id 被真实版替代)。
-      const existing = useAgentStore.getState().chats.get(agentId)?.turns || [];
+      const existing = useAgentStore.getState().chats.get(chatKey(agentId))?.turns || [];
       const snapIds = new Set((rebuilt.turns || []).map(t => t.id));
       const olderTurns = existing.filter(t => !snapIds.has(t.id));
       _patchChat(agentId, {
@@ -205,8 +210,9 @@ export function handleSSEEvent(agentId, event, data) {
       //   同时缓存本批 token 的 loop（与后端 turn-stream-server 捕获口径一致：随 token），
       //   flush 时盖戳到文本 bubble，避免后续 loop 切换后回退 currentLoop 误判。
       //   注意：不缓存 activeTurn 快照——flush 时直接读 store 最新态，避免陈旧快照覆盖丢文本。
-      let st = _rafState.get(agentId);
-      if (!st) { st = { rafId: null, pendingContent: '', pendingLoop: null }; _rafState.set(agentId, st); }
+      const key = chatKey(agentId);
+      let st = _rafState.get(key);
+      if (!st) { st = { rafId: null, pendingContent: '', pendingLoop: null }; _rafState.set(key, st); }
       st.pendingContent += data.content;
       if (data.loop) st.pendingLoop = data.loop;
       if (!st.rafId) {
@@ -219,7 +225,7 @@ export function handleSSEEvent(agentId, event, data) {
       // 先把 rAF 里悬着的 token 落到 activeTurn：紧跟文本到达的 tool_call 若读到「陈旧 activeTurn」，
       //   会把上一段文本与 tool 拆进两个 bubble（elf-018 reviewer「完成了」文本 + Skip 即此 race）。
       _flushRaf(agentId);
-      const chat2 = getState().chats.get(agentId);
+      const chat2 = getState().chats.get(chatKey(agentId));
       const at = chat2?.activeTurn;
       if (!at) return;
       const newAt = applyToolCall(at, data.tool_calls, {
@@ -231,7 +237,7 @@ export function handleSSEEvent(agentId, event, data) {
     }
 
     case 'tool_result': {
-      const chat3 = getState().chats.get(agentId);
+      const chat3 = getState().chats.get(chatKey(agentId));
       const at = chat3?.activeTurn;
       if (!at) return;
       const newAt = applyToolResult(at, data);
@@ -248,13 +254,14 @@ export function handleSSEEvent(agentId, event, data) {
       //   仅 loop 切换时封盘（cur 与 data.loop 不同且 cur 存在）；同 loop 内多轮 status 不改气泡粒度，
       //   工具执行 status（tool_manager.js:194，不带 loop）不入此分支。
       if (data.loop) {
-        const cur = useAgentStore.getState().chats.get(agentId)?._currentLoop;
+        const key = chatKey(agentId);
+        const cur = useAgentStore.getState().chats.get(key)?._currentLoop;
         if (cur && cur !== data.loop) {
           _flushRaf(agentId);
           // flush 后再把上一 loop 的尾 bubble seal 掉——否则下一 loop 的 token 因尾 bubble 未 sealed
           //   被 applyToken 判定续接，render 正文会续进 outline 尾文本气泡、继承 _loop=outline 被折叠。
           //   （服务端 turn-stream-server 的 status 切换 _flushBubble 落盘即 sealed；前端 LIVE 须对齐。）
-          const atSeal = useAgentStore.getState().chats.get(agentId)?.activeTurn;
+          const atSeal = useAgentStore.getState().chats.get(key)?.activeTurn;
           const lastB = atSeal?.assistantBubbles?.[atSeal.assistantBubbles.length - 1];
           api.log('INFO', `[loop-switch] agent=${agentId} ${cur}→${data.loop} lastBubble._loop=${lastB?._loop} sealed=${lastB?.sealed}`);
           if (atSeal && lastB && !lastB.sealed) {
@@ -270,7 +277,7 @@ export function handleSSEEvent(agentId, event, data) {
     case 'compact_start': {
       const { compactId, attempt } = data;
       const state = getState();
-      const chat4 = state.chats.get(agentId);
+      const chat4 = state.chats.get(chatKey(agentId));
       let at = chat4?.activeTurn;
 
       const _atIds = at?.assistantBubbles?.map(b => b.id) ?? [];
@@ -280,7 +287,8 @@ export function handleSSEEvent(agentId, event, data) {
         const found = _findBubbleByCompactId(state, agentId, compactId);
         if (found) {
           const chats = new Map(state.chats);
-          const chat = chats.get(agentId);
+          const key = chatKey(agentId);
+          const chat = chats.get(key);
           const updated = {
             ...found.turn.assistantBubbles[found.bubbleIdx],
             compactLoading: true, compactError: undefined, compactSummary: undefined,
@@ -289,11 +297,11 @@ export function handleSSEEvent(agentId, event, data) {
           const updatedBubbles = found.turn.assistantBubbles.map((b, i) => i === found.bubbleIdx ? updated : b);
           const updatedTurn = { ...found.turn, assistantBubbles: updatedBubbles };
           if (found.inActive) {
-            chats.set(agentId, { ...chat, activeTurn: updatedTurn });
+            chats.set(key, { ...chat, activeTurn: updatedTurn });
           } else {
             const turns = [...chat.turns];
             turns[chat.turns.indexOf(found.turn)] = updatedTurn;
-            chats.set(agentId, { ...chat, turns });
+            chats.set(key, { ...chat, turns });
           }
           useAgentStore.setState({ chats });
           break;
