@@ -199,17 +199,39 @@ describe('权限分级（admin vs visitor）', () => {
     await api(`/rooms/${a.data.roomId}`, { method: 'DELETE', token: adminToken });
   });
 
-  it('访客停用/启用自己的私聊 room（不碰全局状态）', async () => {
-    // 全局未启动 elf-001 → 访客 start 403
-    const denied = await api('/agents/elf-001/start', { method: 'POST', token: visitorToken });
-    assert.equal(denied.status, 403);
-    // 访客 stop 自己的 room（幂等允许）
+  it('访客启用自己的私聊 room（用户自治，不依赖全局开关）', async () => {
+    // 访客 start：仅启用自己的 chat-<uid>-<id>，不要求 admin 全局开启
+    const start = await api('/agents/elf-001/start', { method: 'POST', token: visitorToken });
+    assert.equal(start.status, 200);
+    assert.equal(start.data.status, 'running');
+    // 访客视角：自己启用了 → running
+    const mine = await api('/agents/elf-001', { token: visitorToken });
+    assert.equal(mine.data.status, 'running');
+    // 全局视角：admin 从未启动该 agent → 仍是 stopped（私聊自治不影响全局）
+    const g = await api('/agents/elf-001', { token: adminToken });
+    assert.equal(g.data.status, 'stopped');
+    // 访客 stop：停自己的 room（幂等允许）
     const stop = await api('/agents/elf-001/stop', { method: 'POST', token: visitorToken });
     assert.equal(stop.status, 200);
     assert.equal(stop.data.status, 'stopped');
-    // 全局视角该 agent 仍是 stopped（未受影响）
-    const g = await api('/agents/elf-001', { token: adminToken });
-    assert.equal(g.data.status, 'stopped');
+    // 停用后访客视角回到 stopped
+    const mine2 = await api('/agents/elf-001', { token: visitorToken });
+    assert.equal(mine2.data.status, 'stopped');
+  });
+
+  it('改密码：旧密码错误 → 400；成功 → 200（当前会话不失效）', async () => {
+    const bad = await api('/settings/password', { method: 'PUT', token: visitorToken, body: { oldPassword: 'wrong', newPassword: 'newpass123' } });
+    assert.equal(bad.status, 400);
+    const ok = await api('/settings/password', { method: 'PUT', token: visitorToken, body: { oldPassword: 'pass1234', newPassword: 'newpass123' } });
+    assert.equal(ok.status, 200);
+    // 改密后旧密码登录失败、新密码登录成功
+    const oldLogin = await api('/auth/login', { method: 'POST', body: { username: 'alice', password: 'pass1234' } });
+    assert.equal(oldLogin.status, 401);
+    const newLogin = await api('/auth/login', { method: 'POST', body: { username: 'alice', password: 'newpass123' } });
+    assert.equal(newLogin.status, 200);
+    // 改回原密码，避免影响后续用例（alice 后续私聊隔离测试仍用 pass1234）
+    const restore = await api('/settings/password', { method: 'PUT', token: newLogin.data.token, body: { oldPassword: 'newpass123', newPassword: 'pass1234' } });
+    assert.equal(restore.status, 200);
   });
 });
 

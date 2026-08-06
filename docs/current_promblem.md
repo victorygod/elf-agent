@@ -198,6 +198,13 @@ name和description不应该填在上面的单独的对话框里么？是因为�
 | 2 | elf-001~017 全部新建 `ui/manifest.json`（config-ui.json 的 tabs 原样迁入），删除各自 `config-ui.json`；`useConfig` 默认 tab 改为 manifest 首个 | 17 个 `agents/<id>/ui/manifest.json`、`frontend/src/hooks/useConfig.js` |
 | 3 | `snapshotBeforeSend` 先 `mkdirSync(dataDir)` 再写 context.json（首条消息 ENOENT 修复，已本地验证 turn1/turn2 均出快照）；`rewindTo` 防御性 mkdir；`updateUserProfile` 写前 mkdir；全量空 catch 补日志（gateway/engine/shared/elf-018 工具/elf-002 mm，读取容错类按 ENOENT 静默、其余 warn） | `gateway/snapshot.js`、`gateway/room_routes.js`、`agents/elf-018/ui/api.js` 及约 30 个文件 |
 | 4 | `authStore` 新增 `chatKey()`（`<uid>:<agentId>` 复合 key）；`agentStore.chats` / `sseDispatcher` / `useChat` / `useBridge` / `ChatPanel` 全部改复合 key；`agentStore` / `roomStore` 新增 `reset()`；`App.jsx` 登录态（uid）变化时 reset 两 store + 清 URL hash（历史由 SSE snapshot / ChatPanel init force 自动补齐，无需手动 loadHistory） | `frontend/src/stores/{authStore,agentStore,roomStore,sseDispatcher}.js`、`useChat.js`、`useBridge.js`、`ChatPanel.jsx`、`App.jsx` |
-| 5/6 | 后端 `changeUserPassword` + `PUT /settings/password`（校验旧密码 → bcrypt 更新 → 前端清 token 强制重登）；注册加确认密码 + 前端校验；注销确认弹窗（复用 ConfirmModal）；⏻ 从侧栏顶栏移入 ⚙ 齿轮弹窗（「退出登录」按钮）；齿轮弹窗加「修改密码」表单 | `gateway/auth.js`、`gateway/server.js`、`frontend/src/api/index.js`、`LoginPage.jsx`、`Sidebar.jsx` |
+| 5/6 | 后端 `changeUserPassword` + `PUT /settings/password`（校验旧密码 → bcrypt 更新，**不强制重登**——JWT 无状态，改 hash 不影响已签发 token，前端成功 toast 即关弹窗）；注册加确认密码 + 前端校验；注销确认弹窗（复用 ConfirmModal）；⏻ 从侧栏顶栏移入 ⚙ 齿轮弹窗；齿轮弹窗拆两视图（main=头像+用户名+入口按钮；password=改密子页，取消/‹ 返回 main） | `gateway/auth.js`、`gateway/server.js`、`frontend/src/api/index.js`、`LoginPage.jsx`、`Sidebar.jsx`、`Sidebar.module.css` |
+| 7 | **私聊实例用户自治**：去掉"访客必须全局 running 才能启动私聊"的门。访客 `start` = 确保共享 server 在跑 + 启用自己的 `chat-<uid>-<id>`；`/say` 私聊检查从"全局 agent running"改为"共享 server 端口活着 + 该用户未停用自己 room"；`postObserve` 端口改 `getServerPort()`（不依赖全局开关）；`presentAgent` 访客视角 status = 自己启用态（与全局解耦）。admin 全局启停 + 共享进程管理语义保留。旧测试「访客 start 403」改写为「访客可自启私聊、不影响全局、stop 幂等」+ 补改密用例 | `gateway/server.js`、`gateway/room_routes.js`、`test/auth.test.js` |
+| 8 | 清理 `profiles/agents/{elf-018,elf-002}/memory/` 旧布局残留（生产路径已无人读写；dev 直跑会从 seeds 重新播种） | 磁盘清理（无代码） |
 
-> 前端已 `npm run build` 通过（573 modules）；后端改动文件 `node --check` 语法通过；本地跑过两条针对性冒烟（stripFence 解析、snapshot 首条消息 mkdir），**未运行测试套件**——按约定等你确认后再跑。
+> 前端已 `npm run build` 通过；后端改动文件 `node --check` 语法通过；本地跑过针对性冒烟（stripFence 解析、snapshot 首条消息 mkdir），**未运行测试套件**——按约定等你确认后再跑。
+
+### 待商榷 / 后续（未实现）
+
+- **`agentMemory(runContext?.agentId || 'unknown')` 兜底**（`agents/*/create_agent.js`）：目前 dev 直跑 `node agents/<id>/index.js` 时 dataDir 为 null 会落到 `profiles/agents/<id>/memory`（已清理的旧布局目录，运行时会从 seeds 重新播种）。**不做"对齐成 room 语义"的兜底改造**——兜底本身值得商榷，倾向直接移除该回退，让 dev 直跑也显式给 dataDir（对齐生产 `agentRoomState(agentId, roomId)` 语义）；改动面为 18 个 `create_agent.js` + `gateway/agent_template/create_agent.js`，待定。
+- **群成员制可见性**（见 `docs/group-membership-visibility.md`）：群聊目前对**所有注册用户可见**（`GET /rooms` 不区分），后续要改成"只有群成员（用户）才能看到/进入群"。

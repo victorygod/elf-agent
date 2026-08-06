@@ -245,3 +245,42 @@
   color: #999;
   margin-bottom: 4px;
 }
+
+/* 设置弹窗入口按钮（修改密码 / 退出登录） */
+.settingsEntryBtn,
+.settingsLogoutBtn {
+  width: 100%;
+  padding: 8px 0;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.settingsEntryBtn {
+  border: 1px solid #d0d0d0;
+  background: none;
+  color: #333;
+}
+.settingsEntryBtn:hover { background: #f5f5f5; }
+.settingsLogoutBtn {
+  border: 1px solid #e53935;
+  background: none;
+  color: #e53935;
+  margin-bottom: 0;
+}
+.settingsLogoutBtn:hover { background: #fff1f0; }
+
+/* 修改密码子页返回按钮 */
+.settingsBackBtn {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid #ddd;
+  background: none;
+  color: #333;
+  font-size: 16px;
+  cursor: pointer;
+  margin-right: 8px;
+  line-height: 1;
+}
+.settingsBackBtn:hover { background: #f5f5f5; }

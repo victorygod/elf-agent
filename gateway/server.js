@@ -67,14 +67,14 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
 
   /**
    * 按请求者视角输出 agent 列表/详情。
-   * 访客的 status 反映「自己的私聊 room 可用性」：全局 running 且自己未停用 → running，否则 stopped。
+   * 访客的 status 反映「自己的私聊 room 可用性」：自己未停用 → running，否则 stopped。
+   * （私聊实例完全用户自治：不再依赖全局 admin 启停，只要求共享 agent-server 进程在跑。）
    * 这样前端自动启停逻辑（status!=='running' 就 start）对两种角色都成立，无需分支。
    */
   function presentAgent(info, user) {
     if (!info || user?.role !== 'visitor') return info;
     const enabled = !(user.disabledAgents || []).includes(info.agentId);
-    const running = info.status === 'running' && enabled;
-    return { ...info, status: running ? 'running' : 'stopped' };
+    return { ...info, status: enabled ? 'running' : 'stopped' };
   }
 
   // GET /agents — 列出所有 Agent（按请求者视角）
@@ -133,14 +133,14 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
     res.json(presentAgent(info, req.user));
   });
 
-  // POST /agents/:id/start — 启动（admin=全局；visitor=启用自己与该 agent 的私聊 room）
+  // POST /agents/:id/start — 启动（admin=全局启停共享 server 上的 agent；visitor=启用自己的私聊 room）
+  //   私聊实例用户自治：访客 start 只启用自己的 chat-<uid>-<id>，不依赖 admin 的全局开关；
+  //   只需共享 agent-server 进程在跑（未起则懒起——共享资源，起一次所有人受益）。
   app.post('/agents/:id/start', checkAgentExists, async (req, res) => {
     try {
       if (req.user?.role === 'visitor') {
-        // 访客：agent 必须已全局运行（启停全局是 admin 的事）
-        if (pm.getAgentStatus(req.params.id) !== 'running') {
-          return res.status(403).json({ error: '该 Agent 未全局启用，请联系管理员' });
-        }
+        // 确保共享 server 在跑（未起则懒起）
+        if (pm.server.status !== 'running') await pm.ensureServerUp();
         setRoomEnabledForUser(req.user.uid, req.params.id, true);
         return res.json({ agentId: req.params.id, status: 'running' });
       }

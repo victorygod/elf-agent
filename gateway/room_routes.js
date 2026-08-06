@@ -51,9 +51,11 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
     privateRoomHistory ? path.join(privateRoomHistory.roomsDir, rid, 'history.jsonl') : null;
 
   // 调 agent /observe（私聊/群聊统一入口），fire-and-forget。
+  // 私聊实例用户自治后，agent 全局开关不再作为 gate——只要共享 server 进程在跑，
+  //   任何用户启用了自己的私聊 room 就能收消息。取 server 端口（对所有 agent 生效）。
   async function postObserve(agentId, payload) {
-    const port = pm?.getAgentPort?.(agentId);
-    if (!port) throw new Error(`agent ${agentId} 端口未知（未启动？）`);
+    const port = pm?.getServerPort?.();
+    if (!port) throw new Error(`agent-server 未运行`);
     // ② observe body 显式带 agentId：host（多 agent 共处一 server）按 (agentId,roomId) 路由所需。
     return fetch(`http://127.0.0.1:${port}/observe`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -305,9 +307,10 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
       // 私聊房：写 history + fire-and-forget /observe；token 经 /events 转发到 subscribe。
       if (isPrivateRoom(req.params.rid)) {
         const { agentId, uid } = req.privateRoom;
-        // 全局运行 + 该用户未停用（访客的"停止"只停自己的 room）
-        if (!pm?.getAgentStatus?.(agentId) || pm.getAgentStatus(agentId) !== 'running') {
-          return res.status(503).json({ error: 'Agent 未运行' });
+        // 私聊实例用户自治：只要求共享 agent-server 进程在跑 + 该用户未停用自己的私聊 room，
+        //   不再依赖 admin 的全局 agent 开关（用户启停私聊与管理员无关）。
+        if (!pm?.getServerPort?.()) {
+          return res.status(503).json({ error: 'Agent 服务未运行' });
         }
         if (!isRoomEnabledForUser(uid, agentId)) {
           return res.status(503).json({ error: '你已停用与该 Agent 的私聊' });

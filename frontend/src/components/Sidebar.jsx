@@ -71,6 +71,8 @@ export default function Sidebar({ onSelect }) {
   const [avatarRemoved, setAvatarRemoved] = useState(false);
   // 注销确认弹窗
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+  // 设置弹窗视图：'main'（头像+用户名+入口）| 'password'（修改密码子页）
+  const [settingsView, setSettingsView] = useState('main');
   // 修改密码表单
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -85,6 +87,7 @@ export default function Sidebar({ onSelect }) {
     setPendingAvatarFile(null);
     setSettingsAvatarPreview(null);
     setAvatarRemoved(false);
+    setSettingsView('main');
     setOldPassword('');
     setNewPassword('');
     setNewPassword2('');
@@ -222,7 +225,7 @@ export default function Sidebar({ onSelect }) {
     setAvatarRemoved(true);
   }, []);
 
-  // 修改密码：校验两次一致 → 调后端 → 成功后清 token 强制重新登录
+  // 修改密码：校验两次一致 → 调后端 → 成功后停留当前会话（JWT 无状态，改 hash 不影响已签发 token）
   const handleChangePassword = useCallback(async () => {
     if (passBusy) return;
     if (!oldPassword) { setPassMsg({ type: 'error', text: '请输入旧密码' }); return; }
@@ -233,14 +236,13 @@ export default function Sidebar({ onSelect }) {
     try {
       await api.changePassword(oldPassword, newPassword);
       setShowSettings(false);
-      useAgentStore.getState().showToast('密码已修改，请重新登录');
-      logout();
+      useAgentStore.getState().showToast('密码已修改');
     } catch (e) {
       setPassMsg({ type: 'error', text: e.message || '修改失败' });
     } finally {
       setPassBusy(false);
     }
-  }, [oldPassword, newPassword, newPassword2, passBusy, logout]);
+  }, [oldPassword, newPassword, newPassword2, passBusy]);
 
   const handleRefresh = useCallback(async () => {
     setSpinning(true);
@@ -284,100 +286,106 @@ export default function Sidebar({ onSelect }) {
         </div>
       </div>
 
-      {/* 全局设置弹窗 */}
+      {/* 全局设置弹窗（main：头像+用户名+入口按钮；password：修改密码子页） */}
       {showSettings && (
         <div className={styles.nameEditModal}>
           <div className={styles.nameEditBox}>
-            <div className={styles.nameEditTitle}>全局设置</div>
-            <div className={styles.settingAvatarRow}>
-              <div
-                className={styles.settingAvatarPreview}
-                onClick={() => document.getElementById('sidebarAvatarInput')?.click()}
-              >
-                {settingsAvatarPreview
-                  ? <img src={settingsAvatarPreview} alt="头像" />
-                  : (userAvatarStore && !avatarRemoved
-                    ? <img src={`/users/${userUid}/avatar?v=${Date.now()}`} alt="头像" />
-                    : <span className={styles.placeholder}>点击<br/>上传</span>)}
-              </div>
-              <input
-                type="file"
-                id="sidebarAvatarInput"
-                accept="image/png,image/jpeg,image/gif,image/webp"
-                style={{ display: 'none' }}
-                onChange={handleAvatarInputChange}
-              />
-              {(settingsAvatarPreview || (userAvatarStore && !avatarRemoved)) && (
-                <button className={styles.removeAvatarBtn} onClick={handleRemoveAvatar}>移除头像</button>
-              )}
-            </div>
-            <label className={styles.settingLabel}>用户名</label>
-            <input
-              className={styles.nameEditInput}
-              value={settingsName}
-              onChange={e => setSettingsName(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleSaveSettings(); }}
-              placeholder="你的名字"
-              autoFocus
-            />
-            <div className={styles.nameEditActions}>
-              <button onClick={() => setShowSettings(false)}>取消</button>
-              <button className={styles.nameEditSave} onClick={handleSaveSettings}>保存</button>
-            </div>
-
-            {/* 修改密码 */}
-            <div style={{ borderTop: '1px solid #eee', paddingTop: '12px', marginTop: '4px' }}>
-              <div className={styles.nameEditTitle} style={{ marginBottom: '4px' }}>修改密码</div>
-              <label className={styles.settingLabel}>旧密码</label>
-              <input
-                className={styles.nameEditInput}
-                type="password"
-                value={oldPassword}
-                onChange={e => setOldPassword(e.target.value)}
-                placeholder="旧密码"
-                style={{ marginBottom: '8px' }}
-              />
-              <label className={styles.settingLabel}>新密码（至少 4 位）</label>
-              <input
-                className={styles.nameEditInput}
-                type="password"
-                value={newPassword}
-                onChange={e => setNewPassword(e.target.value)}
-                placeholder="新密码"
-                style={{ marginBottom: '8px' }}
-              />
-              <label className={styles.settingLabel}>确认新密码</label>
-              <input
-                className={styles.nameEditInput}
-                type="password"
-                value={newPassword2}
-                onChange={e => setNewPassword2(e.target.value)}
-                placeholder="确认新密码"
-                style={{ marginBottom: '8px' }}
-              />
-              {passMsg && (
-                <div style={{ fontSize: '12px', color: passMsg.type === 'error' ? '#cf1322' : '#389e0d', marginBottom: '8px' }}>
-                  {passMsg.text}
+            {settingsView === 'main' ? (
+              <>
+                <div className={styles.nameEditTitle}>全局设置</div>
+                <div className={styles.settingAvatarRow}>
+                  <div
+                    className={styles.settingAvatarPreview}
+                    onClick={() => document.getElementById('sidebarAvatarInput')?.click()}
+                  >
+                    {settingsAvatarPreview
+                      ? <img src={settingsAvatarPreview} alt="头像" />
+                      : (userAvatarStore && !avatarRemoved
+                        ? <img src={`/users/${userUid}/avatar?v=${Date.now()}`} alt="头像" />
+                        : <span className={styles.placeholder}>点击<br/>上传</span>)}
+                  </div>
+                  <input
+                    type="file"
+                    id="sidebarAvatarInput"
+                    accept="image/png,image/jpeg,image/gif,image/webp"
+                    style={{ display: 'none' }}
+                    onChange={handleAvatarInputChange}
+                  />
+                  {(settingsAvatarPreview || (userAvatarStore && !avatarRemoved)) && (
+                    <button className={styles.removeAvatarBtn} onClick={handleRemoveAvatar}>移除头像</button>
+                  )}
                 </div>
-              )}
-              <div className={styles.nameEditActions}>
-                <button onClick={() => { setOldPassword(''); setNewPassword(''); setNewPassword2(''); setPassMsg(null); }}>清空</button>
-                <button className={styles.nameEditSave} onClick={handleChangePassword} disabled={passBusy}>
-                  {passBusy ? '提交中…' : '修改密码'}
-                </button>
-              </div>
-            </div>
+                <label className={styles.settingLabel}>用户名</label>
+                <input
+                  className={styles.nameEditInput}
+                  value={settingsName}
+                  onChange={e => setSettingsName(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') handleSaveSettings(); }}
+                  placeholder="你的名字"
+                  autoFocus
+                />
+                <div className={styles.nameEditActions}>
+                  <button onClick={() => setShowSettings(false)}>取消</button>
+                  <button className={styles.nameEditSave} onClick={handleSaveSettings}>保存</button>
+                </div>
 
-            {/* 退出登录 */}
-            <div style={{ borderTop: '1px solid #eee', paddingTop: '12px' }}>
-              <button
-                style={{
-                  width: '100%', padding: '8px 0', borderRadius: '6px', cursor: 'pointer',
-                  border: '1px solid #e53935', background: 'none', color: '#e53935', fontSize: '13px',
-                }}
-                onClick={() => setLogoutConfirmOpen(true)}
-              >退出登录</button>
-            </div>
+                {/* 入口按钮 */}
+                <div style={{ borderTop: '1px solid #eee', paddingTop: '12px', marginTop: '4px' }}>
+                  <button className={styles.settingsEntryBtn} onClick={() => { setOldPassword(''); setNewPassword(''); setNewPassword2(''); setPassMsg(null); setSettingsView('password'); }}>
+                    修改密码
+                  </button>
+                  <button
+                    className={styles.settingsLogoutBtn}
+                    onClick={() => setLogoutConfirmOpen(true)}
+                  >退出登录</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', marginBottom: '12px' }}>
+                  <button className={styles.settingsBackBtn} onClick={() => setSettingsView('main')} title="返回设置">‹</button>
+                  <div className={styles.nameEditTitle}>修改密码</div>
+                </div>
+                <label className={styles.settingLabel}>旧密码</label>
+                <input
+                  className={styles.nameEditInput}
+                  type="password"
+                  value={oldPassword}
+                  onChange={e => setOldPassword(e.target.value)}
+                  placeholder="旧密码"
+                  style={{ marginBottom: '8px' }}
+                />
+                <label className={styles.settingLabel}>新密码（至少 4 位）</label>
+                <input
+                  className={styles.nameEditInput}
+                  type="password"
+                  value={newPassword}
+                  onChange={e => setNewPassword(e.target.value)}
+                  placeholder="新密码"
+                  style={{ marginBottom: '8px' }}
+                />
+                <label className={styles.settingLabel}>确认新密码</label>
+                <input
+                  className={styles.nameEditInput}
+                  type="password"
+                  value={newPassword2}
+                  onChange={e => setNewPassword2(e.target.value)}
+                  placeholder="确认新密码"
+                  style={{ marginBottom: '8px' }}
+                />
+                {passMsg && (
+                  <div style={{ fontSize: '12px', color: passMsg.type === 'error' ? '#cf1322' : '#389e0d', marginBottom: '8px' }}>
+                    {passMsg.text}
+                  </div>
+                )}
+                <div className={styles.nameEditActions}>
+                  <button onClick={() => setSettingsView('main')}>取消</button>
+                  <button className={styles.nameEditSave} onClick={handleChangePassword} disabled={passBusy}>
+                    {passBusy ? '提交中…' : '保存'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
