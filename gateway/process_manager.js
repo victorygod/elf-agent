@@ -16,7 +16,8 @@ import { spawn } from 'child_process';
 import { createLogger } from '../shared/logger.js';
 import { probePort, findPidFromPort as probe_findPidFromPort, waitForReady as probe_waitForReady, httpShutdown as probe_httpShutdown, waitForPortFree as probe_waitForPortFree, PROBE_INTERVAL, STOP_PROBE_INTERVAL } from '../shared/agent_probe.js';
 import { connectAgentEvents, disconnectAgentEvents, hasAgentEventsConnection } from './agent_events.js';
-import { handlePrivateAgentEvent, forceFinishPrivateTurn } from './private_room_stream.js';
+import { handlePrivateAgentEvent, forceFinishRoomsForAgent } from './private_room_stream.js';
+import { rewindTo } from './snapshot.js';
 import { loadGatewayConfig } from './config.js';
 
 const logger = createLogger('process-manager', 'gateway.log');
@@ -215,7 +216,7 @@ async ensureServerUp() {
         cwd: process.cwd(),
         detached: true,
         stdio: 'ignore',
-        env: { ...process.env, ELF_GATEWAY_URL: this._gatewayUrl || '' },
+        env: { ...process.env, ELF_GATEWAY_URL: this._gatewayUrl || '', ELF_INTERNAL_TOKEN: loadGatewayConfig().internalToken || '' },
       });
       child.unref();
 
@@ -298,10 +299,13 @@ async ensureServerUp() {
     // 私聊实例语义：标 disabled（私聊 /say 已 503 挡新消息）+ 中断在飞回合。
     //   私聊实例（PrivateChatPlugin）无自驱定时器，挡住新消息 + 中断在飞即 inert；不清 memory、不 dispose RoomState（start 后可续）。
     //   群聊实例独立生命周期（群成员退订管），私聊 stop 不碰。
+    //   多用户：中断该 agent 名下全部用户私聊房的在飞回合（chat-<uid>-<id> 按 agent 批量 abort）。
     if (this.server.status === 'running' && this.server.port) {
       try {
-        await fetch(`http://127.0.0.1:${this.server.port}/abort/chat-${encodeURIComponent(id)}`, { method: 'POST', signal: AbortSignal.timeout(3000) });
+        await fetch(`http://127.0.0.1:${this.server.port}/abort-agent/${encodeURIComponent(id)}`, { method: 'POST', signal: AbortSignal.timeout(3000) });
       } catch (e) { /* server 未起或无在飞回合，忽略 */ }
+      // gateway 侧兜底：清所有该 agent 用户房的孤儿 streaming
+      forceFinishRoomsForAgent(id);
     }
     logger.info(`Agent ${id} 已停用私聊实例（inert，共享 server 保留，群聊实例不受影响）`);
     return { agentId: id, status: 'stopped' };
@@ -449,6 +453,34 @@ async ensureServerUp() {
   _onAgentEvent(event, data) {
     const aid = (data && typeof data === 'object' && typeof data._agentId === 'string') ? data._agentId : '(unknown)';
     logger.info(`[events] _onAgentEvent: agentId=${aid} event=${event}`);
+
+    // elf-018 abort 信号:复用 ⟲ rewind 的 rewindTo(latest) —— 删本轮 user + 整份还原
+    //   runtime/tool-results/sync_cursor/history + 弹 checkpoint + 返回 restoredPrompt 回填输入框。
+    //   仅 elf-018 会发此信号(作用域天然锁定);时序在 aborted+done 之后,agent 已停笔无写盘竞态。
+    if (event === 'abortRewind' && data && typeof data._roomId === 'string' && data._roomId.startsWith('chat-')) {
+      const rid = data._roomId;
+      try {
+        const roomHistoryPath = this.privateRoomHistory
+          ? path.join(this.privateRoomHistory.roomsDir, rid, 'history.jsonl')
+          : null;
+        const result = rewindTo(aid, rid, null, roomHistoryPath);
+        if (result?.ok) {
+          data = { ...data, restoredPrompt: result.restoredPrompt ?? null };
+          const port = this.getAgentPort(aid);
+          if (port) {
+            fetch(`http://127.0.0.1:${port}/reload/${rid}`, { method: 'POST' })
+              .catch((err) => { /* reload 失败不语义阻塞,下条消息自然重载 */ });
+          }
+        } else {
+          logger.warn(`[abortRewind] ${aid} rewindTo 失败: ${result?.error || 'no checkpoint'},不回填`);
+        }
+      } catch (err) {
+        logger.error(`[abortRewind] ${aid} 异常: ${err.message}`);
+      }
+      handlePrivateAgentEvent('abortRewind', data, this.privateRoomHistory || null);
+      return;
+    }
+
     if (data && typeof data === 'object' && typeof data._roomId === 'string' && data._roomId.startsWith('chat-')) {
       handlePrivateAgentEvent(event, data, this.privateRoomHistory || null);
       return;
@@ -476,8 +508,10 @@ async ensureServerUp() {
     // agentId 缺省（共享 /events 通道断开）：清所有 running agent 的孤儿 streaming（v4 共享 server 语义）。
     return () => {
       const clear = (id) => {
-        if (forceFinishPrivateTurn(`chat-${id}`)) {
-          logger.warn(`[events] Agent-server SSE 断开，强制结束孤儿 streaming room=chat-${id}`);
+        // 多用户：清该 agent 名下全部用户私聊房（chat-<uid>-<id>）的孤儿 streaming
+        const done = forceFinishRoomsForAgent(id);
+        for (const rid of done) {
+          logger.warn(`[events] Agent-server SSE 断开，强制结束孤儿 streaming room=${rid}`);
         }
       };
       if (agentId) { clear(agentId); return; }

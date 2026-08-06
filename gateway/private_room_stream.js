@@ -50,7 +50,6 @@ function _makeHistoryStore(history) {
       history.addMessage(roomId, role, content, toolCalls, extraFields),
     updateCompact: (roomId, id, patch) => history.updateCompactRecord(roomId, id, patch),
     recent: (roomId, limit) => history.getRecent(roomId, limit),
-    rewindToLastUser: (roomId) => history.rewindToLastUser(roomId),
   };
 }
 
@@ -146,4 +145,19 @@ export function forceFinishPrivateTurn(roomId) {
 export function _testReset() {
   _server._testReset();
   _sseSubs.clear();
+}
+
+/**
+ * 强制结束某 agent 名下所有私聊房的孤儿回合（多用户：chat-<uid>-<agentId> 按 agentId 后缀匹配）。
+ * 供 pm 的 /events 断连兜底 / stopAgent 用——旧代码只清 chat-<id> 单房，多用户后要清该 agent 全部用户房。
+ * @returns {string[]} 被强制结束的 roomId 列表
+ */
+export function forceFinishRoomsForAgent(agentId) {
+  const suffix = `-${agentId}`;
+  const done = [];
+  for (const rid of _server.listRoomIds()) {
+    if (!rid.startsWith('chat-') || !rid.endsWith(suffix)) continue;
+    if (forceFinishPrivateTurn(rid)) done.push(rid);
+  }
+  return done;
 }

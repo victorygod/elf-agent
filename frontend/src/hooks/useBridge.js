@@ -86,8 +86,15 @@ export default function useBridge(agentId) {
           headers: { 'Content-Type': 'application/json' },
         };
         if (body && method.toUpperCase() !== 'GET') opts.body = JSON.stringify(body);
-        const res = await fetch(url, opts);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const res = await api.authFetch(url, opts);
+        if (!res.ok) {
+          // 优先用服务端 error 文案，并挂 status 方便按状态码分支处理（如 409 重名）
+          let serverMsg = '';
+          try { serverMsg = (await res.json()).error || ''; } catch {}
+          const err = new Error(serverMsg || `HTTP ${res.status}`);
+          err.status = res.status;
+          throw err;
+        }
         return await res.json();
       },
 

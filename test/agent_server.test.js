@@ -31,8 +31,8 @@ describe('多 agent agent-server（一进程承载多 agentId）', () => {
 
   it('两个不同 agent 的私聊房共处一 server，实例独立、dataDir 按 agentId 隔离', async () => {
     const [a, b] = await Promise.all([
-      fetch(`${baseUrl}/observe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomId: 'chat-elf-001', content: 'hi', role: 'chat', seq: 1 }) }),
-      fetch(`${baseUrl}/observe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomId: 'chat-elf-002', content: 'hi', role: 'chat', seq: 1 }) }),
+      fetch(`${baseUrl}/observe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomId: 'chat-u_test-elf-001', content: 'hi', role: 'chat', seq: 1 }) }),
+      fetch(`${baseUrl}/observe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomId: 'chat-u_test-elf-002', content: 'hi', role: 'chat', seq: 1 }) }),
     ]);
     assert.equal(a.status, 200);
     assert.equal(b.status, 200);
@@ -40,11 +40,12 @@ describe('多 agent agent-server（一进程承载多 agentId）', () => {
     const res = await fetch(`${baseUrl}/rooms`);
     const data = await res.json();
     const pair = data.rooms.map(r => `${r.agentId}/${r.roomId}`).sort();
-    assert.ok(pair.includes('elf-001/chat-elf-001'), 'elf-001 私聊房实例存在');
-    assert.ok(pair.includes('elf-002/chat-elf-002'), 'elf-002 私聊房实例存在');
-    // 私聊房 dataDir = agentMemory(<id>) = profiles/agents/<id>/memory（与 snapshot/rewind 对齐），两 agent 各自 memory 按 agentId 隔离。
-    assert.ok(fs.existsSync(path.join(profilesRoot(), 'agents', 'elf-001', 'memory')), 'elf-001 私聊 dataDir 落 profiles/agents/elf-001/memory');
-    assert.ok(fs.existsSync(path.join(profilesRoot(), 'agents', 'elf-002', 'memory')), 'elf-002 私聊 dataDir 落 profiles/agents/elf-002/memory');
+    assert.ok(pair.includes('elf-001/chat-u_test-elf-001'), 'elf-001 私聊房实例存在');
+    assert.ok(pair.includes('elf-002/chat-u_test-elf-002'), 'elf-002 私聊房实例存在');
+    // 多用户：私聊房 dataDir = agentRoomState(<id>, chat-<uid>-<id>) = profiles/agents/<id>/rooms/chat-<uid>-<id>，
+    //   各用户各 agent 独立目录（与 snapshot/rewind 对齐）。
+    assert.ok(fs.existsSync(path.join(profilesRoot(), 'agents', 'elf-001', 'rooms', 'chat-u_test-elf-001')), 'elf-001 私聊 dataDir 落 per-room 目录');
+    assert.ok(fs.existsSync(path.join(profilesRoot(), 'agents', 'elf-002', 'rooms', 'chat-u_test-elf-002')), 'elf-002 私聊 dataDir 落 per-room 目录');
   });
 
   it('同一群 room 两个共处成员不 alias：两个独立实例 + dataDir 各自隔离', async () => {

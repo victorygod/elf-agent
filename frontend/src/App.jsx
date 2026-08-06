@@ -5,16 +5,24 @@ import ConfigDrawer from './components/ConfigDrawer';
 import RoomChatPanel from './components/RoomChatPanel';
 import RoomConfigDrawer from './components/RoomConfigDrawer';
 import AgentPageRenderer from './components/AgentPageRenderer';
+import LoginPage from './components/LoginPage';
 import { getAgentManifest } from './pluginRegistry';
 import useAgentStore from './stores/agentStore';
 import { useRoomStore } from './stores/roomStore';
+import { useAuthStore } from './stores/authStore';
 import useAgents from './hooks/useAgents';
 import { useAggregatedSubscription } from './hooks/useAggregatedSubscription';
 import styles from './App.module.css';
 
 export default function App() {
-  const { agents } = useAgents(); // initializes loading
-  useAggregatedSubscription(); // app 级聚合 SSE(全程 1 条,解 6 连接上限;见 docs/sse-aggregation-design.md)
+  // 多用户：启动先校验 token；未登录渲染登录覆盖层（不加载业务数据）
+  const authUser = useAuthStore(s => s.user);
+  const authChecked = useAuthStore(s => s.checked);
+  const loadMe = useAuthStore(s => s.loadMe);
+  useEffect(() => { loadMe(); }, [loadMe]);
+
+  const { agents } = useAgents(authChecked && authUser); // 登录后才初始化加载
+  useAggregatedSubscription(); // app 级聚合 SSE(登录后建连;见 docs/sse-aggregation-design.md)
   const activeAgentId = useAgentStore(s => s.activeAgentId);
   const configDrawerOpen = useAgentStore(s => s.configDrawerOpen);
   const configAgentId = useAgentStore(s => s.configAgentId);
@@ -44,8 +52,8 @@ export default function App() {
     }
   }, [agents, activeAgentId]);
 
-  // 加载群列表
-  useEffect(() => { loadRooms(); }, [loadRooms]);
+  // 加载群列表（登录后）
+  useEffect(() => { if (authChecked && authUser) loadRooms(); }, [authChecked, authUser, loadRooms]);
 
   const [roomConfigOpen, setRoomConfigOpen] = useState(false);
 
@@ -83,6 +91,10 @@ export default function App() {
   const activeRoom = activeRoomId ? rooms.find(r => r.roomId === activeRoomId) : null;
   const hasSession = !!(activeAgentId || activeRoomId);
   const sessionTitle = activeRoom ? activeRoom.name : (agent?.name || activeAgentId || 'Elf');
+
+  // 未登录 / 未校验完：登录覆盖层（校验中先空屏防闪烁）
+  if (!authChecked) return null;
+  if (!authUser) return <LoginPage />;
 
   return (
     <div className={styles.body}>

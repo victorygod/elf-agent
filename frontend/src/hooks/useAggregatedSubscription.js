@@ -15,17 +15,25 @@ import { useEffect, useRef } from 'react';
 import * as api from '../api/index.js';
 import { handleSSEEvent } from '../stores/sseDispatcher.js';
 import { roomDispatch } from '../stores/roomStore.js';
+import { useAuthStore } from '../stores/authStore.js';
 
 const RECONNECT_DELAY = 2000;
 
 let _controller = null;
 let _retryTimer = null;
 
+/** 私聊 roomId → agentId：chat-<uid>-<agentId>，uid 不含 '-'，按首个 '-' 分割 */
+function _agentIdFromRoomId(roomId) {
+  const rest = roomId.replace(/^chat-/, '');
+  const idx = rest.indexOf('-');
+  return idx > 0 ? rest.slice(idx + 1) : rest;
+}
+
 function _dispatch(event, data) {
   const roomId = data?.roomId;
   if (!roomId) return;
   if (data.roomType === 'chat' || roomId.startsWith('chat-')) {
-    handleSSEEvent(roomId.replace(/^chat-/, ''), event, data);
+    handleSSEEvent(_agentIdFromRoomId(roomId), event, data);
   } else if (data.roomType === 'room') {
     roomDispatch(roomId, event, data);
   }
@@ -61,14 +69,11 @@ function _stop() {
 }
 
 export function useAggregatedSubscription() {
-  const startedRef = useRef(false);
+  // 多用户：登录后才建连（未登录 /subscribe 401）；登出/换号时断开，重连由 token 变化触发
+  const token = useAuthStore(s => s.token);
   useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
+    if (!token) { _stop(); return; }
     _start();
-    return () => {
-      _stop();
-      startedRef.current = false;
-    };
-  }, []);
+    return () => _stop();
+  }, [token]);
 }

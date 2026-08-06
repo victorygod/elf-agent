@@ -142,10 +142,10 @@ export const useRoomStore = create((set, get) => ({
     get()._patchChat(roomId, { messages });
   },
 
-  /** 加载群成员状态 */
+  /** 加载群成员状态（含多用户目录 users：渲染其他用户发言者的名字/头像） */
   loadRoomMembers: async (roomId) => {
     const room = await api.getRoom(roomId);
-    if (room) get()._patchChat(roomId, { members: room.members });
+    if (room) get()._patchChat(roomId, { members: room.members, users: room.users || [] });
   },
 
   /** 上翻加载更早的群历史(滚到顶触发),与私聊 loadMoreHistory 同构 */

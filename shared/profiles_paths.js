@@ -49,6 +49,16 @@ export function roomsRoot() {
   return path.join(profilesRoot(), 'rooms');
 }
 
+/** users 根目录：profiles/users。每个注册用户一个子目录（user.json + avatar）。 */
+export function usersRoot() {
+  return path.join(profilesRoot(), 'users');
+}
+
+/** 某用户的数据目录：profiles/users/<uid>。 */
+export function userDir(uid) {
+  return path.join(profilesRoot(), 'users', uid);
+}
+
 /** 日志目录：profiles/logs。ELF_LOG_DIR 可覆盖（测试用，日志与真实 profiles/logs 分离）。 */
 export function logsDir() {
   return process.env.ELF_LOG_DIR ? path.resolve(process.env.ELF_LOG_DIR) : path.join(profilesRoot(), 'logs');

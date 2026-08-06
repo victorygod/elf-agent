@@ -6,7 +6,10 @@
  * - 身份（roomBusUrl / roomId / memberName）从 ctx.agent.runContext 取（对齐现有工具经 ctx.agent 拿运行时信息的约定）。
  * - 私聊 agent 无 runContext 或 mode!=='room' → 返回错误（子 agent 调用也走此分支，§12.3 双保险）。
  * - 整块、非流式：message 是完整字符串，一次性提交。
+ * - 多用户：带内部服务 token（ELF_INTERNAL_TOKEN），gateway 据 req.service 识别 agent 身份。
  */
+
+import { internalAuthHeaders } from '../../shared/internal_auth.js';
 
 /** 本地时间 MMDD hh:mm（与 RoomPlugin._formatTs 同口径，tool_result 带时间让 LLM 知发言时刻）。 */
 function _fmtNow() {
@@ -68,7 +71,7 @@ export const Speak = {
     try {
       const resp = await fetch(`${rc.roomBusUrl}/say`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': rc.memberName },
+        headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': rc.memberName, ...internalAuthHeaders() },
         body: JSON.stringify({ content: message }),
         signal,
       });

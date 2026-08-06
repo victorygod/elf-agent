@@ -17,6 +17,7 @@
 import fs from 'fs';
 import path from 'path';
 import { createLogger } from '../shared/logger.js';
+import { internalAuthHeaders } from '../shared/internal_auth.js';
 
 // ============================================================
 // SyncCursor —— 同步进度记录（从 sync_cursor.js 迁入，零改动）
@@ -194,7 +195,7 @@ export class SyncSource {
     const url = this._buildSyncUrl('seed=true');
     if (!url || !this._cursor) return;
     try {
-      const resp = await fetch(url);
+      const resp = await fetch(url, { headers: { ...internalAuthHeaders() } });
       if (resp.ok) {
         const { latestSeq } = await resp.json();
         if (latestSeq != null) this._cursor.advance(latestSeq);
@@ -212,7 +213,7 @@ export class SyncSource {
 
     this._logger?.info?.(`填充空洞 seq ${fromSeq}→${toSeq}`);
     try {
-      const resp = await fetch(url);
+      const resp = await fetch(url, { headers: { ...internalAuthHeaders() } });
       if (!resp.ok) return;
       const { messages } = await resp.json();
       if (!messages?.length) {

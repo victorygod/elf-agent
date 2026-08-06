@@ -19,7 +19,7 @@ import {
   latestCheckpointId,
   clearCheckpoints,
 } from '../gateway/snapshot.js';
-import { profilesRoot, _resetProfilesRoot, agentMemory } from '../shared/profiles_paths.js';
+import { profilesRoot, _resetProfilesRoot, agentRoomState } from '../shared/profiles_paths.js';
 
 // ── 测试隔离 ──
 
@@ -35,8 +35,13 @@ function agentId(name) {
   return id;
 }
 
+/** 测试私聊房 roomId（多用户格式 chat-<uid>-<agentId>，uid 用 SKIP_AUTH 内置的 u_test） */
+function roomIdFor(id) {
+  return `chat-u_test-${id}`;
+}
+
 function dataDirFor(id) {
-  return agentMemory(id);
+  return agentRoomState(id, roomIdFor(id));
 }
 
 /** 确保 agent memory 目录存在（模拟 agent 启动时创建的目录），返回 dataDir */
@@ -67,7 +72,7 @@ afterEach(() => {
   //   那条会建 rooms/chat-<id>）。不再无差别抹掉全部 agents/rooms——agentId 天然唯一，无需清场。
   for (const id of _footprint) {
     fs.rmSync(path.join(profilesRoot(), 'agents', id), { recursive: true, force: true });
-    fs.rmSync(path.join(profilesRoot(), 'rooms', `chat-${id}`), { recursive: true, force: true });
+    fs.rmSync(path.join(profilesRoot(), 'rooms', roomIdFor(id)), { recursive: true, force: true });
   }
   _footprint.clear();
 });
@@ -93,7 +98,7 @@ describe('snapshotBeforeSend — 首次对话 checkpoint', () => {
     const aid = agentId('first');
     const dataDir = ensureAgentDir(aid);
 
-    const cpId = snapshotBeforeSend(aid, '第一条消息');
+    const cpId = snapshotBeforeSend(aid, roomIdFor(aid), '第一条消息');
     assert.ok(cpId, '首次 snapshotBeforeSend 应返回 checkpointId');
 
     // checkpoint 目录应已创建
@@ -123,7 +128,7 @@ describe('snapshotBeforeSend — 首次对话 checkpoint', () => {
     const dataDir = ensureAgentDir(aid);
 
     // 先创建 checkpoint（模拟首次对话）
-    snapshotBeforeSend(aid, '第一条');
+    snapshotBeforeSend(aid, roomIdFor(aid), '第一条');
 
     // 此时 context.json 应为空数组
     const ctxPath = path.join(dataDir, 'context.json');
@@ -139,7 +144,7 @@ describe('snapshotBeforeSend — 首次对话 checkpoint', () => {
     fs.writeFileSync(ctxPath, JSON.stringify(msgs, null, 2), 'utf-8');
 
     // 再打一个 checkpoint（第二次用户消息前）
-    const cpId2 = snapshotBeforeSend(aid, '第二条');
+    const cpId2 = snapshotBeforeSend(aid, roomIdFor(aid), '第二条');
     assert.ok(cpId2, '第二次 snapshotBeforeSend 应成功');
 
     // 确认 context.json 未被覆盖
@@ -159,7 +164,7 @@ describe('snapshotBeforeSend — 首次对话 checkpoint', () => {
     // 预先创建 context.json
     fs.writeFileSync(path.join(dataDir, 'context.json'), JSON.stringify([{ id: 'm1', role: 'user', content: 'pre' }]), 'utf-8');
 
-    const cpId = snapshotBeforeSend(aid, '第一条');
+    const cpId = snapshotBeforeSend(aid, roomIdFor(aid), '第一条');
     assert.ok(cpId, '应返回 checkpointId');
 
     // 确认原文件内容未被篡改
@@ -187,13 +192,13 @@ describe('rewindTo — 删除逻辑（弹出目标 checkpoint）', () => {
     // 先写入 context.json 使后续 snapshotBeforeSend 不会创建空文件
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
 
-    const cp1 = snapshotBeforeSend(aid, '第一条');
+    const cp1 = snapshotBeforeSend(aid, roomIdFor(aid), '第一条');
 
     // 模拟 agent 写入消息
     const msgs1 = [{ id: 'm1', role: 'user', content: '第一条' }];
     fs.writeFileSync(path.join(dataDir, 'context.json'), JSON.stringify(msgs1), 'utf-8');
 
-    const cp2 = snapshotBeforeSend(aid, '第二条');
+    const cp2 = snapshotBeforeSend(aid, roomIdFor(aid), '第二条');
 
     const msgs2 = [
       { id: 'm1', role: 'user', content: '第一条' },
@@ -203,18 +208,18 @@ describe('rewindTo — 删除逻辑（弹出目标 checkpoint）', () => {
     fs.writeFileSync(path.join(dataDir, 'context.json'), JSON.stringify(msgs2), 'utf-8');
 
     // 回退到 cp1（最早的一个）
-    const result = rewindTo(aid, cp1);
+    const result = rewindTo(aid, roomIdFor(aid), cp1);
     assert.equal(result.ok, true, 'rewind 应成功');
     assert.equal(result.restoredPrompt, '第一条', '应返回正确的 restoredPrompt（删 target 前已读出）');
 
     // cp1 和 cp2 都应被删除（target 及其之后全弹）
-    const list = listCheckpoints(aid);
+    const list = listCheckpoints(aid, roomIdFor(aid));
     const ids = list.map(c => c.id);
     assert.ok(!ids.includes(cp1), 'cp1 应被弹出');
     assert.ok(!ids.includes(cp2), 'cp2 应被删除');
 
     // cp1 已不在栈中，重复回退会失败（避免卡在原栈顶空转）
-    const result2 = rewindTo(aid, cp1);
+    const result2 = rewindTo(aid, roomIdFor(aid), cp1);
     assert.equal(result2.ok, false, 'target 已弹出，重复回退应失败');
   });
 
@@ -225,12 +230,12 @@ describe('rewindTo — 删除逻辑（弹出目标 checkpoint）', () => {
 
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
 
-    const cp1 = snapshotBeforeSend(aid, '第一条');
+    const cp1 = snapshotBeforeSend(aid, roomIdFor(aid), '第一条');
 
     fs.writeFileSync(path.join(dataDir, 'context.json'),
       JSON.stringify([{ id: 'm1', role: 'user', content: '第一条' }]), 'utf-8');
 
-    const cp2 = snapshotBeforeSend(aid, '第二条');
+    const cp2 = snapshotBeforeSend(aid, roomIdFor(aid), '第二条');
 
     fs.writeFileSync(path.join(dataDir, 'context.json'),
       JSON.stringify([
@@ -239,14 +244,14 @@ describe('rewindTo — 删除逻辑（弹出目标 checkpoint）', () => {
         { id: 'm3', role: 'user', content: '第二条' }
       ]), 'utf-8');
 
-    const cp3 = snapshotBeforeSend(aid, '第三条');
+    const cp3 = snapshotBeforeSend(aid, roomIdFor(aid), '第三条');
 
     // 回退到最新（cp3）
-    const result = rewindTo(aid, cp3);
+    const result = rewindTo(aid, roomIdFor(aid), cp3);
     assert.equal(result.ok, true, 'rewind 应成功');
 
     // cp3 连同其本身一并弹出，只剩 cp1/cp2（连按 rewind 才能往更旧走）
-    const list = listCheckpoints(aid);
+    const list = listCheckpoints(aid, roomIdFor(aid));
     assert.equal(list.length, 2, '回退到最新 checkpoint 应弹出 cp3');
     assert.equal(list[0].id, cp1);
     assert.equal(list[1].id, cp2);
@@ -259,20 +264,20 @@ describe('rewindTo — 删除逻辑（弹出目标 checkpoint）', () => {
 
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
 
-    snapshotBeforeSend(aid, '第一条');
+    snapshotBeforeSend(aid, roomIdFor(aid), '第一条');
 
     fs.writeFileSync(path.join(dataDir, 'context.json'),
       JSON.stringify([{ id: 'm1', role: 'user', content: '第一条' }]), 'utf-8');
 
-    const cp2 = snapshotBeforeSend(aid, '第二条');
+    const cp2 = snapshotBeforeSend(aid, roomIdFor(aid), '第二条');
 
     // 不传 checkpointId → 回退到最近一个（cp2）
-    const result = rewindTo(aid);
+    const result = rewindTo(aid, roomIdFor(aid));
     assert.equal(result.ok, true, 'rewind 应成功');
     assert.equal(result.restoredPrompt, '第二条', '应回退到最近的 checkpoint');
 
     // >= 语义：最近 checkpoint 连本身弹掉，只剩 cp1
-    const list = listCheckpoints(aid);
+    const list = listCheckpoints(aid, roomIdFor(aid));
     assert.equal(list.length, 1, '应只保留 cp1');
     assert.ok(!list.find(c => c.id === cp2), 'cp2 应被弹出');
   });
@@ -289,7 +294,7 @@ describe('rewindTo — room-history.jsonl 重建', () => {
 
     // 创建私聊房 history 目录
     const roomsDir = path.join(profilesRoot(), 'rooms');
-    const roomHistoryPath = path.join(roomsDir, `chat-${aid}`, 'history.jsonl');
+    const roomHistoryPath = path.join(roomsDir, `chat-u_test-${aid}`, 'history.jsonl');
     fs.mkdirSync(path.dirname(roomHistoryPath), { recursive: true });
 
     // 写入一个 room history
@@ -301,7 +306,7 @@ describe('rewindTo — room-history.jsonl 重建', () => {
     fs.writeFileSync(path.join(dataDir, 'context.json'),
       JSON.stringify([{ id: 'm1', role: 'user', content: '旧消息' }]), 'utf-8');
 
-    const cpId = snapshotBeforeSend(aid, '新消息');
+    const cpId = snapshotBeforeSend(aid, roomIdFor(aid), '新消息');
 
     // 模拟：用户又发了一条（room history 加了"新消息"）
     fs.appendFileSync(roomHistoryPath,
@@ -310,7 +315,7 @@ describe('rewindTo — room-history.jsonl 重建', () => {
 
     // 回退到 cpId（checkpoint 里没有 room-history.jsonl，因为 snapshotBeforeSend 之前的逻辑）
     // 验证 deleteRoomHistory=false 路径（本测试直接测 rewindTo 内部逻辑）
-    const result = rewindTo(aid, cpId, roomHistoryPath);
+    const result = rewindTo(aid, roomIdFor(aid), cpId, roomHistoryPath);
     assert.equal(result.ok, true, 'rewind 应成功');
 
     // room history 应从 context.json 重建
@@ -335,14 +340,14 @@ describe('listCheckpoints & latestCheckpointId', () => {
 
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
 
-    const cp1 = snapshotBeforeSend(aid, '第一条');
+    const cp1 = snapshotBeforeSend(aid, roomIdFor(aid), '第一条');
     // 等一小会儿确保时间戳不同
     const now = Date.now();
     while (Date.now() - now < 5) {}
 
-    const cp2 = snapshotBeforeSend(aid, '第二条');
+    const cp2 = snapshotBeforeSend(aid, roomIdFor(aid), '第二条');
 
-    const list = listCheckpoints(aid);
+    const list = listCheckpoints(aid, roomIdFor(aid));
     assert.equal(list.length, 2, '应有两个 checkpoint');
     // 升序：cp1 在前
     assert.equal(list[0].prompt, '第一条', '第一条应在前面');
@@ -356,23 +361,23 @@ describe('listCheckpoints & latestCheckpointId', () => {
 
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
 
-    snapshotBeforeSend(aid, '第一条');
+    snapshotBeforeSend(aid, roomIdFor(aid), '第一条');
 
     const now = Date.now();
     while (Date.now() - now < 5) {}
 
-    const cp2 = snapshotBeforeSend(aid, '第二条');
+    const cp2 = snapshotBeforeSend(aid, roomIdFor(aid), '第二条');
 
-    const latest = latestCheckpointId(aid);
+    const latest = latestCheckpointId(aid, roomIdFor(aid));
     assert.equal(latest, cp2, 'latestCheckpointId 应返回最近一个');
   });
 
   it('无 checkpoint 时应返回空列表', () => {
     const aid = agentId('no-cp');
     // 确保没有 checkpoint
-    const list = listCheckpoints(aid);
+    const list = listCheckpoints(aid, roomIdFor(aid));
     assert.deepEqual(list, [], '应返回空列表');
-    assert.equal(latestCheckpointId(aid), null, 'latestCheckpointId 应返回 null');
+    assert.equal(latestCheckpointId(aid, roomIdFor(aid)), null, 'latestCheckpointId 应返回 null');
   });
 
   it('rewind 后 checkpoint 列表应更新', () => {
@@ -382,21 +387,21 @@ describe('listCheckpoints & latestCheckpointId', () => {
 
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
 
-    const cp1 = snapshotBeforeSend(aid, '第一条');
+    const cp1 = snapshotBeforeSend(aid, roomIdFor(aid), '第一条');
 
     fs.writeFileSync(path.join(dataDir, 'context.json'),
       JSON.stringify([{ id: 'm1', role: 'user', content: '第一条' }]), 'utf-8');
 
-    const cp2 = snapshotBeforeSend(aid, '第二条');
+    const cp2 = snapshotBeforeSend(aid, roomIdFor(aid), '第二条');
 
     // 回退到 cp1：cp1 连同 cp2 全弹，栈空
-    rewindTo(aid, cp1);
+    rewindTo(aid, roomIdFor(aid), cp1);
 
-    const list = listCheckpoints(aid);
+    const list = listCheckpoints(aid, roomIdFor(aid));
     assert.equal(list.length, 0, 'cp1 及 cp2 都应被弹出');
 
     // 再次回退到 cp1：target 已不在栈，应失败（不再卡栈顶空转）
-    const result = rewindTo(aid, cp1);
+    const result = rewindTo(aid, roomIdFor(aid), cp1);
     assert.equal(result.ok, false, 'cp1 已弹出，重复回退应失败');
   });
 });
@@ -416,11 +421,11 @@ describe('snapshotBeforeSend — 滑窗淘汰', () => {
     for (let i = 0; i < 12; i++) {
       const now = Date.now();
       while (Date.now() - now < 2) {}
-      const cp = snapshotBeforeSend(aid, `消息${i}`);
+      const cp = snapshotBeforeSend(aid, roomIdFor(aid), `消息${i}`);
       cpIds.push(cp);
     }
 
-    const list = listCheckpoints(aid);
+    const list = listCheckpoints(aid, roomIdFor(aid));
     assert.equal(list.length, 10, '应只保留 10 个 checkpoint');
 
     // cpIds[0] 和 cpIds[1] 应被淘汰
@@ -444,11 +449,11 @@ describe('rewind 栈语义（seq 入栈定序 / rewindTo 出栈 / clearCheckpoin
     const dataDir = dataDirFor(aid);
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
 
-    const cp1 = snapshotBeforeSend(aid, '一');   // seq 0
-    const cp2 = snapshotBeforeSend(aid, '二');   // seq 1
-    const cp3 = snapshotBeforeSend(aid, '三');   // seq 2
+    const cp1 = snapshotBeforeSend(aid, roomIdFor(aid), '一');   // seq 0
+    const cp2 = snapshotBeforeSend(aid, roomIdFor(aid), '二');   // seq 1
+    const cp3 = snapshotBeforeSend(aid, roomIdFor(aid), '三');   // seq 2
 
-    const list = listCheckpoints(aid);
+    const list = listCheckpoints(aid, roomIdFor(aid));
     assert.equal(list.length, 3);
     assert.deepEqual(list.map(c => c.seq), [0, 1, 2], 'seq 应为 0,1,2 升序');
     assert.deepEqual(list.map(c => c.id), [cp1, cp2, cp3], '顺序应与创建一致');
@@ -460,18 +465,18 @@ describe('rewind 栈语义（seq 入栈定序 / rewindTo 出栈 / clearCheckpoin
     const dataDir = dataDirFor(aid);
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
 
-    const cp1 = snapshotBeforeSend(aid, '第一条');
+    const cp1 = snapshotBeforeSend(aid, roomIdFor(aid), '第一条');
     fs.writeFileSync(path.join(dataDir, 'context.json'),
       JSON.stringify([{ id: 'm1', role: 'user', content: '第一条' }]), 'utf-8');
-    const cp2 = snapshotBeforeSend(aid, '第二条');   // 故意紧挨着打，可能与 cp1 同毫秒
+    const cp2 = snapshotBeforeSend(aid, roomIdFor(aid), '第二条');   // 故意紧挨着打，可能与 cp1 同毫秒
 
-    const list0 = listCheckpoints(aid);
+    const list0 = listCheckpoints(aid, roomIdFor(aid));
     assert.equal(list0[0].id, cp1);
     assert.equal(list0[1].id, cp2);
     assert.ok(list0[1].seq > list0[0].seq, 'seq 仍严格递增（不依赖墙钟毫秒）');
 
-    rewindTo(aid, cp1);   // 出栈：弹出 cp1 及其之上全部（含 cp2）
-    const list = listCheckpoints(aid);
+    rewindTo(aid, roomIdFor(aid), cp1);   // 出栈：弹出 cp1 及其之上全部（含 cp2）
+    const list = listCheckpoints(aid, roomIdFor(aid));
     assert.equal(list.length, 0, '同毫秒下 rewind 也应弹出 cp1+cp2，栈空');
   });
 
@@ -481,13 +486,13 @@ describe('rewind 栈语义（seq 入栈定序 / rewindTo 出栈 / clearCheckpoin
     const dataDir = dataDirFor(aid);
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
 
-    const cp1 = snapshotBeforeSend(aid, '一');   // seq 0
-    snapshotBeforeSend(aid, '二');               // seq 1
-    rewindTo(aid, cp1);                          // 弹到 cp1：cp1 及 seq=1 全弹，栈空
-    assert.equal(listCheckpoints(aid).length, 0);
+    const cp1 = snapshotBeforeSend(aid, roomIdFor(aid), '一');   // seq 0
+    snapshotBeforeSend(aid, roomIdFor(aid), '二');               // seq 1
+    rewindTo(aid, roomIdFor(aid), cp1);                          // 弹到 cp1：cp1 及 seq=1 全弹，栈空
+    assert.equal(listCheckpoints(aid, roomIdFor(aid)).length, 0);
 
-    const cp3 = snapshotBeforeSend(aid, '三');   // 续推：栈空，seq 从 0 重新起
-    const list = listCheckpoints(aid);
+    const cp3 = snapshotBeforeSend(aid, roomIdFor(aid), '三');   // 续推：栈空，seq 从 0 重新起
+    const list = listCheckpoints(aid, roomIdFor(aid));
     assert.equal(list.length, 1);
     assert.deepEqual(list.map(c => c.id), [cp3], '栈=[cp3]');
     assert.deepEqual(list.map(c => c.seq), [0], '栈位置从 0 重新连续');
@@ -499,19 +504,19 @@ describe('rewind 栈语义（seq 入栈定序 / rewindTo 出栈 / clearCheckpoin
     const dataDir = dataDirFor(aid);
     fs.writeFileSync(path.join(dataDir, 'context.json'), '[]', 'utf-8');
 
-    snapshotBeforeSend(aid, '一');
-    snapshotBeforeSend(aid, '二');
-    assert.equal(listCheckpoints(aid).length, 2, '清空前应有 2 个');
+    snapshotBeforeSend(aid, roomIdFor(aid), '一');
+    snapshotBeforeSend(aid, roomIdFor(aid), '二');
+    assert.equal(listCheckpoints(aid, roomIdFor(aid)).length, 2, '清空前应有 2 个');
 
-    clearCheckpoints(aid);
+    clearCheckpoints(aid, roomIdFor(aid));
 
-    assert.equal(listCheckpoints(aid).length, 0, '清栈后应为空');
-    assert.equal(latestCheckpointId(aid), null, 'latestCheckpointId 应为 null');
+    assert.equal(listCheckpoints(aid, roomIdFor(aid)).length, 0, '清栈后应为空');
+    assert.equal(latestCheckpointId(aid, roomIdFor(aid)), null, 'latestCheckpointId 应为 null');
     assert.ok(!fs.existsSync(checkpointsDirFor(aid)), 'checkpoints 目录应被删');
 
     // 清栈后再打快照，seq 从 0 重新开始（栈已空）
-    const cp = snapshotBeforeSend(aid, '三');
-    const list = listCheckpoints(aid);
+    const cp = snapshotBeforeSend(aid, roomIdFor(aid), '三');
+    const list = listCheckpoints(aid, roomIdFor(aid));
     assert.equal(list.length, 1);
     assert.equal(list[0].id, cp);
     assert.equal(list[0].seq, 0, '清空后重打 seq 从 0 起');

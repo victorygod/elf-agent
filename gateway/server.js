@@ -1,6 +1,13 @@
 /**
  * Gateway Express 路由与中间件
  * SSE 透传 Agent 响应
+ *
+ * 多用户改造（docs/multi-user-auth-design.md）：
+ *  - /auth/* 注册/登录/me（无鉴权）
+ *  - 全局鉴权中间件：express.json 之后、一切业务路由之前（含 plugin-loader 注册的 agent 路由）
+ *  - 写操作（config PUT / 建 agent / skill 管理 / 群管理）仅 admin；访客只读
+ *  - start/stop 按角色分派：admin=全局启停；visitor=自己的私聊 room 开关
+ *  - /settings 改为 per-user（读写 profiles/users/<uid>/user.json）
  */
 
 import fs from 'fs';
@@ -15,6 +22,9 @@ import { handleAvatarUpload } from './avatar.js';
 import { registerRoomRoutes } from './room_routes.js';
 import { createAgentFromTemplate } from './agent_scaffold.js';
 import { registerAgentAPIs } from './plugin-loader.js';
+import { createAuthRouter, setJwtSecret, saveUser, setRoomEnabledForUser } from './auth.js';
+import { createAuthMiddleware, requireAdmin } from './auth_middleware.js';
+import { userDir } from '../shared/profiles_paths.js';
 import {
   listSkills, getSkillDetail, deleteSkill, installSkill, browseDirs, skillRoot,
 } from './skill_store.js';
@@ -24,7 +34,7 @@ const logger = createLogger('gateway-server', 'gateway.log');
 /**
  * 创建 Gateway Express 应用
  * @param {ProcessManager} pm - 进程管理器实例
- * @param {object} [roomManager] - 群聊管理器实例（注入 /rooms/* 路由，含私聊 chat-<id>）
+ * @param {object} [roomManager] - 群聊管理器实例（注入 /rooms/* 路由，含私聊 chat-<uid>-<id>）
  * @param {object} [opts] - { privateRoomHistory }
  * @returns {express.Application}
  */
@@ -37,6 +47,11 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
   // 私聊房需要调 agent /observe——pm 经 roomManager 持有，或直接 pm 引用。
   if (roomManager && !roomManager.pm) roomManager.pm = pm;
 
+  // ===== 鉴权（/auth 公开；其余业务路由一律过中间件）=====
+  const gwConfig = loadGatewayConfig();
+  setJwtSecret(gwConfig.jwtSecret);
+  app.use('/auth', createAuthRouter());
+  app.use(createAuthMiddleware({ internalToken: gwConfig.internalToken }));
 
   // 辅助：检查 Agent 是否存在
   function checkAgentExists(req, res, next) {
@@ -47,13 +62,28 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
     next();
   }
 
-  // GET /agents — 列出所有 Agent
+  /** 私聊 roomId：chat-<uid>-<agentId>（uid 不含 '-'，agentId 可含 '-'） */
+  const privateRoomId = (uid, agentId) => `chat-${uid}-${agentId}`;
+
+  /**
+   * 按请求者视角输出 agent 列表/详情。
+   * 访客的 status 反映「自己的私聊 room 可用性」：全局 running 且自己未停用 → running，否则 stopped。
+   * 这样前端自动启停逻辑（status!=='running' 就 start）对两种角色都成立，无需分支。
+   */
+  function presentAgent(info, user) {
+    if (!info || user?.role !== 'visitor') return info;
+    const enabled = !(user.disabledAgents || []).includes(info.agentId);
+    const running = info.status === 'running' && enabled;
+    return { ...info, status: running ? 'running' : 'stopped' };
+  }
+
+  // GET /agents — 列出所有 Agent（按请求者视角）
   app.get('/agents', (req, res) => {
-    res.json(pm.listAgents());
+    res.json(pm.listAgents().map(a => presentAgent(a, req.user)));
   });
 
-  // POST /agents — 从独立模板创建一个白板 Agent（body: { name }，不读写 elf-001）
-  app.post('/agents', async (req, res) => {
+  // POST /agents — 从独立模板创建一个白板 Agent（admin）
+  app.post('/agents', requireAdmin, async (req, res) => {
     try {
       const { name } = req.body || {};
       const created = await createAgentFromTemplate({ agentsDir: pm.agentsDir, name });
@@ -78,8 +108,8 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
     }
   });
 
-  // POST /agents/rediscover — 重新扫描文件系统，发现新增/变更的 Agent
-  app.post('/agents/rediscover', async (req, res) => {
+  // POST /agents/rediscover — 重新扫描文件系统，发现新增/变更的 Agent（admin）
+  app.post('/agents/rediscover', requireAdmin, async (req, res) => {
     try {
       const result = await pm.rediscoverAgents();
       // 重新探活所有 Agent 以更新运行状态
@@ -88,7 +118,7 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
       }
       const list = pm.listAgents();
       res.json({
-        agents: list,
+        agents: list.map(a => presentAgent(a, req.user)),
         discovery: result
       });
     } catch (err) {
@@ -97,15 +127,23 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
     }
   });
 
-  // GET /agents/:id — 获取单个 Agent 详情
+  // GET /agents/:id — 获取单个 Agent 详情（按请求者视角）
   app.get('/agents/:id', checkAgentExists, (req, res) => {
     const info = pm.getAgent(req.params.id);
-    res.json(info);
+    res.json(presentAgent(info, req.user));
   });
 
-  // POST /agents/:id/start — 启动 Agent
+  // POST /agents/:id/start — 启动（admin=全局；visitor=启用自己与该 agent 的私聊 room）
   app.post('/agents/:id/start', checkAgentExists, async (req, res) => {
     try {
+      if (req.user?.role === 'visitor') {
+        // 访客：agent 必须已全局运行（启停全局是 admin 的事）
+        if (pm.getAgentStatus(req.params.id) !== 'running') {
+          return res.status(403).json({ error: '该 Agent 未全局启用，请联系管理员' });
+        }
+        setRoomEnabledForUser(req.user.uid, req.params.id, true);
+        return res.json({ agentId: req.params.id, status: 'running' });
+      }
       const result = await pm.startAgent(req.params.id);
       res.json(result);
     } catch (err) {
@@ -113,9 +151,20 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
     }
   });
 
-  // POST /agents/:id/stop — 停止 Agent
+  // POST /agents/:id/stop — 停止（admin=全局；visitor=停用自己的私聊 room，不影响他人）
   app.post('/agents/:id/stop', checkAgentExists, async (req, res) => {
     try {
+      if (req.user?.role === 'visitor') {
+        setRoomEnabledForUser(req.user.uid, req.params.id, false);
+        // 中断该用户在飞回合（其他用户的 room 不动）
+        const port = pm.getServerPort?.();
+        if (port) {
+          const rid = privateRoomId(req.user.uid, req.params.id);
+          fetch(`http://127.0.0.1:${port}/abort/${encodeURIComponent(rid)}`, { method: 'POST', signal: AbortSignal.timeout(3000) })
+            .catch(() => { /* 无在飞回合或 server 未起，忽略 */ });
+        }
+        return res.json({ agentId: req.params.id, status: 'stopped' });
+      }
       const result = await pm.stopAgent(req.params.id);
       res.json(result);
     } catch (err) {
@@ -124,9 +173,9 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
   });
 
   // v3：废弃旧私聊 HTTP 路由（/agents/:id/chat|subscribe|abort|rewind|checkpoints|history|sync-history|memory）。
-  //   私聊统一为 Room，全走 /rooms/chat-<id>/*（见 gateway/room_routes.js）。下面仅保留进程管理与配置路由。
+  //   私聊统一为 Room，全走 /rooms/chat-<uid>-<id>/*（见 gateway/room_routes.js）。下面仅保留进程管理与配置路由。
 
-  // GET /agents/:id/config — 获取 Agent 配置
+  // GET /agents/:id/config — 获取 Agent 配置（访客可读，面板只读由前端按角色渲染）
   app.get('/agents/:id/config', checkAgentExists, (req, res) => {
     const id = req.params.id;
     const configDir = path.join(pm.agentsDir, id, 'config');
@@ -153,12 +202,13 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
 
   // 注册 agent 专属 API 路由（扫描 agents/{id}/ui/api.js）
   // 放在 config-ui 之后、通配路由之前，确保专属路由优先
-  registerAgentAPIs(app, pm, pm.agentsDir).catch(err => {
+  // 鉴权：全局中间件已覆盖（req.user 可用）；agent 插件内的写操作自行加 requireAdmin
+  registerAgentAPIs(app, pm, pm.agentsDir, { requireAdmin }).catch(err => {
     logger.error(`Agent API 注册失败: ${err.message}`);
   });
 
-  // PUT /agents/:id/config — 更新 Agent 配置
-  app.put('/agents/:id/config', checkAgentExists, (req, res) => {
+  // PUT /agents/:id/config — 更新 Agent 配置（admin）
+  app.put('/agents/:id/config', checkAgentExists, requireAdmin, (req, res) => {
     const id = req.params.id;
     const configDir = path.join(pm.agentsDir, id, 'config');
 
@@ -201,8 +251,8 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
     }
   });
 
-  // DELETE /skills/:name — 删除一个 skill 目录
-  app.delete('/skills/:name', (req, res) => {
+  // DELETE /skills/:name — 删除一个 skill 目录（admin）
+  app.delete('/skills/:name', requireAdmin, (req, res) => {
     try {
       const result = deleteSkill(req.params.name);
       res.json(result);
@@ -211,8 +261,8 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
     }
   });
 
-  // POST /skills/install — body: { sourcePath } 把一个目录复制到 ~/.elf/skills/
-  app.post('/skills/install', (req, res) => {
+  // POST /skills/install — body: { sourcePath } 把一个目录复制到 ~/.elf/skills/（admin）
+  app.post('/skills/install', requireAdmin, (req, res) => {
     try {
       const { sourcePath } = req.body || {};
       const result = installSkill(sourcePath);
@@ -232,16 +282,16 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
     }
   });
 
-  // 头像上传 API — base64 格式，存入 agents/{id}/config/
-  app.post('/agents/:id/avatar', checkAgentExists, (req, res) => {
+  // 头像上传 API — base64 格式，存入 agents/{id}/config/（admin；agent 人设属平台共享资源）
+  app.post('/agents/:id/avatar', checkAgentExists, requireAdmin, (req, res) => {
     handleAvatarUpload(req, res, 'avatar', pm.agentsDir, pm.agents);
   });
 
-  app.post('/agents/:id/user-avatar', checkAgentExists, (req, res) => {
+  app.post('/agents/:id/user-avatar', checkAgentExists, requireAdmin, (req, res) => {
     handleAvatarUpload(req, res, 'userAvatar', pm.agentsDir, pm.agents);
   });
 
-  // 静态文件服务 — agent 配置目录（用于头像图片访问）
+  // 静态文件服务 — agent 配置目录（用于头像图片访问；图片免鉴权，见 auth_middleware 白名单）
   app.use('/agents/:id/config', (req, res, next) => {
     const agentId = req.params.id;
     const filename = req.path.replace(/^\//, '');
@@ -274,53 +324,78 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
 
   // 群聊路由（/rooms/*，可选注入）
   if (roomManager) {
-    registerRoomRoutes(app, roomManager, { pm, privateRoomHistory });
+    registerRoomRoutes(app, roomManager, { pm, privateRoomHistory, requireAdmin });
   }
 
   // POST /subscribe — 聚合 SSE:前端全程 1 条,收所有私聊房 + 群聊房事件(带 {roomId,roomType})。
-  //   见 docs/sse-aggregation-design.md。旧 GET /rooms/:rid/subscribe 保留过渡。
+  //   多用户：attach 带 req.user，私聊房按该用户启用态过滤（见 aggregated_stream.js）。
   app.post('/subscribe', (req, res) => {
     if (!aggregator) return res.status(503).json({ error: '聚合订阅未启用' });
-    aggregator.attach(res);
+    aggregator.attach(res, req.user);
   });
 
-  // 全局设置（用户名、用户头像等）
-  // 问题3：同时返回 userUid（稳定身份，默认 default_userid），改名不影响历史归属。
-  // sidebarOrder：侧栏手动排序，随 settings 一起返回。
-  // userAvatar：全局用户头像，null 表示使用默认色块头像。
+  // ===== 全局设置（per-user：读写 profiles/users/<uid>/user.json）=====
+  // 返回字段保持旧契约（userUid = uid），前端 roomStore 无需改结构。
   app.get('/settings', (req, res) => {
-    const { userName, userAvatar, userUid, sidebarOrder } = loadGatewayConfig();
-    res.json({ userName, userAvatar, userUid, sidebarOrder });
+    const u = req.user;
+    if (!u) return res.status(401).json({ error: '未登录' });
+    res.json({
+      userName: u.userName || u.username,
+      userAvatar: u.userAvatar ?? null,
+      userUid: u.uid,
+      username: u.username,
+      role: u.role,
+      sidebarOrder: u.sidebarOrder || { rooms: [], agents: [] },
+    });
   });
   app.put('/settings', (req, res) => {
-    const { userName, userAvatar, userUid } = req.body || {};
-    if (!userName && !userAvatar) {
-      return res.status(400).json({ error: 'userName 或 userAvatar 必填其一' });
+    const u = req.user;
+    if (!u) return res.status(401).json({ error: '未登录' });
+    const { userName, sidebarOrder, userAvatar } = req.body || {};
+    if (typeof userName === 'string' && userName.trim()) u.userName = userName.trim();
+    // userAvatar === null → 移除头像（删文件 + 清字段）；上传走 POST /settings/avatar，不经这里
+    if (userAvatar === null) {
+      const dir = userDir(u.uid);
+      for (const ext of ['png', 'jpg', 'gif', 'webp']) {
+        const f = path.join(dir, `avatar.${ext}`);
+        if (fs.existsSync(f)) { try { fs.unlinkSync(f); } catch (e) { /* ignore */ } }
+      }
+      u.userAvatar = null;
     }
-    const updates = {};
-    if (typeof userName === 'string' && userName.trim()) updates.userName = userName.trim();
-    if (typeof userAvatar === 'string' || userAvatar === null) updates.userAvatar = userAvatar;
-    if (typeof userUid === 'string' && userUid.trim()) updates.userUid = userUid.trim();
-    const updated = saveGatewayConfig(updates);
-    res.json({ userName: updated.userName, userAvatar: updated.userAvatar, userUid: updated.userUid });
+    if (sidebarOrder && typeof sidebarOrder === 'object') {
+      const isStrArr = (v) => Array.isArray(v) && v.every(x => typeof x === 'string');
+      u.sidebarOrder = {
+        rooms: isStrArr(sidebarOrder.rooms) ? sidebarOrder.rooms : [],
+        agents: isStrArr(sidebarOrder.agents) ? sidebarOrder.agents : [],
+      };
+    }
+    saveUser(u);
+    res.json({ userName: u.userName, userAvatar: u.userAvatar ?? null, userUid: u.uid, role: u.role, sidebarOrder: u.sidebarOrder });
   });
 
-  // 侧栏排序：单独端点保存，避免与 PUT /settings 的 userName 必填校验耦合
+  // 侧栏排序：单独端点保存，避免与 PUT /settings 的校验耦合
   app.put('/settings/sidebar-order', (req, res) => {
+    const u = req.user;
+    if (!u) return res.status(401).json({ error: '未登录' });
     const so = req.body?.sidebarOrder;
     if (!so || typeof so !== 'object') {
       return res.status(400).json({ error: 'sidebarOrder 必填' });
     }
-    const updated = saveGatewayConfig({ sidebarOrder: so });
-    res.json({ sidebarOrder: updated.sidebarOrder });
+    const isStrArr = (v) => Array.isArray(v) && v.every(x => typeof x === 'string');
+    u.sidebarOrder = {
+      rooms: isStrArr(so.rooms) ? so.rooms : [],
+      agents: isStrArr(so.agents) ? so.agents : [],
+    };
+    saveUser(u);
+    res.json({ sidebarOrder: u.sidebarOrder });
   });
 
-  // 用户头像保存（接收 base64，存为 uploads/user_avatar.{ext}，gateway.json 记录文件名）
+  // 用户头像保存（接收 base64，存 profiles/users/<uid>/avatar.<ext>，user.json 记录扩展名）
   const EXT_MAP = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
-  const uploadsDir = path.join(process.cwd(), 'uploads');
-  fs.mkdirSync(uploadsDir, { recursive: true });
 
   app.post('/settings/avatar', (req, res) => {
+    const u = req.user;
+    if (!u) return res.status(401).json({ error: '未登录' });
     try {
       const { data, type } = req.body || {};
       if (!data || !type) {
@@ -330,32 +405,35 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
       if (!ext) {
         return res.status(400).json({ error: '不支持的图片类型，仅 png/jpg/gif/webp' });
       }
+      const dir = userDir(u.uid);
+      fs.mkdirSync(dir, { recursive: true });
       // 清理旧头像（不同扩展名）
       for (const oldExt of ['png', 'jpg', 'gif', 'webp']) {
-        const oldFile = path.join(uploadsDir, `user_avatar.${oldExt}`);
+        const oldFile = path.join(dir, `avatar.${oldExt}`);
         if (fs.existsSync(oldFile)) {
           try { fs.unlinkSync(oldFile); } catch (e) { /* ignore */ }
         }
       }
       const base64Data = data.replace(/^data:image\/\w+;base64,/, '');
       const buffer = Buffer.from(base64Data, 'base64');
-      const filename = `user_avatar.${ext}`;
-      fs.writeFileSync(path.join(uploadsDir, filename), buffer);
+      fs.writeFileSync(path.join(dir, `avatar.${ext}`), buffer);
 
-      const updated = saveGatewayConfig({ userAvatar: filename });
-      res.json({ userAvatar: updated.userAvatar });
+      u.userAvatar = ext;
+      saveUser(u);
+      res.json({ userAvatar: u.userAvatar });
     } catch (err) {
       res.status(500).json({ error: `保存头像失败: ${err.message}` });
     }
   });
 
-  // uploads 静态目录（用户头像文件访问）
-  app.use('/uploads', (req, res) => {
-    const filename = req.path.replace(/^\//, '');
-    if (!filename) return res.status(404).json({ error: 'File not found' });
-    const filePath = path.join(uploadsDir, filename);
-    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-      return res.sendFile(filePath);
+  // 用户头像访问（公开：<img> 标签发不了 Authorization 头）
+  app.get('/users/:uid/avatar', (req, res) => {
+    const dir = userDir(req.params.uid);
+    for (const ext of ['webp', 'png', 'jpg', 'gif']) {
+      const p = path.join(dir, `avatar.${ext}`);
+      if (fs.existsSync(p) && fs.statSync(p).isFile()) {
+        return res.sendFile(p);
+      }
     }
     res.status(404).json({ error: 'File not found' });
   });

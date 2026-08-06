@@ -11,8 +11,7 @@ import path from 'path';
 import { buildMetadata } from '../../../shared/agents/elf-018/buildMetadata.js';
 import { parseFrontmatter } from '../../../engine/skills/parser.js';
 import { LLMModel } from '../../../engine/models/llm.js';
-import { agentMemory, roomsRoot } from '../../../shared/profiles_paths.js';
-import { listCheckpoints } from '../../../gateway/snapshot.js';
+import { agentRoomState, roomsRoot } from '../../../shared/profiles_paths.js';
 import { createLogger } from '../../../shared/logger.js';
 
 const logger = createLogger('elf-018-polish', 'gateway.log');
@@ -54,11 +53,23 @@ function parseFm(txt) {
   return name ? { name, description: desc || '' } : null;
 }
 
-export default function register(pm, agentId) {
+export default function register(pm, agentId, opts = {}) {
+  // 多用户：agent 专属路由全部过全局鉴权中间件（req.user 可用）。
+  // 写操作（styles/全局资源共享）仅 admin；lore/存档/主角面板操作自己的私聊房数据，访客可用。
+  const requireAdmin = opts.requireAdmin || ((req, res, next) => next());
+
+  /** 当前请求用户的私聊房数据目录：profiles/agents/<id>/rooms/chat-<uid>-<id>/ */
+  function roomDataDir(req) {
+    return agentRoomState(agentId, `chat-${req.user.uid}-${agentId}`);
+  }
+  /** 当前请求用户的私聊房 roomId */
+  function roomIdOf(req) {
+    return `chat-${req.user.uid}-${agentId}`;
+  }
 
   // ===== GET /game-state =====
   const gameState = async (req, res) => {
-    const loreDir = path.join(agentMemory(agentId), 'runtime', 'lore');
+    const loreDir = path.join(roomDataDir(req), 'runtime', 'lore');
     const readFull = (p) => { try { return fs.readFileSync(p, 'utf-8'); } catch { return ''; } };
     const scan = (sub) => {
       const dir = path.join(loreDir, sub);
@@ -196,12 +207,12 @@ export default function register(pm, agentId) {
   // ===== 记录集通用工具（lore 实体，文件名含中文等字符）=====
   const LORE_TYPES = new Set(['characters', 'items', 'locations', 'skills', 'quests']);
 
-  function loreDirOf(id, type) {
-    return path.join(agentMemory(id), 'runtime', 'lore', type);
+  function loreDirOf(req, type) {
+    return path.join(roomDataDir(req), 'runtime', 'lore', type);
   }
 
-  function safeLorePath(id, type, fileName) {
-    const root = path.resolve(loreDirOf(id, type));
+  function safeLorePath(req, type, fileName) {
+    const root = path.resolve(loreDirOf(req, type));
     const resolved = path.resolve(root, fileName);
     if (resolved !== root && !resolved.startsWith(root + path.sep)) {
       throw Object.assign(new Error('path escape detected'), { statusCode: 400 });
@@ -218,7 +229,7 @@ export default function register(pm, agentId) {
   const listLore = async (req, res) => {
     const type = req.params.type;
     if (!LORE_TYPES.has(type)) return res.status(400).json({ error: '无效的 lore 类型' });
-    const dir = loreDirOf(agentId, type);
+    const dir = loreDirOf(req, type);
     const out = [];
     try {
       for (const f of fs.readdirSync(dir).filter(x => x.endsWith('.md') && !x.endsWith('.prev.md')).sort()) {
@@ -244,9 +255,9 @@ export default function register(pm, agentId) {
     // 文件名规范化：中英文数字下划线连字符点
     const fileName = name.trim().replace(/[^\w.一-鿿-]/g, '_') + '.md';
     let p;
-    try { p = safeLorePath(agentId, type, fileName); } catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
+    try { p = safeLorePath(req, type, fileName); } catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
     if (fs.existsSync(p)) return res.status(409).json({ error: '已存在同名文件' });
-    fs.mkdirSync(loreDirOf(agentId, type), { recursive: true });
+    fs.mkdirSync(loreDirOf(req, type), { recursive: true });
     fs.writeFileSync(p, assembleLoreFile(name.trim(), description, body), 'utf-8');
     res.json({ ok: true, filename: fileName });
   };
@@ -260,7 +271,7 @@ export default function register(pm, agentId) {
     if (!name || !String(name).trim()) return res.status(400).json({ error: 'name 必填' });
     const newFileName = name.trim().replace(/[^\w.一-鿿-]/g, '_') + '.md';
     let oldPath, newPath;
-    try { oldPath = safeLorePath(agentId, type, oldFile); newPath = safeLorePath(agentId, type, newFileName); }
+    try { oldPath = safeLorePath(req, type, oldFile); newPath = safeLorePath(req, type, newFileName); }
     catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
     if (!fs.existsSync(oldPath)) return res.status(404).json({ error: oldFile + ' 不存在' });
     if (newFileName !== oldFile && fs.existsSync(newPath)) return res.status(409).json({ error: '目标名 ' + newFileName + ' 已存在' });
@@ -275,7 +286,7 @@ export default function register(pm, agentId) {
     if (!LORE_TYPES.has(type)) return res.status(400).json({ error: '无效的 lore 类型' });
     const f = req.params.filename;
     let p;
-    try { p = safeLorePath(agentId, type, f); } catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
+    try { p = safeLorePath(req, type, f); } catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
     try { fs.rmSync(p, { force: true }); res.json({ ok: true }); }
     catch (e) { res.status(500).json({ error: e.message }); }
   };
@@ -283,7 +294,7 @@ export default function register(pm, agentId) {
   // ===== PUT /user-profile — 写主角面板（name + body，全量覆盖）=====
   const updateUserProfile = async (req, res) => {
     const { name, body } = req.body || {};
-    const protPath = path.join(agentMemory(agentId), 'runtime', 'lore', 'user_profile.md');
+    const protPath = path.join(roomDataDir(req), 'runtime', 'lore', 'user_profile.md');
     try {
       let txt = '';
       if (fs.existsSync(protPath)) txt = fs.readFileSync(protPath, 'utf-8');
@@ -309,8 +320,7 @@ export default function register(pm, agentId) {
     }
   };
 
-  // ===== 存档管理 =====
-  const memoryDir = agentMemory(agentId);
+  // ===== 存档管理（per-user：存的是当前用户私聊房的游戏状态）=====
 
   /** 复制目录（递归） */
   function _copyDir(src, dest) {
@@ -326,9 +336,9 @@ export default function register(pm, agentId) {
     }
   }
 
-  /** savings 目录 */
-  function _savingsDir() { return path.join(memoryDir, 'savings'); }
-  function _saveDir(name) { return path.join(_savingsDir(), name); }
+  /** savings 目录（按请求用户定位） */
+  function _savingsDir(req) { return path.join(roomDataDir(req), 'savings'); }
+  function _saveDir(req, name) { return path.join(_savingsDir(req), name); }
 
   // POST /save — 存档：拷贝 runtime + checkpoints + context + tool-results + sync_cursor + history
   //    重名时 force=true 先删旧存档再写入
@@ -336,7 +346,8 @@ export default function register(pm, agentId) {
     const { name, force } = req.body || {};
     const saveName = String(name || '').trim();
     if (!saveName) return res.status(400).json({ error: '存档名必填' });
-    const dest = _saveDir(saveName);
+    const memoryDir = roomDataDir(req);
+    const dest = _saveDir(req, saveName);
     if (fs.existsSync(dest)) {
       if (force) {
         fs.rmSync(dest, { recursive: true, force: true });
@@ -358,8 +369,8 @@ export default function register(pm, agentId) {
       }
       const trDir = path.join(memoryDir, 'tool-results');
       if (fs.existsSync(trDir)) _copyDir(trDir, path.join(dest, 'tool-results'));
-      // 私聊房 history
-      const roomHistoryPath = path.join(roomsRoot(), 'chat-' + agentId, 'history.jsonl');
+      // 私聊房 history（当前用户的房）
+      const roomHistoryPath = path.join(roomsRoot(), roomIdOf(req), 'history.jsonl');
       if (fs.existsSync(roomHistoryPath)) fs.copyFileSync(roomHistoryPath, path.join(dest, 'room-history.jsonl'));
       // 存档元信息：记录当前轮次（数 outline/round-N.md 文件数 = 已完成的轮数）
       let round = 0;
@@ -380,7 +391,7 @@ export default function register(pm, agentId) {
 
   // GET /saves — 列出所有存档
   const listSaves = async (req, res) => {
-    const dir = _savingsDir();
+    const dir = _savingsDir(req);
     const out = [];
     try {
       for (const entry of fs.readdirSync(dir)) {
@@ -411,8 +422,9 @@ export default function register(pm, agentId) {
     const { name } = req.body || {};
     const saveName = String(name || '').trim();
     if (!saveName) return res.status(400).json({ error: '存档名必填' });
-    const src = _saveDir(saveName);
+    const src = _saveDir(req, saveName);
     if (!fs.existsSync(src)) return res.status(404).json({ error: '存档不存在' });
+    const memoryDir = roomDataDir(req);
     try {
       // 1. 恢复 runtime（含 lore/outline/scene 等）
       const srcRuntime = path.join(src, 'runtime');
@@ -440,17 +452,17 @@ export default function register(pm, agentId) {
         _copyDir(srcTr, liveTr);
       }
 
-      // 4. 恢复私聊房 history
+      // 4. 恢复私聊房 history（当前用户的房）
       const srcHistory = path.join(src, 'room-history.jsonl');
-      const roomHistoryPath = path.join(roomsRoot(), 'chat-' + agentId, 'history.jsonl');
+      const roomHistoryPath = path.join(roomsRoot(), roomIdOf(req), 'history.jsonl');
       if (fs.existsSync(srcHistory) && fs.existsSync(roomHistoryPath)) {
         fs.copyFileSync(srcHistory, roomHistoryPath);
       }
 
-      // 5. reload agent 进程（如 running）
+      // 5. reload agent 进程（如 running）——reload 当前用户的房
       const port = pm?.getAgentPort?.(agentId);
       if (port) {
-        fetch('http://127.0.0.1:' + port + '/reload/chat-' + agentId, { method: 'POST' })
+        fetch('http://127.0.0.1:' + port + '/reload/' + encodeURIComponent(roomIdOf(req)), { method: 'POST' })
           .catch(err => console.warn('[loadSave] agent reload 失败', err.message));
       }
 
@@ -463,7 +475,7 @@ export default function register(pm, agentId) {
   // DELETE /save/:name — 删除存档目录
   const deleteSave = async (req, res) => {
     const saveName = decodeURIComponent(req.params.name);
-    const dest = _saveDir(saveName);
+    const dest = _saveDir(req, saveName);
     if (!fs.existsSync(dest)) return res.status(404).json({ error: '存档不存在' });
     try {
       fs.rmSync(dest, { recursive: true, force: true });
@@ -522,7 +534,7 @@ export default function register(pm, agentId) {
 
     logger.info(`[polish] 开始 agent=${agentId} type=${type} name=${name} desc.len=${(description||'').length} body.len=${(body||'').length}`);
     try {
-      const loreDir = path.join(agentMemory(agentId), 'runtime', 'lore');
+      const loreDir = path.join(roomDataDir(req), 'runtime', 'lore');
 
       // 1. 读 system_prompt
       const sysPrompt = (() => {
@@ -579,13 +591,14 @@ export default function register(pm, agentId) {
       logger.info(`[polish] LLM 返回 len=${(llmOutput||'').length}`);
 
       // 7. parse frontmatter；name 由 modal 保留原值（前端不取 LLM 的 name），故不校验、不拒绝
-      const { frontmatter, body } = parseFrontmatter(llmOutput);
+      //   llmBody 与外层 body（用户草稿）同名会触发 TDZ，改名 llmBody 消歧
+      const { frontmatter, body: llmBody } = parseFrontmatter(llmOutput);
       const genName = (frontmatter.name || '').trim();
       if (genName && genName !== String(name).trim()) {
         logger.info(`[polish] AI 改名 复写 原=${name} 生成=${genName}（已忽略，用原名）`);
       }
       const outDesc = (frontmatter.description || '').trim();
-      const outBody = body.trim();
+      const outBody = llmBody.trim();
       logger.info(`[polish] 成功 desc.len=${outDesc.length} body.len=${outBody.length}`);
       res.json({ ok: true, description: outDesc, body: outBody });
     } catch (e) {
@@ -597,9 +610,9 @@ export default function register(pm, agentId) {
   return [
     { method: 'GET',    path: '/game-state',          handler: gameState },
     { method: 'GET',    path: '/styles',              handler: listStyles },
-    { method: 'POST',   path: '/styles',              handler: createStyle },
-    { method: 'PUT',    path: '/styles/:filename',    handler: updateStyle },
-    { method: 'DELETE', path: '/styles/:filename',    handler: deleteStyle },
+    { method: 'POST',   path: '/styles',              handler: [requireAdmin, createStyle] },
+    { method: 'PUT',    path: '/styles/:filename',    handler: [requireAdmin, updateStyle] },
+    { method: 'DELETE', path: '/styles/:filename',    handler: [requireAdmin, deleteStyle] },
     { method: 'PUT',    path: '/user-profile',          handler: updateUserProfile },
     { method: 'GET',    path: '/seeds',               handler: getSeeds },
     { method: 'GET',    path: '/lore/:type',          handler: listLore },

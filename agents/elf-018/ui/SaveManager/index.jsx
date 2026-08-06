@@ -7,6 +7,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import useAgentStore from '@spa/stores/agentStore.js';
+import ConfirmModal from '@spa/components/ConfirmModal';
 
 const btnBase = { padding: '3px 10px', fontSize: '12px', cursor: 'pointer', border: '1px solid #d0d0d0', borderRadius: '4px', background: '#fff' };
 const inputS = { width: '100%', padding: '5px 8px', fontSize: '13px', border: '1px solid #d0d0d0', borderRadius: '4px', boxSizing: 'border-box' };
@@ -17,6 +18,8 @@ export default function SaveManager({ agentId, bridge }) {
   const [saveName, setSaveName] = useState('');
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState(null);
+  // 待确认动作（替代原生 confirm()，避免 Electron/非激活窗口被屏蔽导致按钮无响应）
+  const [confirm, setConfirm] = useState(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -32,7 +35,7 @@ export default function SaveManager({ agentId, bridge }) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const handleSave = async (force) => {
+  const doSave = async (force) => {
     if (!saveName.trim() || saving) return;
     setSaving(true);
     setMsg(null);
@@ -44,11 +47,15 @@ export default function SaveManager({ agentId, bridge }) {
       setSaveName('');
       refresh();
     } catch (e) {
-      if (/409/.test(e.message) && !force) {
+      if (e.status === 409 && !force) {
         setSaving(false);
-        if (confirm('存档「' + saveName.trim() + '」已存在，是否覆盖？')) {
-          return handleSave(true);
-        }
+        setConfirm({
+          title: '覆盖存档',
+          message: '存档「' + saveName.trim() + '」已存在，是否覆盖？',
+          confirmText: '覆盖',
+          tone: 'warning',
+          onConfirm: () => { setConfirm(null); doSave(true); },
+        });
         return;
       }
       setMsg({ type: 'error', text: '存档失败: ' + e.message });
@@ -57,31 +64,49 @@ export default function SaveManager({ agentId, bridge }) {
     }
   };
 
-  const handleLoad = async (name) => {
-    if (!confirm('确定加载存档「' + name + '」？当前未保存的进度将丢失。')) return;
-    setMsg(null);
-    try {
-      await bridge.call('POST', '/load-save', { name });
-      // 刷新 store：清空当前 chat 态，强制从 API 重拉历史
-      const store = useAgentStore.getState();
-      store._patchChat(agentId, { turns: [], activeTurn: null, historyLoaded: false });
-      await store.loadHistory(agentId, { force: true });
-      setMsg({ type: 'ok', text: '已加载存档: ' + name });
-    } catch (e) {
-      setMsg({ type: 'error', text: '读档失败: ' + e.message });
-    }
+  const handleSave = () => doSave(false);
+
+  const handleLoad = (name) => {
+    setConfirm({
+      title: '加载存档',
+      message: '确定加载存档「' + name + '」？当前未保存的进度将丢失。',
+      confirmText: '加载',
+      tone: 'warning',
+      onConfirm: async () => {
+        setConfirm(null);
+        setMsg(null);
+        try {
+          await bridge.call('POST', '/load-save', { name });
+          // 刷新 store：清空当前 chat 态，强制从 API 重拉历史
+          const store = useAgentStore.getState();
+          store._patchChat(agentId, { turns: [], activeTurn: null, historyLoaded: false });
+          await store.loadHistory(agentId, { force: true });
+          setMsg({ type: 'ok', text: '已加载存档: ' + name });
+        } catch (e) {
+          setMsg({ type: 'error', text: '读档失败: ' + e.message });
+        }
+      },
+    });
   };
 
-  const handleDelete = async (name) => {
-    if (!confirm('确定删除存档「' + name + '」？此操作不可恢复。')) return;
-    setMsg(null);
-    try {
-      await bridge.call('DELETE', '/save/' + encodeURIComponent(name));
-      setMsg({ type: 'ok', text: '已删除存档: ' + name });
-      refresh();
-    } catch (e) {
-      setMsg({ type: 'error', text: '删除失败: ' + e.message });
-    }
+  const handleDelete = (name) => {
+    setConfirm({
+      title: '删除存档',
+      message: '确定删除存档「' + name + '」？此操作不可恢复。',
+      confirmText: '删除',
+      tone: 'danger',
+      onConfirm: async () => {
+        setConfirm(null);
+        setMsg(null);
+        try {
+          await bridge.call('DELETE', '/save/' + encodeURIComponent(name));
+          setMsg({ type: 'ok', text: '已删除存档: ' + name });
+          refresh();
+        } catch (e) {
+          setMsg({ type: 'error', text: '删除失败: ' + e.message });
+        }
+      },
+    });
   };
 
   const rowStyle = { display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 0', borderBottom: '1px solid #eee' };
@@ -141,6 +166,16 @@ export default function SaveManager({ agentId, bridge }) {
           >删除</button>
         </div>
       ))}
+
+      <ConfirmModal
+        open={!!confirm}
+        title={confirm?.title}
+        message={confirm?.message}
+        confirmText={confirm?.confirmText}
+        tone={confirm?.tone}
+        onConfirm={confirm?.onConfirm}
+        onCancel={() => setConfirm(null)}
+      />
     </div>
   );
 }

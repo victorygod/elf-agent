@@ -39,11 +39,11 @@ describe('Gateway Config', () => {
     assert.equal(config.port, 8080);
   });
 
-  it('loadGatewayConfig 返回稳定 userUid(默认 default_userid,问题3)', () => {
+  it('loadGatewayConfig 返回端口与密钥（多用户：用户字段已移 profiles/users/，见 auth.js）', () => {
     const config = loadGatewayConfig();
-    assert.ok(config.userUid, 'userUid 应存在');
-    assert.equal(config.userUid, 'default_userid');
-    assert.ok(config.userName, 'userName 应存在');
+    // 密钥经 env 注入（setup-env.js），不入库、不写真实 gateway.json
+    assert.ok(config.jwtSecret && config.jwtSecret.length >= 32, 'jwtSecret 应存在');
+    assert.ok(config.internalToken && config.internalToken.length >= 32, 'internalToken 应存在');
   });
 });
 
@@ -235,7 +235,7 @@ describe('Gateway HTTP Server', () => {
     await fetch(`http://127.0.0.1:${testPort}/agents/elf-001/start`, { method: 'POST' });
     await new Promise(r => setTimeout(r, 2500));
     // 先建常驻 subscribe SSE
-    const sseRes = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-elf-001/subscribe`);
+    const sseRes = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-u_test-elf-001/subscribe`);
     assert.equal(sseRes.status, 200);
     const reader = sseRes.body.getReader();
     const decoder = new TextDecoder();
@@ -256,7 +256,7 @@ describe('Gateway HTTP Server', () => {
     };
     await readNext(); // snapshot
     // 发消息（fire-and-forget ack）
-    const sayRes = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-elf-001/say`, {
+    const sayRes = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-u_test-elf-001/say`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: '你好' }),
     });
@@ -272,7 +272,7 @@ describe('Gateway HTTP Server', () => {
   });
 
   it('v3 /rooms/chat-<id>/say 缺少 content 应返回 400', async () => {
-    const res = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-elf-001/say`, {
+    const res = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-u_test-elf-001/say`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({})
@@ -338,7 +338,7 @@ describe('Gateway HTTP Server', () => {
     await new Promise(r => setTimeout(r, 1500));
 
     // 重新启动后应仍能经 v3 私聊房发言
-    const chatRes = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-elf-001/say`, {
+    const chatRes = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-u_test-elf-001/say`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: '重启后你好' })
@@ -362,7 +362,7 @@ describe('Gateway HTTP Server', () => {
   });
 
   it('v3 /rooms/chat-<id>/say 未运行的 Agent 应返回 503', async () => {
-    const res = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-elf-001/say`, {
+    const res = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-u_test-elf-001/say`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: '你好' })

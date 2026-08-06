@@ -338,6 +338,15 @@ export function handleSSEEvent(agentId, event, data) {
       break;
     }
 
+    case 'abortRewind': {
+      // elf-018 abort 信号:gateway 已用 rewindTo(latest) 把本轮 user 从 history.jsonl/context 删除并回填输入框。
+      //   这里标记 pendingRestorePrompt 供 ChatPanel 一次性消费写 inputRef,并 force 重载历史(user 气泡消失)。
+      //   'aborted' 已先到并清了 activeTurn,此处不重复清。
+      _patchChat(agentId, { pendingRestorePrompt: data?.restoredPrompt ?? null });
+      useAgentStore.getState().loadHistory(agentId, { force: true });
+      break;
+    }
+
     case 'compact_abort': {
       _applyCompactResult(agentId, data.compactId,
         { compactError: '记忆压缩已终止' },

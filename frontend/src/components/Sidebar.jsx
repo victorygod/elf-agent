@@ -2,6 +2,7 @@ import React, { useCallback, useState, useEffect, useRef } from 'react';
 import Avatar from './Avatar';
 import useAgentStore from '../stores/agentStore';
 import { useRoomStore } from '../stores/roomStore';
+import { useAuthStore } from '../stores/authStore';
 import * as api from '../api/index';
 import CreateRoomModal from './CreateRoomModal';
 import CreateAgentModal from './CreateAgentModal';
@@ -50,9 +51,12 @@ export default function Sidebar({ onSelect }) {
   const clearActiveRoom = useRoomStore(s => s.clearActiveRoom);
   const userName = useRoomStore(s => s.userName);
   const userAvatarStore = useRoomStore(s => s.userAvatar);
+  const userUid = useRoomStore(s => s.userUid);
   const loadUserName = useRoomStore(s => s.loadUserName);
   const sidebarOrder = useRoomStore(s => s.sidebarOrder);
   const setSidebarOrder = useRoomStore(s => s.setSidebarOrder);
+  const authUser = useAuthStore(s => s.user);
+  const logout = useAuthStore(s => s.logout);
 
   const [spinning, setSpinning] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
@@ -149,12 +153,8 @@ export default function Sidebar({ onSelect }) {
     const name = settingsName.trim();
     if (!name) return;
     try {
-      // 计算要保存的 userAvatar 字段值：
-      // - 新选了图 → 先上传拿文件名
-      // - 点了移除 → null
-      // - 未改动 → 保留现有（不传该字段，后端原样保留）
-      let userAvatarValue;
-      let userAvatarUndefined = false;
+      // 头像：新选 → 上传（后端写入当前用户 user.json）；点移除 → PUT userAvatar:null 删文件
+      let avatarChanged = false;
       if (pendingAvatarFile) {
         const reader = new FileReader();
         const base64 = await new Promise((resolve, reject) => {
@@ -163,16 +163,12 @@ export default function Sidebar({ onSelect }) {
           reader.readAsDataURL(pendingAvatarFile);
         });
         const uploadRes = await api.uploadUserAvatar(base64, pendingAvatarFile.type);
-        userAvatarValue = uploadRes.userAvatar;
-      } else if (avatarRemoved) {
-        userAvatarValue = null;
-      } else {
-        userAvatarUndefined = true; // 保留既有，不传
+        useRoomStore.setState({ userAvatar: uploadRes.userAvatar });
+        avatarChanged = true;
       }
 
       const payload = { userName: name };
-      if (!userAvatarUndefined) payload.userAvatar = userAvatarValue;
-
+      if (avatarRemoved) payload.userAvatar = null;
       const result = await api.putSettings(payload);
 
       // 用 setState 触发 Zustand 重渲染
@@ -180,8 +176,8 @@ export default function Sidebar({ onSelect }) {
         userName: result.userName,
         userAvatar: result.userAvatar,
       });
-      // 用户头像文件名固定(user_avatar.<ext>，覆盖写)：仅在头像真的变更/移除时 bump buster
-      if (pendingAvatarFile || avatarRemoved) {
+      // 头像变更/移除时 bump buster 强制重拉
+      if (avatarChanged || avatarRemoved) {
         useAgentStore.getState().bustAvatars();
       }
       setShowSettings(false);
@@ -248,8 +244,12 @@ export default function Sidebar({ onSelect }) {
             title="刷新状态"
           >↻</button>
           <button className={styles.btnIconSm} onClick={openSettings} title="全局设置">⚙</button>
+          <button className={styles.btnIconSm} onClick={logout} title="退出登录">⏻</button>
         </div>
-        <div className={styles.subtitle}>{userName ? `你好，${userName}` : 'AI Agent 平台'}</div>
+        <div className={styles.subtitle}>
+          {userName ? `你好，${userName}` : 'AI Agent 平台'}
+          {authUser?.role === 'admin' && <span title="超级管理员" style={{ marginLeft: 6, fontSize: 11, opacity: 0.7 }}>👑</span>}
+        </div>
       </div>
 
       {/* 全局设置弹窗 */}
@@ -265,7 +265,7 @@ export default function Sidebar({ onSelect }) {
                 {settingsAvatarPreview
                   ? <img src={settingsAvatarPreview} alt="头像" />
                   : (userAvatarStore && !avatarRemoved
-                    ? <img src={`/uploads/${userAvatarStore}?v=${Date.now()}`} alt="头像" />
+                    ? <img src={`/users/${userUid}/avatar?v=${Date.now()}`} alt="头像" />
                     : <span className={styles.placeholder}>点击<br/>上传</span>)}
               </div>
               <input

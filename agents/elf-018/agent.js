@@ -18,7 +18,6 @@ import { sendNotice } from '../../engine/notice.js';
 import { createLogger } from '../../shared/logger.js';
 import { buildMetadata, buildStyleMetadata } from '../../shared/agents/elf-018/buildMetadata.js';
 import { SUMMARY_PREAMBLE, CONTINUATION_CLAUSE } from '../../engine/message_manager.js';
-import { findLatestCheckpoint, restoreRuntimeFromCheckpoint } from '../../shared/checkpoint_restore.js';
 import { parseFrontmatter } from '../../engine/skills/parser.js';
 
 const logger = createLogger('dnd-agent');
@@ -74,13 +73,13 @@ export class DNDAgent extends Agent {
       //   表现为「中断过一次就一直中断」。
       this._aborted = false;
       await this.runFourLoopWorkflow({ emit: opts.emit || (() => {}), skipAddUser: opts.skipAddUser });
-      // 用户终止成功后立即 rewind：丢掉本轮已产出的 partial 正文/工具/提醒，把 MM 还原到最近一条真实 user
-      //   消息，并把运行时产物整份还原到本轮前 checkpoint（lore/state.md/面板/characters + outline/scene + tool-results），
-      //   与 ⟲ rewind 覆盖范围一致——_countRounds 回退 → 重发/续跑按原 user 重玩本轮，而非跳到 N+1。
-      //   abort 收尾（finishAborted）已 emit aborted+done 并把 partial 存为 assistant——由 rewind 一并截掉。
+      // 用户终止成功后:agent 不自行回退磁盘,只发 abortRewind 信号——由 gateway 复用 ⟲ rewind 的
+      //   rewindTo(latest) 统一处理(删本轮 user + 整份还原 runtime/tool-results/sync_cursor/room-history +
+      //   弹 checkpoint + 返回 restoredPrompt 回填输入框)。作用域天然限在 elf-018(仅它发该信号)。
+      //   abort 收尾(finishAborted)已 emit aborted+done 并把 partial 存为 assistant——由 gateway
+      //   rewindTo 从 pre-round checkpoint 整份覆盖一并清掉,无残留。
       if (this._aborted) {
-        this.messageManager.rewindToLastUser();
-        this._restoreRoundState();
+        opts.emit?.({ event: 'abortRewind', data: {} });
       }
       return;
     }
@@ -224,17 +223,6 @@ export class DNDAgent extends Agent {
       try { if (fs.existsSync(f)) fs.rmSync(f, { force: true }); }
       catch (e) { logger.warn(`删 ${f} 失败: ${e.message}`); }
     }
-  }
-
-  /** abort 后把运行时产物整份还原到本轮前 checkpoint（lore/state.md/面板/characters + outline/scene + tool-results + sync_cursor），
-   *  与 ⟲ rewind 覆盖范围一致。context.json/room-history 由 rewindToLastUser / gateway SSE 层分别处理，此处不碰。
-   *  无 dataDir 或无 checkpoint（快照失败）退回 _discardCurrentRoundArtifacts（尽力删本轮 round 文件）。 */
-  _restoreRoundState() {
-    const dataDir = this.messageManager?.dataDir;
-    if (!dataDir) { this._discardCurrentRoundArtifacts(); return; }
-    const cpDir = findLatestCheckpoint(dataDir);
-    if (!cpDir) { this._discardCurrentRoundArtifacts(); return; }
-    restoreRuntimeFromCheckpoint(dataDir, cpDir);
   }
 
   /** render messages：system(总纲+默认语言风格正文) + 历史(MM压缩摘要+fresh outline文件) + 上一轮正文 + 本轮大纲+新旧面板 + render任务指令 + 命名语言风格正文(命中且≠默认时)。 */

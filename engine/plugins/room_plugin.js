@@ -29,6 +29,7 @@ import path from 'path';
 import { SyncSource } from '../sync_source.js';
 import { createLogger } from '../../shared/logger.js';
 import { ScenePlugin } from './scene_plugin.js';
+import { internalAuthHeaders } from '../../shared/internal_auth.js';
 
 // 观测式策略默认参数（关注词/静默阈值可被 observe_status.json 运行时文件覆盖；观测间隔走动态退避常量）
 const OBSERVE_FIXED_SILENT_RETRIES = 2;   // 固定阈值：连续不发言几次后放弃（不可配，agent 与人均无法改）
@@ -131,10 +132,11 @@ export class RoomPlugin extends ScenePlugin {
     const rc = this.runContext;
     if (!rc || rc.mode !== 'room' || !rc.roomBusUrl) return;
     try {
-      const resp = await fetch(rc.roomBusUrl);
+      const resp = await fetch(rc.roomBusUrl, { headers: { ...internalAuthHeaders() } });
       if (!resp.ok) return;
       const room = await resp.json();
-      this._rosterPrefix = this._formatRoster(room?.members, room?.userName, room?.userUid, room?.name);
+      // 多用户：roster 用户行来自全量用户目录（room.users），不再读单全局 userName
+      this._rosterPrefix = this._formatRoster(room?.members, room?.users, room?.name);
       if (Array.isArray(room?.members)) {
         for (const m of room.members) {
           if (m?.agentId && m.name) {
@@ -152,7 +154,7 @@ export class RoomPlugin extends ScenePlugin {
     this._ensureObserveStatus();
   }
 
-  _formatRoster(members, userName, userUid, roomName) {
+  _formatRoster(members, users, roomName) {
     const lines = [];
     if (Array.isArray(members)) {
       for (const m of members) {
@@ -160,7 +162,10 @@ export class RoomPlugin extends ScenePlugin {
         lines.push(`- ${m.name}`);
       }
     }
-    lines.push(`- ${userName || 'user'}`);
+    // 多用户：每个注册用户都是群里的一名参与者（按显示名列出）
+    for (const u of (Array.isArray(users) ? users : [])) {
+      if (u?.name) lines.push(`- ${u.name}`);
+    }
     // 群名缓存（动态段最开头引用，改名热更新经 _refreshRoster 重设）
     this._roomName = roomName || '';
     // 静态部分（规则 + 成员）；群名引导句、当前时间、关键词/窗口由 _formatDynamicReminder 每轮动态拼

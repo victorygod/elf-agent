@@ -6,6 +6,7 @@ import * as api from '../api/index.js';
 import ConfigField from './ConfigField';
 import ConfirmModal from './ConfirmModal';
 import { getAgentManifest, loadAgentComponent } from '../pluginRegistry';
+import { useAuthStore } from '../stores/authStore';
 import styles from './ConfigDrawer.module.css';
 
 /**
@@ -98,6 +99,8 @@ function AgentPromptExtras({ agentId }) {
 export default function ConfigDrawer({ onClose }) {
   const configAgentId = useAgentStore(s => s.configAgentId);
   const agent = useAgentStore(s => s.getAgent(configAgentId));
+  // 多用户：访客 config 面板只读（原生控件经 fieldset disabled 统一禁用；启停/清记忆保留可用）
+  const isVisitor = useAuthStore(s => s.user?.role === 'visitor');
 
   const {
     config, layout, formData, activeTab,
@@ -159,23 +162,31 @@ export default function ConfigDrawer({ onClose }) {
       </div>
 
       <div className={styles.body}>
-        {tabs.map(tab => (
-          <div
-            key={tab.key}
-            className={`${styles.tabPanel} ${activeTab === tab.key ? styles.tabPanelActive : ''}`}
-          >
-            <ConfigTabBody
-              tab={tab}
-              agentId={configAgentId}
-              formData={formData}
-              agent={agent}
-              availableTools={availableTools}
-              onFieldChange={handleFieldChange}
-              onFieldCommit={handleFieldCommit}
-              bridge={bridge}
-            />
+        {isVisitor && (
+          <div style={{ padding: '6px 16px', fontSize: 12, color: '#999', borderBottom: '1px solid rgba(128,128,128,.2)' }}>
+            访客账户：配置只读（启停实例、清空自己的聊天与记忆可用）
           </div>
-        ))}
+        )}
+        {/* 访客只读：fieldset disabled 统一禁用内部原生控件（input/textarea/button/select） */}
+        <fieldset disabled={isVisitor} style={{ border: 'none', margin: 0, padding: 0, minWidth: 0, display: 'contents' }}>
+          {tabs.map(tab => (
+            <div
+              key={tab.key}
+              className={`${styles.tabPanel} ${activeTab === tab.key ? styles.tabPanelActive : ''}`}
+            >
+              <ConfigTabBody
+                tab={tab}
+                agentId={configAgentId}
+                formData={formData}
+                agent={agent}
+                availableTools={availableTools}
+                onFieldChange={handleFieldChange}
+                onFieldCommit={handleFieldCommit}
+                bridge={bridge}
+              />
+            </div>
+          ))}
+        </fieldset>
       </div>
 
       <div className={styles.footer}>

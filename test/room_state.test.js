@@ -36,7 +36,7 @@ after(() => { delete process.env.ELF_FORCE_MOCK_MODEL; });
 describe('RoomState 工厂', () => {
   it('私聊房：建 Agent + MM(隔离 dataDir) + PrivateChatPlugin + AbortController', async () => {
     const root = mkTmpRoot();
-    const roomId = 'chat-elf-001';
+    const roomId = 'chat-u_test-elf-001';
     const room = await createRoomState({
       configDir: ELF001_CONFIG_DIR, agentId: 'elf-001', roomId, mode: 'private',
       dataDir: path.join(root, roomId), gatewayUrl: null,
@@ -67,7 +67,7 @@ describe('RoomState 工厂', () => {
 
   it('两房 dataDir 隔离：互不串 context', async () => {
     const root = mkTmpRoot();
-    const r1 = await createRoomState({ configDir: ELF001_CONFIG_DIR, agentId: 'elf-001', roomId: 'chat-elf-001-a', mode: 'private', dataDir: path.join(root, 'a') });
+    const r1 = await createRoomState({ configDir: ELF001_CONFIG_DIR, agentId: 'elf-001', roomId: 'chat-u_test-elf-001-a', mode: 'private', dataDir: path.join(root, 'a') });
     const r2 = await createRoomState({ configDir: ELF001_CONFIG_DIR, agentId: 'elf-001', roomId: 'room_x', mode: 'room', dataDir: path.join(root, 'x'), memberName: 'elf-001' });
     assert.notEqual(r1.agent.messageManager.dataDir, r2.agent.messageManager.dataDir);
     assert.equal(fs.existsSync(path.join(root, 'a', 'context.json')), false);
@@ -97,11 +97,11 @@ describe('多房 AgentServer /observe 路由', () => {
     try { fs.rmSync(root, { recursive: true, force: true }); } catch (e) {}
   });
 
-  it('私聊 /observe（roomId=chat-elf-001）懒建 RoomState 并 reasoning', async () => {
+  it('私聊 /observe（roomId=chat-u_test-elf-001）懒建 RoomState 并 reasoning', async () => {
     // 响应：模型秒回纯文本 → 私聊空闲即 flush → reasoning → done
     const res = await fetch(`${baseUrl}/observe`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ roomId: 'chat-elf-001', content: '你好', role: 'chat', seq: 1 }),
+      body: JSON.stringify({ roomId: 'chat-u_test-elf-001', content: '你好', role: 'chat', seq: 1 }),
     });
     const data = await res.json();
     assert.equal(res.status, 200);
@@ -124,7 +124,7 @@ describe('多房 AgentServer /observe 路由', () => {
   it('两房并发 /observe 不互阻（私聊房 + 群聊房各自独立）', async () => {
     // 同时投两条到不同房，两条都应 ack（receiver 各自 async，不串行阻塞）。
     const [a, b] = await Promise.all([
-      fetch(`${baseUrl}/observe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomId: 'chat-elf-001', content: '并发1', role: 'chat', seq: 2 }) }),
+      fetch(`${baseUrl}/observe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomId: 'chat-u_test-elf-001', content: '并发1', role: 'chat', seq: 2 }) }),
       fetch(`${baseUrl}/observe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomId: 'room_y', agentId: 'elf-001', memberName: 'elf-001', from: 'elf-002', content: '并发2', mentions: [], role: 'chat', seq: 2 }) }),
     ]);
     assert.equal(a.status, 200);
@@ -136,12 +136,12 @@ describe('多房 AgentServer /observe 路由', () => {
     const data = await res.json();
     assert.equal(res.status, 200);
     const ids = data.rooms.map(r => r.roomId);
-    assert.ok(ids.includes('chat-elf-001'));
+    assert.ok(ids.includes('chat-u_test-elf-001'));
     assert.ok(ids.includes('room_y'));
   });
 
   it('/abort/:roomId 中断本房', async () => {
-    const res = await fetch(`${baseUrl}/abort/chat-elf-001`, { method: 'POST' });
+    const res = await fetch(`${baseUrl}/abort/chat-u_test-elf-001`, { method: 'POST' });
     const data = await res.json();
     assert.equal(res.status, 200);
     assert.equal(data.status, 'ok');

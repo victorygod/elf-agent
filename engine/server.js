@@ -16,7 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import { createLogger } from '../shared/logger.js';
 import { createRoomState } from './room_state.js';
-import { agentRoomState, agentMemory } from '../shared/profiles_paths.js';
+import { agentRoomState } from '../shared/profiles_paths.js';
 
 let logFileName = null;
 
@@ -52,7 +52,7 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
     if (agentOrOpts.defaultAgent) {
       const a = agentOrOpts.defaultAgent;
       const aid = agentOrOpts.defaultAgentId || a.runContext?.agentId || a.config?.get?.('agentId') || 'unknown';
-      defaultRoom = { agentId: aid, roomId: `chat-${aid}`, agent: a, runContext: a.runContext, plugin: a._scene, observeProcessing: false, pendingObserve: null };
+      defaultRoom = { agentId: aid, roomId: `chat-u_dev-${aid}`, agent: a, runContext: a.runContext, plugin: a._scene, observeProcessing: false, pendingObserve: null };
     }
     if (agentOrOpts.configDir) {
       factoryOpts = agentOrOpts;
@@ -61,7 +61,7 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
     const agent = agentOrOpts;
     const agentId = config?.get?.('agentId') || agent?.config?.get?.('agentId') || 'unknown';
     defaultAgentId = agentId;
-    defaultRoom = { agentId, roomId: `chat-${agentId}`, agent, runContext: agent.runContext, plugin: agent._scene, observeProcessing: false, pendingObserve: null };
+    defaultRoom = { agentId, roomId: `chat-u_dev-${agentId}`, agent, runContext: agent.runContext, plugin: agent._scene, observeProcessing: false, pendingObserve: null };
   }
 
   // ===== 共享：eventsClients（/events SSE 全局 Set）+ _pushEvent 通用写入（带 roomId）=====
@@ -104,10 +104,15 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
   const instanceErrors = new Map();
   function getRoom(aid, rid) { const m = rooms.get(aid); return m ? m.get(rid) : undefined; }
   function setRoom(room) { if (!rooms.has(room.agentId)) rooms.set(room.agentId, new Map()); rooms.get(room.agentId).set(room.roomId, room); }
-  // 解析 agentId：显式 > 私聊 rid 编码(chat-) > 进程默认 agent
+  // 解析 agentId：显式 > 私聊 rid 编码(chat-<uid>-<agentId>) > 进程默认 agent
   function resolveAgentId(rid, explicit) {
     if (explicit) return explicit;
-    if (typeof rid === 'string' && rid.startsWith('chat-')) return rid.slice('chat-'.length);
+    if (typeof rid === 'string' && rid.startsWith('chat-')) {
+      // 多用户：私聊 rid = chat-<uid>-<agentId>，uid 不含 '-'，按首个 '-' 分割取 agentId
+      const rest = rid.slice('chat-'.length);
+      const idx = rest.indexOf('-');
+      return idx > 0 ? rest.slice(idx + 1) : rest;
+    }
     return defaultAgentId || null;
   }
   if (defaultRoom) setRoom(defaultRoom);
@@ -121,10 +126,10 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
       throw new Error(`单 agent 模式不支持按需创建房间 ${roomId}`);
     }
     const mode = opts.mode || (roomId.startsWith('chat-') ? 'private' : 'room');
-    // dataDir：私聊房用 agentMemory(<id>)（= profiles/agents/<id>/memory，与 snapshot/rewind 的记忆源对齐——
-    //   snapshot.js 快照/rewind 读 memory/；旧 per-agent 进程的 defaultRoom 也落此）；群聊房用 agentRoomState(<id>,<rid>)
-    //   （= profiles/agents/<id>/rooms/<rid>，同群两个共处成员各自落自己 agentId 目录，不串）。
-    const dataDir = mode === 'private' ? agentMemory(agentId) : agentRoomState(agentId, roomId);
+    // dataDir：私聊/群聊统一 agentRoomState(<id>,<rid>) = profiles/agents/<id>/rooms/<rid>/。
+    //   多用户：私聊房 chat-<uid>-<id> 各用户独立目录，互不串记忆（旧版私聊共用 agentMemory 全局目录，
+    //   多用户会互相覆盖，已废）。snapshot/rewind 亦按 roomId 定位同目录（gateway/snapshot.js）。
+    const dataDir = agentRoomState(agentId, roomId);
     fs.mkdirSync(dataDir, { recursive: true });
     let room;
     try {
@@ -244,6 +249,19 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
 
   // ===== /observe：私聊 + 群聊统一入口（v3）。多房按 body.roomId 路由。=====
   app.post('/observe', (req, res) => handleObserve(req, res, false));
+
+  // ===== POST /abort-agent/:agentId — 中断某 agent 名下全部房的在飞回合（多用户：gateway 全局停 agent 时批量 abort）=====
+  app.post('/abort-agent/:agentId', (req, res) => {
+    const aid = req.params.agentId;
+    const m = rooms.get(aid);
+    let count = 0;
+    if (m) {
+      for (const room of m.values()) {
+        try { room.agent.abort(); count++; } catch (e) { /* 单个房 abort 失败不阻塞其余 */ }
+      }
+    }
+    res.json({ status: 'ok', aborted: count });
+  });
 
   // ===== /abort/:roomId + 旧 /abort（默认房）=====
   app.post('/abort/:roomId', (req, res) => {

@@ -98,7 +98,7 @@ describe('Agent + Gateway 集成测试', () => {
     await new Promise(r => setTimeout(r, 2500));
 
     // v3：私聊走 /rooms/chat-<id>/subscribe + /say，token 经 gateway /events 转发
-    const sseRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-elf-001/subscribe`);
+    const sseRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-u_test-elf-001/subscribe`);
     assert.equal(sseRes.status, 200);
     const reader = sseRes.body.getReader();
     const decoder = new TextDecoder();
@@ -118,7 +118,7 @@ describe('Agent + Gateway 集成测试', () => {
       return true;
     };
     await readNext();
-    const sayRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-elf-001/say`, {
+    const sayRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-u_test-elf-001/say`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: '你好' }),
     });
@@ -147,7 +147,7 @@ describe('Agent + Gateway 集成测试', () => {
     await new Promise(r => setTimeout(r, 2500));
 
     // v3：经私聊房 /say 验证可对话
-    const chatRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-elf-001/say`, {
+    const chatRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-u_test-elf-001/say`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: '你好' }),
     });
@@ -172,7 +172,7 @@ describe('Agent + Gateway 集成测试', () => {
     await fetch(`http://127.0.0.1:${GATEWAY_PORT}/agents/elf-002/stop`, { method: 'POST' });
     await new Promise(r => setTimeout(r, 800));
 
-    const chatRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-elf-002/say`, {
+    const chatRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-u_test-elf-002/say`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: '你好' }),
     });
@@ -285,7 +285,7 @@ describe('Agent + Gateway 集成测试', () => {
   });
   // ===== v3 私聊房路由（合并到本套件，复用同一 gateway/pm，避免多 suite 抢 agent 端口）=====
 
-  it('v3 私聊 /rooms/chat-elf-001/say 流式 token + done 经 subscribe 到达', async () => {
+  it('v3 私聊 /rooms/chat-u_test-elf-001/say 流式 token + done 经 subscribe 到达', async () => {
     // 确保 elf-001 在运行
     let st = await (await fetch(`http://127.0.0.1:${GATEWAY_PORT}/agents/elf-001`)).json();
     if (st.status !== 'running') {
@@ -294,7 +294,7 @@ describe('Agent + Gateway 集成测试', () => {
       await new Promise(r => setTimeout(r, 2500));
     }
     // 建 subscribe SSE 连接
-    const sseRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-elf-001/subscribe`);
+    const sseRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-u_test-elf-001/subscribe`);
     assert.equal(sseRes.status, 200);
     const reader = sseRes.body.getReader();
     const decoder = new TextDecoder();
@@ -314,7 +314,7 @@ describe('Agent + Gateway 集成测试', () => {
       return true;
     };
     await readNext(); // snapshot
-    const sayRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-elf-001/say`, {
+    const sayRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-u_test-elf-001/say`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: 'v3私聊你好' }),
     });
@@ -372,24 +372,24 @@ describe('Agent + Gateway 集成测试', () => {
     assert.ok(elmSpoke, '@elm-001 后 elm-001 应经 Speak 回复并落群历史（roomBusUrl 修复 + Speak 全链验证）');
   });
 
-  it('v3 私聊 /rooms/chat-elf-001/rewind 重建私聊房 history（前端 rewind 同步正确性）', async () => {
+  it('v3 私聊 /rooms/chat-u_test-elf-001/rewind 重建私聊房 history（前端 rewind 同步正确性）', async () => {
     let st = await (await fetch(`http://127.0.0.1:${GATEWAY_PORT}/agents/elf-001`)).json();
     if (st.status !== 'running') {
       await fetch(`http://127.0.0.1:${GATEWAY_PORT}/agents/elf-001/start`, { method: 'POST' });
       await new Promise(r => setTimeout(r, 2500));
     }
     // 第 1 条用户消息：snapshotBeforeSend 记下「说话前」私聊房 history 快照
-    const say1 = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-elf-001/say`, {
+    const say1 = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-u_test-elf-001/say`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: 'rewind-A' }),
     });
     assert.equal(say1.status, 200);
     await new Promise(r => setTimeout(r, 1200));
     // 此时私聊房 history 应含 rewind-A
-    let hist = await (await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-elf-001/history`)).json();
+    let hist = await (await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-u_test-elf-001/history`)).json();
     assert.ok(hist.messages.some(m => m.content === 'rewind-A'), `rewind 前 history 应含 rewind-A，实际 ${JSON.stringify(hist.messages.map(m=>m.content))}`);
     // rewind 最近一个 checkpoint（回到 rewind-A 发出之前）
-    const rwRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-elf-001/rewind`, {
+    const rwRes = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-u_test-elf-001/rewind`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
     });
@@ -397,7 +397,7 @@ describe('Agent + Gateway 集成测试', () => {
     const rwData = await rwRes.json();
     assert.equal(rwData.status, 'ok', `rewind 应返回 ok，实际 ${JSON.stringify(rwData)}`);
     // ★ 修复验证：rewind 后私聊房 history 不再含 rewind-A（snapshot 覆盖回写 room-history.jsonl）
-    hist = await (await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-elf-001/history`)).json();
+    hist = await (await fetch(`http://127.0.0.1:${GATEWAY_PORT}/rooms/chat-u_test-elf-001/history`)).json();
     assert.ok(!hist.messages.some(m => m.content === 'rewind-A'), `rewind 后 history 不应含 rewind-A，实际 ${JSON.stringify(hist.messages.map(m=>m.content))}`);
   });
 });

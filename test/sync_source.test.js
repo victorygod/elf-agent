@@ -93,7 +93,7 @@ function makePrivateAgent({ dataDir, gatewayUrl, alive = false, responses = [{ c
   const tr = new ToolManager();
   // alive=true 时给私聊 runContext 注入 dataDir（对齐"接活后 _ensureSync 用真实 dataDir"）。
   //   buildRunContext 私聊模式不会 fail-fast 校验 dataDir，直接塞即可。
-  const rc = buildRunContext({ agentId: 'elf-test', mode: 'private', port: 9999, roomId: 'chat-elf-test' });
+  const rc = buildRunContext({ agentId: 'elf-test', mode: 'private', port: 9999, roomId: 'chat-u_test-elf-test' });
   if (alive) rc.dataDir = dataDir;
   const agent = new Agent({ config, model, toolManager: tr, messageManager: mm, runContext: rc });
   agent._gatewayUrl = gatewayUrl;  // 注入 sync 源（PrivateChatMiddleware._ensureSyncSource 读用）

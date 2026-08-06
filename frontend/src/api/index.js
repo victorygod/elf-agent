@@ -1,17 +1,79 @@
 /**
  * Elf API 层
  * 所有后端 fetch 调用集中在此，前端其他模块不直接使用 fetch
+ *
+ * 多用户改造（docs/multi-user-auth-design.md）：
+ *  - authFetch：自动带 Authorization: Bearer <token>；401 → 清登录态（App 回到登录覆盖层）
+ *  - 私聊 roomId = chat-<uid>-<agentId>（uid 取当前登录用户）
+ *  - 用户头像 URL = /users/<uid>/avatar（公开，<img> 直连）
  */
+
+import { useAuthStore, privateRoomId } from '../stores/authStore.js';
 
 export const API_BASE = '';
 
+/** 当前登录用户 uid（未登录返回 null——正常不会发生，未登录时 App 停在登录页） */
+function _uid() {
+  return useAuthStore.getState().user?.uid || null;
+}
+
+/** 当前用户的私聊 roomId */
+export function myPrivateRoomId(agentId) {
+  return privateRoomId(_uid(), agentId);
+}
+
+/** 用户头像 URL（公开路由；v= 参数由调用方做 cache-busting） */
+export function userAvatarUrl(uid) {
+  return `/users/${uid}/avatar`;
+}
+
+/**
+ * 鉴权 fetch：带 token；401 统一清登录态（authStore.logout → App 渲染登录页）。
+ * 除 /auth/* 外的所有调用都应走这里。
+ */
+export async function authFetch(url, opts = {}) {
+  const token = useAuthStore.getState().token;
+  const headers = { ...(opts.headers || {}) };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(url, { ...opts, headers });
+  if (res.status === 401) {
+    useAuthStore.getState().logout();
+    throw Object.assign(new Error('登录已过期'), { status: 401 });
+  }
+  return res;
+}
+
+// ===== 鉴权 =====
+
+export async function login(username, password) {
+  const res = await fetch(`${API_BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;   // { token, user }
+}
+
+export async function register(username, password) {
+  const res = await fetch(`${API_BASE}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;   // { token, user }
+}
+
 export async function getGameState(agentId) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/game-state`);
+  const res = await authFetch(`${API_BASE}/agents/${agentId}/game-state`);
   return res.json();
 }
 
 export async function renameProtagonist(agentId, name) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/protagonist-name`, {
+  const res = await authFetch(`${API_BASE}/agents/${agentId}/protagonist-name`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
@@ -23,14 +85,14 @@ export async function renameProtagonist(agentId, name) {
 
 /** 列出某 agent 的语言风格文件 */
 export async function getStyles(agentId) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/styles`);
+  const res = await authFetch(`${API_BASE}/agents/${agentId}/styles`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.json();   // { styles: [{filename,name,description,body,isDefault}], defaultFile }
 }
 
 /** 新建风格文件（name = 文件名 stem，不带 .md） */
 export async function createStyle(agentId, { name, description, body }) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/styles`, {
+  const res = await authFetch(`${API_BASE}/agents/${agentId}/styles`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, description, body }),
@@ -44,7 +106,7 @@ export async function createStyle(agentId, { name, description, body }) {
 
 /** 更新风格文件（含改名；filename 为原文件名含 .md） */
 export async function updateStyle(agentId, filename, { name, description, body }) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/styles/${encodeURIComponent(filename)}`, {
+  const res = await authFetch(`${API_BASE}/agents/${agentId}/styles/${encodeURIComponent(filename)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, description, body }),
@@ -58,7 +120,7 @@ export async function updateStyle(agentId, filename, { name, description, body }
 
 /** 删除风格文件（default 不可删） */
 export async function deleteStyle(agentId, filename) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/styles/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+  const res = await authFetch(`${API_BASE}/agents/${agentId}/styles/${encodeURIComponent(filename)}`, { method: 'DELETE' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || `HTTP ${res.status}`);
@@ -71,13 +133,13 @@ export const HISTORY_PAGE_SIZE = 30;
 
 /** 获取所有 agent 列表 */
 export async function loadAgents() {
-  const res = await fetch(`${API_BASE}/agents`);
+  const res = await authFetch(`${API_BASE}/agents`);
   return await res.json();
 }
 
 /** 重新扫描 agent 目录 */
 export async function rediscoverAgents() {
-  const res = await fetch(`${API_BASE}/agents/rediscover`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/agents/rediscover`, { method: 'POST' });
   if (res.ok) {
     const data = await res.json();
     return data.agents;
@@ -87,7 +149,7 @@ export async function rediscoverAgents() {
 
 /** 从独立模板创建一个白板 agent（仅 name 必填），返回 { agentId, name, port } */
 export async function createAgent(name) {
-  const res = await fetch(`${API_BASE}/agents`, {
+  const res = await authFetch(`${API_BASE}/agents`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
@@ -99,24 +161,24 @@ export async function createAgent(name) {
 
 /** 获取单个 agent 详情（含 streaming 状态） */
 export async function getAgent(id) {
-  const res = await fetch(`${API_BASE}/agents/${id}`);
+  const res = await authFetch(`${API_BASE}/agents/${id}`);
   if (!res.ok) return null;
   return await res.json();
 }
 
 // ===== Agent 控制 =====
 
-/** 启动 agent */
+/** 启动 agent（admin=全局；visitor=启用自己的私聊 room，后端按角色分派） */
 export async function startAgent(id) {
-  const res = await fetch(`${API_BASE}/agents/${id}/start`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/agents/${id}/start`, { method: 'POST' });
   const data = await res.json();
   if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status, data });
   return data;
 }
 
-/** 停止 agent */
+/** 停止 agent（admin=全局；visitor=停用自己的私聊 room） */
 export async function stopAgent(id) {
-  const res = await fetch(`${API_BASE}/agents/${id}/stop`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/agents/${id}/stop`, { method: 'POST' });
   const data = await res.json();
   if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status, data });
   return data;
@@ -124,14 +186,14 @@ export async function stopAgent(id) {
 
 /** 中断当前生成 */
 export async function abortAgent(id) {
-  await fetch(`${API_BASE}/rooms/chat-${id}/abort`, { method: 'POST' });
+  await authFetch(`${API_BASE}/rooms/${myPrivateRoomId(id)}/abort`, { method: 'POST' });
 }
 
 // ===== Rewind（双击 Esc 回退）=====
 
 /** 列出可回退的快照包 */
 export async function listCheckpoints(agentId) {
-  const res = await fetch(`${API_BASE}/rooms/chat-${agentId}/checkpoints`);
+  const res = await authFetch(`${API_BASE}/rooms/${myPrivateRoomId(agentId)}/checkpoints`);
   return res.json();
 }
 
@@ -140,7 +202,7 @@ export async function listCheckpoints(agentId) {
  * @returns {Promise<{ status, restoredPrompt, checkpoints }>}
  */
 export async function rewindAgent(agentId, checkpointId = null) {
-  const res = await fetch(`${API_BASE}/rooms/chat-${agentId}/rewind`, {
+  const res = await authFetch(`${API_BASE}/rooms/${myPrivateRoomId(agentId)}/rewind`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ checkpointId }),
@@ -161,9 +223,9 @@ export async function rewindAgent(agentId, checkpointId = null) {
  * @returns {Promise<void>}
  */
 export async function chat(agentId, message, { onEvent, signal } = {}) {
-  // v3：私聊统一入口 /rooms/chat-<id>/say（fire-and-forget ack）。流式 token 经常驻
-  //   subscribe（useAgentSubscriptions）接收，不在本请求内读流。onEvent 保留签名兼容旧行为但不在此推事件。
-  const res = await fetch(`${API_BASE}/rooms/chat-${agentId}/say`, {
+  // v3：私聊统一入口 /rooms/chat-<uid>-<id>/say（fire-and-forget ack）。流式 token 经常驻
+  //   subscribe（聚合 SSE）接收，不在本请求内读流。onEvent 保留签名兼容旧行为但不在此推事件。
+  const res = await authFetch(`${API_BASE}/rooms/${myPrivateRoomId(agentId)}/say`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content: message }),
@@ -188,7 +250,7 @@ export async function chat(agentId, message, { onEvent, signal } = {}) {
  * @returns {Promise<void>}
  */
 export async function subscribe(agentId, { onEvent, signal } = {}) {
-  const res = await fetch(`${API_BASE}/rooms/chat-${agentId}/subscribe`, { signal });
+  const res = await authFetch(`${API_BASE}/rooms/${myPrivateRoomId(agentId)}/subscribe`, { signal });
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
@@ -231,7 +293,7 @@ export async function subscribe(agentId, { onEvent, signal } = {}) {
  * 事件 data 带 {roomId, roomType},调用方按此路由。见 docs/sse-aggregation-design.md。
  */
 export async function subscribeAggregate({ onEvent, signal } = {}) {
-  const res = await fetch(`${API_BASE}/subscribe`, { method: 'POST', signal });
+  const res = await authFetch(`${API_BASE}/subscribe`, { method: 'POST', signal });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
     throw Object.assign(new Error(err.error || res.statusText), {
@@ -266,25 +328,25 @@ export async function subscribeAggregate({ onEvent, signal } = {}) {
 
 // ===== 聊天历史 =====
 
-/** 获取聊天历史（分页 + 增量）— v3 私聊走 /rooms/chat-<id>/history */
+/** 获取聊天历史（分页 + 增量）— v3 私聊走 /rooms/chat-<uid>-<id>/history */
 export async function getHistory(agentId, { limit = HISTORY_PAGE_SIZE, before, afterId } = {}) {
-  let url = `${API_BASE}/rooms/chat-${agentId}/history?limit=${limit}`;
+  let url = `${API_BASE}/rooms/${myPrivateRoomId(agentId)}/history?limit=${limit}`;
   if (before) url += `&before=${before}`;
   if (afterId) url += `&afterId=${afterId}`;
-  const res = await fetch(url);
+  const res = await authFetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.json();
 }
 
-/** 清空聊天历史 — v3 私聊走 /rooms/chat-<id>/history */
+/** 清空聊天历史 — v3 私聊走 /rooms/chat-<uid>-<id>/history */
 export async function deleteHistory(agentId) {
-  const res = await fetch(`${API_BASE}/rooms/chat-${agentId}/history`, { method: 'DELETE' });
+  const res = await authFetch(`${API_BASE}/rooms/${myPrivateRoomId(agentId)}/history`, { method: 'DELETE' });
   return res.ok;
 }
 
-/** 清空 agent 记忆 — v3 私聊走 /rooms/chat-<id>/memory */
+/** 清空 agent 记忆 — v3 私聊走 /rooms/chat-<uid>-<id>/memory */
 export async function deleteMemory(agentId) {
-  const res = await fetch(`${API_BASE}/rooms/chat-${agentId}/memory`, { method: 'DELETE' });
+  const res = await authFetch(`${API_BASE}/rooms/${myPrivateRoomId(agentId)}/memory`, { method: 'DELETE' });
   return res.ok;
 }
 
@@ -292,21 +354,21 @@ export async function deleteMemory(agentId) {
 
 /** 获取 agent 配置 */
 export async function getConfig(agentId) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/config`);
+  const res = await authFetch(`${API_BASE}/agents/${agentId}/config`);
   if (!res.ok) return null;
   return await res.json();
 }
 
 /** 获取 agent 配置 UI 布局和配置数据 */
 export async function getConfigUI(agentId) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/config-ui`);
+  const res = await authFetch(`${API_BASE}/agents/${agentId}/config-ui`);
   if (!res.ok) return null;
   return await res.json();
 }
 
 /** 获取所有可用工具名（来自 engine/tools/index.js） */
 export async function getAvailableTools() {
-  const res = await fetch(`${API_BASE}/available-tools`);
+  const res = await authFetch(`${API_BASE}/available-tools`);
   if (!res.ok) return [];
   const data = await res.json();
   return data.tools || [];
@@ -316,14 +378,14 @@ export async function getAvailableTools() {
 
 /** 列出 ~/.elf/skills 下所有 skill */
 export async function listSkills() {
-  const res = await fetch(`${API_BASE}/skills`);
+  const res = await authFetch(`${API_BASE}/skills`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.json();   // { skills, root }
 }
 
 /** 读单个 skill 的 SKILL.md 全文 */
 export async function getSkillDetail(name) {
-  const res = await fetch(`${API_BASE}/skills/${encodeURIComponent(name)}`);
+  const res = await authFetch(`${API_BASE}/skills/${encodeURIComponent(name)}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || `HTTP ${res.status}`);
@@ -333,7 +395,7 @@ export async function getSkillDetail(name) {
 
 /** 删除一个 skill 目录 */
 export async function deleteSkill(name) {
-  const res = await fetch(`${API_BASE}/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  const res = await authFetch(`${API_BASE}/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || `HTTP ${res.status}`);
@@ -343,7 +405,7 @@ export async function deleteSkill(name) {
 
 /** 安装 skill：把一个目录复制到 ~/.elf/skills/ */
 export async function installSkill(sourcePath) {
-  const res = await fetch(`${API_BASE}/skills/install`, {
+  const res = await authFetch(`${API_BASE}/skills/install`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sourcePath }),
@@ -358,7 +420,7 @@ export async function installSkill(sourcePath) {
 /** 浏览目录子项（仅目录），供前端选 skill 源目录 */
 export async function browseSkillDirs(dir) {
   const url = `${API_BASE}/skills/browse${dir ? `?dir=${encodeURIComponent(dir)}` : ''}`;
-  const res = await fetch(url);
+  const res = await authFetch(url);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || `HTTP ${res.status}`);
@@ -368,7 +430,7 @@ export async function browseSkillDirs(dir) {
 
 /** 更新 agent 配置 */
 export async function updateConfig(agentId, data) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/config`, {
+  const res = await authFetch(`${API_BASE}/agents/${agentId}/config`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
@@ -384,7 +446,7 @@ export async function updateConfig(agentId, data) {
 
 /** 上传头像（base64） */
 export async function uploadAvatar(agentId, field, base64, type) {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/${field}`, {
+  const res = await authFetch(`${API_BASE}/agents/${agentId}/${field}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ data: base64, type })
@@ -404,7 +466,7 @@ export function log(level, message) {
   const line = `[${ts}] [${level}] [frontend] ${message}`;
   console[level === 'ERROR' ? 'error' : level === 'WARN' ? 'warn' : 'log'](line);
   try {
-    fetch(`${API_BASE}/api/log`, {
+    authFetch(`${API_BASE}/api/log`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ level, message, timestamp: ts })
@@ -418,7 +480,7 @@ export const ROOM_HISTORY_PAGE_SIZE = 50;
 
 /** 列所有群 */
 export async function loadRooms() {
-  const res = await fetch(`${API_BASE}/rooms`);
+  const res = await authFetch(`${API_BASE}/rooms`);
   if (!res.ok) return [];
   const data = await res.json();
   return data.rooms || [];
@@ -426,14 +488,14 @@ export async function loadRooms() {
 
 /** 获取群详情（含成员在线状态） */
 export async function getRoom(roomId) {
-  const res = await fetch(`${API_BASE}/rooms/${roomId}`);
+  const res = await authFetch(`${API_BASE}/rooms/${roomId}`);
   if (!res.ok) return null;
   return await res.json();
 }
 
 /** 建群 {name, members:[agentId]} */
 export async function createRoom(name, members) {
-  const res = await fetch(`${API_BASE}/rooms`, {
+  const res = await authFetch(`${API_BASE}/rooms`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, members }),
@@ -444,14 +506,14 @@ export async function createRoom(name, members) {
 
 /** 解散群 */
 export async function deleteRoom(roomId) {
-  const res = await fetch(`${API_BASE}/rooms/${roomId}`, { method: 'DELETE' });
+  const res = await authFetch(`${API_BASE}/rooms/${roomId}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(`解散群失败: ${res.status}`);
   return await res.json();
 }
 
 /** 加成员 {agentId} */
 export async function addRoomMember(roomId, agentId) {
-  const res = await fetch(`${API_BASE}/rooms/${roomId}/members`, {
+  const res = await authFetch(`${API_BASE}/rooms/${roomId}/members`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agentId }),
@@ -462,7 +524,7 @@ export async function addRoomMember(roomId, agentId) {
 
 /** 移除成员 */
 export async function removeRoomMember(roomId, agentId) {
-  const res = await fetch(`${API_BASE}/rooms/${roomId}/members/${agentId}`, { method: 'DELETE' });
+  const res = await authFetch(`${API_BASE}/rooms/${roomId}/members/${agentId}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(`移除成员失败: ${res.status}`);
   return await res.json();
 }
@@ -470,14 +532,14 @@ export async function removeRoomMember(roomId, agentId) {
 /** 群历史分页 */
 export async function getRoomHistory(roomId, limit = ROOM_HISTORY_PAGE_SIZE, beforeId = null) {
   const qs = beforeId ? `?limit=${limit}&before=${encodeURIComponent(beforeId)}` : `?limit=${limit}`;
-  const res = await fetch(`${API_BASE}/rooms/${roomId}/history${qs}`);
+  const res = await authFetch(`${API_BASE}/rooms/${roomId}/history${qs}`);
   if (!res.ok) return { messages: [], hasMore: false };
   return await res.json();
 }
 
-/** 用户发言（统一入口 /say，X-Speaker-Id: user 标记用户身份） */
+/** 用户发言（身份取自 JWT，X-Speaker-Id: user 仅作兼容标记） */
 export async function sendRoomMessage(roomId, message) {
-  const res = await fetch(`${API_BASE}/rooms/${roomId}/say`, {
+  const res = await authFetch(`${API_BASE}/rooms/${roomId}/say`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': 'user' },
     body: JSON.stringify({ content: message }),
@@ -488,21 +550,21 @@ export async function sendRoomMessage(roomId, message) {
 
 /** 清空群历史 */
 export async function clearRoomHistory(roomId) {
-  const res = await fetch(`${API_BASE}/rooms/${roomId}/history`, { method: 'DELETE' });
+  const res = await authFetch(`${API_BASE}/rooms/${roomId}/history`, { method: 'DELETE' });
   if (!res.ok) throw new Error(`清空历史失败: ${res.status}`);
   return await res.json();
 }
 
 /** 清空各成员记忆 */
 export async function clearRoomMemory(roomId) {
-  const res = await fetch(`${API_BASE}/rooms/${roomId}/clear-memory`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/rooms/${roomId}/clear-memory`, { method: 'POST' });
   if (!res.ok) throw new Error(`清空记忆失败: ${res.status}`);
   return await res.json();
 }
 
 /** 清空聊天记录 + 成员记忆（合一原子操作） */
 export async function clearRoomAll(roomId) {
-  const res = await fetch(`${API_BASE}/rooms/${roomId}/clear-all`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/rooms/${roomId}/clear-all`, { method: 'POST' });
   if (!res.ok) throw new Error(`清空失败: ${res.status}`);
   return await res.json();
 }
@@ -512,18 +574,18 @@ export function roomSubscribeUrl(roomId) {
   return `${API_BASE}/rooms/${roomId}/subscribe`;
 }
 
-// ===== 全局设置（用户名等）=====
+// ===== 全局设置（per-user，后端读写当前用户的 user.json）=====
 
-/** 获取设置（含 userName、userAvatar、userUid、sidebarOrder） */
+/** 获取设置（含 userName、userAvatar、userUid、role、sidebarOrder） */
 export async function getSettings() {
-  const res = await fetch(`${API_BASE}/settings`);
-  if (!res.ok) return { userName: 'user', userAvatar: null, userUid: 'default_userid', sidebarOrder: { rooms: [], agents: [] } };
+  const res = await authFetch(`${API_BASE}/settings`);
+  if (!res.ok) return { userName: 'user', userAvatar: null, userUid: null, sidebarOrder: { rooms: [], agents: [] } };
   return await res.json();
 }
 
-/** 更新设置（userName / userAvatar / userUid） */
+/** 更新设置（userName / sidebarOrder） */
 export async function putSettings(data) {
-  const res = await fetch(`${API_BASE}/settings`, {
+  const res = await authFetch(`${API_BASE}/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -534,7 +596,7 @@ export async function putSettings(data) {
 
 /** 保存侧栏手动排序（区段内：rooms/agents 各自顺序） */
 export async function putSidebarOrder(sidebarOrder) {
-  const res = await fetch(`${API_BASE}/settings/sidebar-order`, {
+  const res = await authFetch(`${API_BASE}/settings/sidebar-order`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sidebarOrder }),
@@ -543,9 +605,9 @@ export async function putSidebarOrder(sidebarOrder) {
   return await res.json();
 }
 
-/** 上传用户头像（base64 + mime type），返回保存后的文件名 */
+/** 上传用户头像（base64 + mime type），返回保存后的标识 */
 export async function uploadUserAvatar(data, type) {
-  const res = await fetch(`${API_BASE}/settings/avatar`, {
+  const res = await authFetch(`${API_BASE}/settings/avatar`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ data, type }),

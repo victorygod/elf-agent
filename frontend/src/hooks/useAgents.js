@@ -15,8 +15,9 @@ function parseRoomHash(hash) {
 
 /**
  * useAgents — Agent 列表加载与刷新
+ * @param {boolean} [enabled=true] - 多用户：登录后才拉列表（未登录 /agents 401）
  */
-export default function useAgents() {
+export default function useAgents(enabled = true) {
   const loadAgents = useAgentStore(s => s.loadAgents);
   const refreshAgents = useAgentStore(s => s.refreshAgents);
   const selectAgent = useAgentStore(s => s.selectAgent);
@@ -28,10 +29,10 @@ export default function useAgents() {
   const selectRoom = useRoomStore(s => s.selectRoom);
   const clearActiveRoom = useRoomStore(s => s.clearActiveRoom);
 
-  // 初始化加载
+  // 初始化加载（登录后）
   useEffect(() => {
-    loadAgents();
-  }, [loadAgents]);
+    if (enabled) loadAgents();
+  }, [enabled, loadAgents]);
 
   // 自动选中:仅恢复 URL hash 指定的 agent/room(刷新保持在当前页面)。
   // 不再兜底选 running/第一个 —— 首屏无 hash 时不自动选中/启动。

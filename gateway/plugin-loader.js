@@ -18,8 +18,9 @@ const logger = console; // 复用 gateway logger，无额外依赖
  * @param {express.Application} app
  * @param {object} pm - ProcessManager 实例
  * @param {string} agentsDir - agent 目录（如 profiles/agents）
+ * @param {object} [opts] - 透传给 agent api.js register(pm, agentId, opts)，如 { requireAdmin }
  */
-export async function registerAgentAPIs(app, pm, agentsDir) {
+export async function registerAgentAPIs(app, pm, agentsDir, opts = {}) {
   if (!fs.existsSync(agentsDir)) return;
   let count = 0;
 
@@ -38,7 +39,7 @@ export async function registerAgentAPIs(app, pm, agentsDir) {
         continue;
       }
 
-      const routes = registerFn(pm, agentId);
+      const routes = registerFn(pm, agentId, opts);
       if (!Array.isArray(routes)) {
         logger.warn(`[plugin-loader] ${agentId} api.js register() 未返回数组`);
         continue;

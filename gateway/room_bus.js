@@ -16,7 +16,6 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { createLogger } from '../shared/logger.js';
-import { loadGatewayConfig } from './config.js';
 import { agentRoomState } from '../shared/profiles_paths.js';
 
 const logger = createLogger('room-bus', 'gateway.log');
@@ -488,6 +487,9 @@ export class RoomManager {
      *   /observe（payload 带 roomId + agentId）路由到 server 内 (agentId,roomId) RoomState（懒建）。 */
     this.pm = opts.pm || null;
     this.gatewayUrl = opts.gatewayUrl || null;
+    /** 多用户：用户目录（uid→显示名），群消息渲染/@解析用。数据源 = auth.getUserDirectory。
+     *   注入函数而非静态快照——用户改名/新注册即时生效。 */
+    this._userDirectory = opts.userDirectory || (() => []);
     /** roomId → { config: RoomConfig, broadcaster: RoomBroadcaster, history: RoomHistory, members: Map<agentId, {port,pid,status}> } */
     this.rooms = new Map();
   }
@@ -719,8 +721,8 @@ export class RoomManager {
   buildRoomSnapshotData(roomId) {
     const recent = this.getHistory(roomId).getRecent(50);
     const room = this.getRoom(roomId);
-    const { membersWithNames, user } = this._rosterForRewrite(roomId);
-    const messages = recent.messages.map(m => this._renderMessageForSend(m, membersWithNames, user, false));
+    const { membersWithNames, users } = this._rosterForRewrite(roomId);
+    const messages = recent.messages.map(m => this._renderMessageForSend(m, membersWithNames, users, false));
     return { roomId, roomType: 'room', members: room?.members || [], messages, hasMore: recent.hasMore };
   }
 
@@ -733,7 +735,7 @@ export class RoomManager {
    *   from=uid（agent 自消息过滤靠 uid），content @=name。
    *
    * @param {string} roomId - 群 id
-   * @param {string} speakerUid - 发言者 uid（用户用 userUid，agent 用 agentId）
+   * @param {string} speakerUid - 发言者 uid（用户 = 注册用户 uid，agent = agentId）
    * @param {string} content - 消息原文（@ 可能是 id 或 name）
    * @returns {{id: string, seq: number}} 写入的历史记录
    */
@@ -741,18 +743,18 @@ export class RoomManager {
     const room = this._ensureRoom(roomId);
     const history = room.history;
     const bc = room.broadcaster;
-    const { membersWithNames, user } = this._rosterForRewrite(roomId);
+    const { membersWithNames, users } = this._rosterForRewrite(roomId);
 
     // 1. 写群历史（落盘 uid 版：speaker=uid，content @=uid）
-    const contentUids = RoomManager.rewriteMentions(content, membersWithNames, user, 'uid');
+    const contentUids = RoomManager.rewriteMentions(content, membersWithNames, users, 'uid');
     const rec = history.add(speakerUid, contentUids, 'speak', speakerUid);
 
     // 2. 解析 mentions（uid 列表，给 agent 判被@用）
     const mentions = RoomManager.parseMentions(content, membersWithNames);
 
     // 3. 发送层 name 版（content @=name）
-    const contentNames = RoomManager.rewriteMentions(contentUids, membersWithNames, user, 'name');
-    const speakerName = this._speakerName(speakerUid, membersWithNames, user);
+    const contentNames = RoomManager.rewriteMentions(contentUids, membersWithNames, users, 'name');
+    const speakerName = this._speakerName(speakerUid, membersWithNames, users);
 
     // notifyAll 内部给 SSE 传 name 版、给 agent observe 传 from=uid + name 版 content
     bc.notifyAll('speak', {
@@ -839,15 +841,15 @@ export class RoomManager {
   /**
    * 改写 content 里的 @<成员> 为指定方向（uid 或 name）。
    * 候选同时认 id 和 name，按长度降序最长匹配，逐处 @ 替换。
-   * 用户 uid 也参与（用户可能被 @）：user 候选 = { uid, name: userName }。
+   * 注册用户也参与（用户可能被 @）：users = [{ uid, name }]（来自用户目录）。
    *
    * @param {string} content
    * @param {Array<{agentId:string,name?:string}>} membersWithNames - 含 name 的成员列表
-   * @param {object} [user] - { uid, name }，可选（用户也参与改写）
+   * @param {Array<{uid:string,name?:string}>} [users] - 注册用户目录（多用户）
    * @param {'uid'|'name'} [target='uid'] - 改写方向
    * @returns {string}
    */
-  static rewriteMentions(content, membersWithNames, user, target = 'uid') {
+  static rewriteMentions(content, membersWithNames, users, target = 'uid') {
     if (!content) return content;
     // 候选:{value, to} —— value 是待匹配的 id/name，to 是改写目标值
     const candidates = [];
@@ -863,10 +865,11 @@ export class RoomManager {
       push(m.agentId, to);
       push(name, to);
     }
-    if (user?.uid) {
-      const uname = user.name || user.uid;
-      const to = target === 'uid' ? user.uid : uname;
-      push(user.uid, to);
+    for (const u of (users || [])) {
+      if (!u?.uid) continue;
+      const uname = u.name || u.uid;
+      const to = target === 'uid' ? u.uid : uname;
+      push(u.uid, to);
       push(uname, to);
     }
     // 最长匹配优先
@@ -893,22 +896,24 @@ export class RoomManager {
   }
 
   /**
-   * 读取房间成员（含 name）+ 用户身份，供改写工具用。
+   * 读取房间成员（含 name）+ 全部注册用户目录，供改写工具用。
    * @param {string} roomId
-   * @returns {{membersWithNames: Array, user: {uid, name}}}
+   * @returns {{membersWithNames: Array, users: Array<{uid, name}>}}
    */
   _rosterForRewrite(roomId) {
     const room = this._ensureRoom(roomId);
     const cfg = room.config.read();
     const membersWithNames = (cfg?.members || []).map(agentId => ({ agentId, name: this._readAgentName(agentId) }));
-    const gcfg = loadGatewayConfig();
-    const user = { uid: gcfg.userUid || 'default_userid', name: gcfg.userName || 'user' };
-    return { membersWithNames, user };
+    // 多用户：群里发言的可能是任意注册用户，uid→name 查用户目录（auth.getUserDirectory 注入）
+    const users = this._userDirectory() || [];
+    return { membersWithNames, users };
   }
 
-  /** uid → 显示名（成员优先 name，回退 agentId；用户返回 userName）。失败回退 uid 本身 */
-  _speakerName(uid, membersWithNames, user) {
-    if (user && uid === user.uid) return user.name || uid;
+  /** uid → 显示名（成员优先 name，回退 agentId；用户查用户目录 userName）。失败回退 uid 本身 */
+  _speakerName(uid, membersWithNames, users) {
+    for (const u of (users || [])) {
+      if (u.uid === uid) return u.name || uid;
+    }
     for (const m of (membersWithNames || [])) {
       if (m.agentId === uid) return m.name || m.agentId;
     }
@@ -922,15 +927,15 @@ export class RoomManager {
    * - 附带 mentions（uid 列表，基于原文 uid 解析）
    * @param {object} msg - history 记录（speaker/content 为 uid 版）
    * @param {Array<{agentId,name}>} membersWithNames
-   * @param {{uid,name}} user
+   * @param {Array<{uid,name}>} users - 注册用户目录
    * @param {boolean} [withMentions=true] - 是否附带 mentions 字段
    * @returns {object} 渲染后的消息
    */
-  _renderMessageForSend(msg, membersWithNames, user, withMentions = true) {
+  _renderMessageForSend(msg, membersWithNames, users, withMentions = true) {
     const out = {
       ...msg,
-      speaker: this._speakerName(msg.speaker, membersWithNames, user),
-      content: RoomManager.rewriteMentions(msg.content, membersWithNames, user, 'name'),
+      speaker: this._speakerName(msg.speaker, membersWithNames, users),
+      content: RoomManager.rewriteMentions(msg.content, membersWithNames, users, 'name'),
     };
     if (withMentions) {
       out.mentions = RoomManager.parseMentions(msg.content, membersWithNames);

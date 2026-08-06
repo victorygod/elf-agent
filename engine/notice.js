@@ -11,6 +11,8 @@
  * @param {{ emit?: Function, runContext?: object }|null} ctx   私聊走 ctx.emit（agent 透传）；rc 在 ctx.runContext
  * @param {{ kind:'retry'|'error'|'info', agentId:string, memberName?:string, attempt?:number, maxRetries?:number, error?:string, final?:boolean }} fields
  */
+import { internalAuthHeaders } from '../shared/internal_auth.js';
+
 export function sendNotice(ctx, fields) {
   try {
     const rc = ctx?.runContext || null;
@@ -25,7 +27,8 @@ export function sendNotice(ctx, fields) {
       fetch(u, {
         method: 'POST',
         // X-Speaker-Id 仅 ASCII 身份标识用 agentId（memberName 可能含中文，HTTP header 不接受非 ASCII）。
-        headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': rc.agentId },
+        // 多用户：带内部服务 token（gateway /notice 仅 req.service 可调）。
+        headers: { 'Content-Type': 'application/json', 'X-Speaker-Id': rc.agentId, ...internalAuthHeaders() },
         body,
         // 不传 signal：notice 不应被 abort 信号取消（即便用户中断，已发的重试提示仍可见）。
       }).catch(() => {});

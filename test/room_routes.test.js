@@ -355,8 +355,8 @@ describe('/rooms/* routes', () => {
     const raw = fs.readFileSync(path.join(roomsDir, rid, 'history.jsonl'), 'utf-8').trim().split('\n');
     const rec = JSON.parse(raw[raw.length - 1]);
     assert.ok(rec.content.includes('@elf-001'), '落盘 content 应含 @elf-001(uid)');
-    assert.equal(rec.speaker, 'default_userid', '落盘 speaker 应为 userUid');
-    assert.equal(rec.speakerUid, 'default_userid');
+    assert.equal(rec.speaker, 'u_test', '落盘 speaker 应为当前用户 uid（SKIP_AUTH=u_test）');
+    assert.equal(rec.speakerUid, 'u_test');
 
     // 复原 elf-001 name
     fs.writeFileSync(path.join(cfgDir, 'config.json'), JSON.stringify({

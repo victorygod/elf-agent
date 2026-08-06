@@ -23,6 +23,10 @@ export default defineConfig({
       '/rooms': 'http://localhost:8080',
       '/skills': 'http://localhost:8080',
       '/settings': 'http://localhost:8080',
+      '/auth': 'http://localhost:8080',
+      '/users': 'http://localhost:8080',
+      '/subscribe': 'http://localhost:8080',
+      '/available-tools': 'http://localhost:8080',
     },
   },
 });

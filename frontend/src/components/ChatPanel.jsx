@@ -87,7 +87,7 @@ function AssistantBubble({ bubble, isStreaming, isLastInTurn, onToggleTime, show
  * 渲染一个 Turn（用户消息 + Agent 回复气泡组）
  * React.memo：已完成的 turn（isStreamingActiveTurn=false）不会因 activeTurn 变化而重渲染
  */
-const TurnView = React.memo(function TurnView({ turn, agentId, agent, isStreamingActiveTurn, showTimes, toggleTime, userAvatar, currentLoop }) {
+const TurnView = React.memo(function TurnView({ turn, agentId, agent, isStreamingActiveTurn, showTimes, toggleTime, userAvatar, userUid, currentLoop }) {
   const { userMessage, assistantBubbles } = turn;
   const userShowTime = userMessage && showTimes.has(userMessage.id);
   const assistantShowTime = assistantBubbles[0] && showTimes.has(assistantBubbles[0].id);
@@ -103,7 +103,7 @@ const TurnView = React.memo(function TurnView({ turn, agentId, agent, isStreamin
       {userMessage && (
         <div className={styles.userMessage}>
           <div className={styles.userAvatar}>
-            <Avatar kind="user" avatar={userAvatar} fallback="U" bgColor="#07c160" />
+            <Avatar kind="user" uid={userUid} avatar={userAvatar} fallback="U" bgColor="#07c160" />
           </div>
           <div className={`${styles.userBody} ${userShowTime ? styles.showTime : ''}`}>
             {userMessage.ts && (
@@ -159,10 +159,12 @@ export default function ChatPanel({ agentId }) {
   const isActive = useAgentStore(useCallback(state => state.chats.get(agentId)?._isActive ?? false, [agentId]));
   const currentLoop = useAgentStore(useCallback(state => state.chats.get(agentId)?._currentLoop ?? null, [agentId]));
   const noticeQueue = useAgentStore(useCallback(state => state.chats.get(agentId)?.noticeQueue ?? [], [agentId]));
+  const pendingRestorePrompt = useAgentStore(useCallback(state => state.chats.get(agentId)?.pendingRestorePrompt ?? null, [agentId]));
 
   const agent = useAgentStore(useCallback(state => state.getAgent(agentId), [agentId]));
   const loadHistory = useAgentStore(s => s.loadHistory);
   const userAvatar = useRoomStore(s => s.userAvatar);
+  const userUid = useRoomStore(s => s.userUid);
 
   const { send, abort, rewind, listCheckpoints } = useChat(agentId);
 
@@ -255,6 +257,19 @@ export default function ChatPanel({ agentId }) {
     el.style.height = Math.min(el.scrollHeight, 120) + 'px';
     syncInputEmpty();   // 输入框值变化时同步 inputEmpty（驱动回退按钮显隐）
   }, [syncInputEmpty]);
+
+  // elf-018 abort 回填:gateway 已 rewindTo(latest) 删除本轮 user 并经 abortRewind 事件把 restoredPrompt 传来;
+  //   一次性消费 → 写 inputRef(对齐 handleRewind 直接写非受控 textarea 的模式)→ 清字段防重放。
+  //   ★须在 autoResize 声明之后(依赖数组渲染期即读 autoResize,否则 TDZ)。
+  useEffect(() => {
+    if (pendingRestorePrompt == null) return;
+    if (inputRef.current) {
+      inputRef.current.value = pendingRestorePrompt;
+      inputRef.current.focus();
+      autoResize();
+    }
+    useAgentStore.getState().updateChatField(agentId, { pendingRestorePrompt: null });
+  }, [pendingRestorePrompt, autoResize, agentId]);
 
   // 检测是否在底部附近
   const isNearBottom = useCallback((threshold = 100) => {
@@ -571,6 +586,7 @@ export default function ChatPanel({ agentId }) {
                 showTimes={showTimes}
                 toggleTime={toggleTime}
                 userAvatar={userAvatar}
+                userUid={userUid}
                 currentLoop={null}
               />
             ))}
@@ -584,6 +600,7 @@ export default function ChatPanel({ agentId }) {
                 showTimes={showTimes}
                 toggleTime={toggleTime}
                 userAvatar={userAvatar}
+                userUid={userUid}
                 currentLoop={currentLoop}
               />
             )}

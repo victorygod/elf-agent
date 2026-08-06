@@ -58,8 +58,9 @@ export async function startAgent(configDir, runOpts = {}) {
     mode: runOpts.mode,
     port: runOpts.port ?? defaultPort,
     dataDir,
-    // 私聊也是 Room，roomId = chat-<agentId>（PrivateChatPlugin 据此拼 /rooms/<rid>/sync-history）。
-    roomId: runOpts.roomId || `chat-${agentId}`,
+    // 私聊也是 Room。多用户后 roomId = chat-<uid>-<agentId>；直跑开发路径无真实用户，用伪用户 u_dev 占位
+    //   （该路径不过 gateway 鉴权；sync-history 回查无内部 token 会 401，sync_source 容错为「非致命」跳过）。
+    roomId: runOpts.roomId || `chat-u_dev-${agentId}`,
     memberName: runOpts.memberName,
     roomBusUrl: runOpts.roomBusUrl,
   });

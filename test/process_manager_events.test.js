@@ -33,7 +33,7 @@ describe('process_manager SSE 断开 → 孤儿 streaming 兜底接线', () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-pm-events-'));
     const history = new ChatHistory(root, root, { roomMode: true, roomsDir: root });
     // subscribe 建 SSE 订阅 + 注入 historyStore（forceFinishPrivateTurn 落盘需要）
-    subscribePrivateRoom('chat-elf-x', fakeRes(), history);
+    subscribePrivateRoom('chat-u_test-elf-x', fakeRes(), history);
     pm = new ProcessManager();
   });
   afterEach(() => {
@@ -42,7 +42,7 @@ describe('process_manager SSE 断开 → 孤儿 streaming 兜底接线', () => {
   });
 
   it('SSE 断开 handler 清掉该 agent 名下 streaming 中的私聊房', () => {
-    const roomId = 'chat-elf-x';
+    const roomId = 'chat-u_test-elf-x';
     // 造一个 streaming=true 的孤儿回合（agent 已发不出 done 的场景）
     startPrivateTurn(roomId, { content: '1', id: 'u1' });
     assert.equal(forceFinishPrivateTurn(roomId), true, '前置：房间确实在 streaming');
@@ -54,7 +54,7 @@ describe('process_manager SSE 断开 → 孤儿 streaming 兜底接线', () => {
   });
 
   it('SSE 断开 handler 对非 streaming 房 no-op（不误造状态、不重复广播）', () => {
-    const roomId = 'chat-elf-x';
+    const roomId = 'chat-u_test-elf-x';
     // 不 startTurn，房间无 streaming 回合
     const before = pm._makeDisconnectHandler('elf-x');
     before();
@@ -63,14 +63,14 @@ describe('process_manager SSE 断开 → 孤儿 streaming 兜底接线', () => {
 
   it('断开 handler 只清自己的 agent 房，不影响别的 agent', () => {
     // elf-x 有孤儿 streaming
-    startPrivateTurn('chat-elf-x', { content: '1', id: 'u1' });
+    startPrivateTurn('chat-u_test-elf-x', { content: '1', id: 'u1' });
     // elf-y 也 subscribe 一房（非 streaming）
     const history = new ChatHistory(root, root, { roomMode: true, roomsDir: root });
-    subscribePrivateRoom('chat-elf-y', fakeRes(), history);
+    subscribePrivateRoom('chat-u_test-elf-y', fakeRes(), history);
 
     pm._makeDisconnectHandler('elf-x')();
 
-    assert.equal(forceFinishPrivateTurn('chat-elf-x'), false, 'elf-x 已被清');
-    assert.equal(forceFinishPrivateTurn('chat-elf-y'), false, 'elf-y 本就非 streaming，未受影响');
+    assert.equal(forceFinishPrivateTurn('chat-u_test-elf-x'), false, 'elf-x 已被清');
+    assert.equal(forceFinishPrivateTurn('chat-u_test-elf-y'), false, 'elf-y 本就非 streaming，未受影响');
   });
 });

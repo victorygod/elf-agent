@@ -39,13 +39,17 @@ function highlightMentions(content, memberNames) {
   return result;
 }
 
-/** 收集成员名(用于@高亮):各 agent 的 id 和 display name + 用户名(userName) */
-function collectMemberNames(members, userName, messages) {
+/** 收集成员名(用于@高亮):各 agent 的 id 和 display name + 全部注册用户显示名 */
+function collectMemberNames(members, users, userName, messages) {
   const names = [];
   for (const m of members || []) {
     names.push(m.agentId);
     // display name 不同于 agentId 时也收录,使 @显示名 同样能高亮
     if (m.name && m.name !== m.agentId) names.push(m.name);
+  }
+  // 多用户：所有注册用户的名都可 @ 高亮（含自己）
+  for (const u of users || []) {
+    if (u?.name) names.push(u.name);
   }
   if (userName) names.push(userName);
   names.push('user'); // 兼容历史记录里 speaker='user'
@@ -75,6 +79,7 @@ export default function RoomChatPanel({ roomId }) {
 
   const messages = chat?.messages || [];
   const members = chat?.members || [];
+  const users = chat?.users || [];   // 多用户：{uid,name,avatar} 目录（loadRoomMembers 载入）
   const noticeQueue = chat?.noticeQueue || [];
 
   // 用户是否主动上滑离开底部 — 置 true 后新消息不自动滚底,直到用户滚回底部附近
@@ -166,19 +171,26 @@ export default function RoomChatPanel({ roomId }) {
   const memberMap = {};
   members.forEach(m => { memberMap[m.agentId] = m; });
 
-  /** 解析发言者：speaker=name（显示），speakerUid=uid（查 avatar）。返回 { name, avatar, isUser, uid } */
+  /** 解析发言者：speaker=name（显示），speakerUid=uid（查 avatar）。
+   *  多用户：返回 { name, avatar, kind, uid }，kind ∈ 'self'|'user'|'agent' ——
+   *  自己右侧，其他注册用户左侧用户样式，agent 左侧成员样式。 */
   const resolveSpeaker = (msg) => {
     const uid = msg.speakerUid;
-    const isUser = !uid || uid === userUid || msg.speaker === userName || msg.speaker === 'user';
-    if (isUser) {
-      return { name: msg.speaker || userName || 'user', avatar: null, isUser: true, uid: uid || userUid };
+    // 自己（右侧）：uid 匹配 / 历史无 uid 且 speaker='user'
+    if (uid === userUid || (!uid && (msg.speaker === userName || msg.speaker === 'user'))) {
+      return { name: msg.speaker || userName || 'user', avatar: userAvatar, kind: 'self', uid: userUid };
+    }
+    // 其他注册用户（左侧用户样式）
+    const u = users.find(x => x.uid === uid);
+    if (u) {
+      return { name: u.name, avatar: u.avatar, kind: 'user', uid };
     }
     // 成员：按 uid 查 memberMap；兼容老消息（无 speakerUid）按 name/agentId 匹配
     const m = memberMap[uid] || members.find(m => m.agentId === uid || m.name === msg.speaker);
-    if (m) return { name: m.name || m.agentId, avatar: m.avatar, isUser: false, uid: m.agentId };
+    if (m) return { name: m.name || m.agentId, avatar: m.avatar, kind: 'agent', uid: m.agentId };
     // 已被移除的成员：name 兜底 uid/agentId，避免 undefined.charAt 白屏
     const name = msg.speaker || uid || 'agent';
-    return { name, avatar: null, isUser: false, uid: uid || null };
+    return { name, avatar: null, kind: 'agent', uid: uid || null };
   };
 
   const onCompositionEnd = () => { isComposingRef.current = false; };
@@ -197,14 +209,13 @@ export default function RoomChatPanel({ roomId }) {
         )}
         {messages.map((m, i) => {
           const speakerInfo = resolveSpeaker(m);
-          const isUser = speakerInfo.isUser;
           // content 已是 name 版（gateway 改写），只做 @name 蓝字高亮
-          const highlighted = highlightMentions(m.content, collectMemberNames(members, userName, messages));
-          if (isUser) {
+          const highlighted = highlightMentions(m.content, collectMemberNames(members, users, userName, messages));
+          if (speakerInfo.kind === 'self') {
             return (
               <div key={m.id || i} className={styles.userMessage}>
                 <div className={styles.userAvatar}>
-                  <Avatar kind="user" avatar={userAvatar} fallback={(userName || 'U').charAt(0).toUpperCase()} bgColor="#07c160" />
+                  <Avatar kind="user" uid={userUid} avatar={userAvatar} fallback={(userName || 'U').charAt(0).toUpperCase()} bgColor="#07c160" />
                 </div>
                 <div className={styles.userBody}>
                   <div className={styles.userBubble}>
@@ -217,7 +228,11 @@ export default function RoomChatPanel({ roomId }) {
           return (
             <div key={m.id || i} className={styles.assistantGroup}>
               <div className={styles.avatar}>
-                <Avatar kind="agent" agentId={speakerInfo.uid} avatar={speakerInfo.avatar} bgColor="#4a90d9" fallback={speakerInfo.name.charAt(0).toUpperCase()} />
+                {speakerInfo.kind === 'user' ? (
+                  <Avatar kind="user" uid={speakerInfo.uid} avatar={speakerInfo.avatar} bgColor="#4a90d9" fallback={speakerInfo.name.charAt(0).toUpperCase()} />
+                ) : (
+                  <Avatar kind="agent" agentId={speakerInfo.uid} avatar={speakerInfo.avatar} bgColor="#4a90d9" fallback={speakerInfo.name.charAt(0).toUpperCase()} />
+                )}
               </div>
               <div className={styles.assistantCol}>
                 <div className={styles.speakerName}>{speakerInfo.name}</div>

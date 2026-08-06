@@ -13,6 +13,7 @@ import { RoomManager } from './room_bus.js';
 import { AggregatedBroadcaster } from './aggregated_stream.js';
 import { createLogger } from '../shared/logger.js';
 import { profilesRoot, roomsRoot } from '../shared/profiles_paths.js';
+import { getUserDirectory } from './auth.js';
 
 const logger = createLogger('gateway-main', 'gateway.log');
 
@@ -45,7 +46,11 @@ async function main() {
   // 5. 初始化群聊管理器 + 私聊 room 历史管理器（房间数据落 profiles/rooms/<rid>）
   const roomsRootDir = roomsRoot();
   try { fs.mkdirSync(roomsRootDir, { recursive: true }); } catch (e) { /* ignore */ }
-  const roomManager = new RoomManager(roomsRootDir, config.port, { pm, gatewayUrl: `http://127.0.0.1:${config.port}` });
+  const roomManager = new RoomManager(roomsRootDir, config.port, {
+    pm,
+    gatewayUrl: `http://127.0.0.1:${config.port}`,
+    userDirectory: getUserDirectory,   // 多用户：群消息 uid→name 渲染查用户目录
+  });
   // 私聊房历史（room 模式 ChatHistory：写 profiles/rooms/chat-<id>/history.jsonl，schema 与私聊同）。
   const privateRoomHistory = new ChatHistory(roomsRootDir, roomsRootDir, { roomMode: true, roomsDir: roomsRootDir });
   pm.privateRoomHistory = privateRoomHistory;
