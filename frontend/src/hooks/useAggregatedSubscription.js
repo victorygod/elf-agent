@@ -69,11 +69,15 @@ function _stop() {
 }
 
 export function useAggregatedSubscription() {
-  // 多用户：登录后才建连（未登录 /subscribe 401）；登出/换号时断开，重连由 token 变化触发
-  const token = useAuthStore(s => s.token);
+  // 多用户：登出/换号时断开，重连由 user 变化触发。
+  //   必须依赖 user（而非 token）：snapshot 处理经 chatKey(agentId) = <uid>:<agentId> 写 store，
+  //   uid 未就绪时会落到兜底 'anon' key，随后 uid 就绪、key 变成真实 uid → snapshot 历史不可达，
+  //   表现为刷新 running agent 后私聊内容消失（像换了用户）。等 user 就绪再建连，snapshot 才写对 key。
+  //   snapshot 仅在 subscribe 新建时推一次，错过了不再补，故此处必须卡住建连时机。
+  const user = useAuthStore(s => s.user);
   useEffect(() => {
-    if (!token) { _stop(); return; }
+    if (!user) { _stop(); return; }
     _start();
     return () => _stop();
-  }, [token]);
+  }, [user]);
 }

@@ -119,7 +119,7 @@ function LoreEntityModal({ isNew, initial, onSave, onPolish, onClose, type }) {
   );
 }
 
-export default function GameSetupPanel({ bridge }) {
+export default function GameSetupPanel({ bridge, onCommitted }) {
   const [playerName, setPlayerName] = useState('');
   const [profileBody, setProfileBody] = useState('');
   const [openingMessage, setOpeningMessage] = useState('出发吧');
@@ -196,16 +196,19 @@ export default function GameSetupPanel({ bridge }) {
   }, [bridge]);
 
   // 开始游戏：先把玩家设定写入临时目录 → 固化开场白 → commit lore 到正式 runtime/lore → 发送开场白
+  //   commit 成功后正式目录已更新，立刻 onCommitted 强制刷一遍面板（拉 commit 后的 /game-state），
+  //   不必等到整轮结束才看到新 lore。
   const handleStartGame = useCallback(async () => {
     try {
       await bridge.call('PUT', '/user-profile', { name: playerName, body: profileBody, mode: 'setup' });
       await bridge.call('PUT', '/setup/opening', { opening: openingMessage });
       await bridge.call('POST', '/setup/commit');
+      onCommitted?.();
       bridge.send(openingMessage);
     } catch (e) {
       alert('开始游戏失败: ' + e.message);
     }
-  }, [playerName, profileBody, openingMessage, bridge]);
+  }, [playerName, profileBody, openingMessage, bridge, onCommitted]);
 
   const openNewLore = (type) => setLoreEditor({ type, isNew: true, initial: null });
   const openEditLore = (type, entity, filename) => setLoreEditor({ type, isNew: false, filename, initial: { name: entity.name, description: entity.description, body: entity.body } });

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import ChatPanel from './components/ChatPanel';
 import ConfigDrawer from './components/ConfigDrawer';
@@ -25,7 +25,16 @@ export default function App() {
   //   chats 复合 key 已按 uid 隔离，这里再兜底清空 + 清 URL hash。历史加载由现有机制自动补齐：
   //   running agent 靠聚合 SSE 重连补发 snapshot；stopped agent 靠 ChatPanel init force loadHistory。
   const authUid = useAuthStore(s => s.user?.uid);
+  // 登录态变化（登录/登出/换号）：重置两个业务 store，防上一个用户的数据（chats/房间）串入。
+  //   chats 复合 key 已按 uid 隔离，这里再兜底清空 + 清 URL hash。历史加载由现有机制自动补齐：
+  //   running agent 靠聚合 SSE 重连补发 snapshot；stopped agent 靠 ChatPanel init force loadHistory。
+  //   注意：首屏从 undefined→uid（恢复登录态）不算换号，跳过 reset + 清 hash，否则刷新会丢掉 URL 里的
+  //   #elf-xxx，导致刷新后无法停留在当前 agent。
+  const prevAuthUidRef = useRef(authUid);
   useEffect(() => {
+    const prev = prevAuthUidRef.current;
+    prevAuthUidRef.current = authUid;
+    if (prev === undefined) return; // 首屏恢复登录态，不动 hash / store
     useAgentStore.getState().reset();
     useRoomStore.getState().reset();
     if (typeof window !== 'undefined' && window.location.hash) window.location.hash = '';

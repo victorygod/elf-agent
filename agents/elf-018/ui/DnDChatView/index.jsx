@@ -159,10 +159,13 @@ export default function DnDChatView({ bridge }) {
   const hasHistory = bridge.turns.length > 0 || bridge.activeTurn;
 
   // —— 无对话 → 初始设定页 ——
+  //   onCommitted：开始游戏 commit 成功后立刻静默刷一次面板。commit 把 setup 临时目录固化进
+  //   正式 runtime/lore，此时 activeTurn 还没出现、写工具也还没跑，两条刷新边沿都不触发，
+  //   面板会一直停在 commit 前的旧 state，直到整轮结束才更新。此处补一个 commit 边沿强制加载。
   if (!hasHistory) {
     return (
       <div className={styles.layout}>
-        <GameSetupPanel bridge={bridge} />
+        <GameSetupPanel bridge={bridge} onCommitted={() => loadState(true)} />
       </div>
     );
   }
