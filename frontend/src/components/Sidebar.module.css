@@ -175,14 +175,19 @@
   justify-content: center;
   z-index: 200;
 }
+/* 设置弹窗——统一大 panel，各视图（main/password/llm）同尺寸，切换不跳动 */
 .nameEditBox {
   background: #fff;
   border-radius: 12px;
-  padding: 20px;
-  width: 320px;
+  padding: 24px;
+  width: 560px;
+  max-width: calc(100vw - 32px);
+  max-height: 80vh;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.16);
 }
 .nameEditTitle { font-weight: 600; color: #333; }
 .nameEditInput {

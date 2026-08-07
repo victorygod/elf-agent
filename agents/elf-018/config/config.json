@@ -37,5 +37,7 @@
     "Edit",
     "Roll"
   ],
-  "avatar": "avatar.webp"
+  "avatar": "avatar.webp",
+  "model_id": "deepseek-v4-flash",
+  "model_params": {}
 }

@@ -1,4 +1,5 @@
 import { createLogger } from '../shared/logger.js';
+import { sendNotice } from './notice.js';
 
 let logFileName = null;
 export function setAbortFlowLogFileName(name) { logFileName = name; }
@@ -76,6 +77,22 @@ export class AbortFlow {
   /** 错误事件 helper。@param {(event:object)=>void} emit @param {string} msg */
   emitError(emit, msg) {
     emit({ event: 'error', data: { message: msg } });
+    // 后端任何终端 error 都上送居中 notice（前端 Toast 渲染）：模型未配置 / 工具失败 / max 迭代等
+    // 所有非重试错误此前都不冒泡。onRetry(final) 已发过 error notice 时跳过，避免重试耗尽冒两个。
+    const agent = this._agent;
+    const errText = String(msg || '');
+    if (agent && errText && agent._lastNoticedError === errText) {
+      agent._lastNoticedError = null;
+      return;
+    }
+    const rc = agent?.runContext;
+    sendNotice({ emit, runContext: rc }, {
+      kind: 'error',
+      agentId: rc?.agentId,
+      memberName: rc?.memberName || rc?.agentId,
+      error: errText,
+      final: true,
+    });
   }
 
   /**

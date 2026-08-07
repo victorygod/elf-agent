@@ -1,6 +1,7 @@
 import React, { useCallback, useState, useEffect, useRef } from 'react';
 import Avatar from './Avatar';
 import ConfirmModal from './ConfirmModal';
+import LLMManager from './LLMManager';
 import useAgentStore from '../stores/agentStore';
 import { useRoomStore } from '../stores/roomStore';
 import { useAuthStore } from '../stores/authStore';
@@ -71,7 +72,7 @@ export default function Sidebar({ onSelect }) {
   const [avatarRemoved, setAvatarRemoved] = useState(false);
   // 注销确认弹窗
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
-  // 设置弹窗视图：'main'（头像+用户名+入口）| 'password'（修改密码子页）
+  // 设置弹窗视图：'main'（头像+用户名+入口）| 'password'（修改密码子页）| 'llm'（LLM API 管理）
   const [settingsView, setSettingsView] = useState('main');
   // 修改密码表单
   const [oldPassword, setOldPassword] = useState('');
@@ -82,18 +83,25 @@ export default function Sidebar({ onSelect }) {
 
   useEffect(() => { loadUserName(); }, [loadUserName]);
 
-  const openSettings = () => {
+  const openSettings = (view = 'main') => {
     setSettingsName(userName || '');
     setPendingAvatarFile(null);
     setSettingsAvatarPreview(null);
     setAvatarRemoved(false);
-    setSettingsView('main');
+    setSettingsView(view);
     setOldPassword('');
     setNewPassword('');
     setNewPassword2('');
     setPassMsg(null);
     setShowSettings(true);
   };
+
+  // 监听外部「打开设置」事件（如 ConfigDrawer 的「跳转到 LLM API 管理」），支持指定初始视图
+  useEffect(() => {
+    const handler = (e) => openSettings(e.detail?.view || 'main');
+    window.addEventListener('openSettings', handler);
+    return () => window.removeEventListener('openSettings', handler);
+  }, [userName]);
 
   // 派生排序后的列表
   const orderedRooms = orderedBy(rooms, sidebarOrder.rooms, r => r.roomId);
@@ -278,7 +286,7 @@ export default function Sidebar({ onSelect }) {
             onClick={handleRefresh}
             title="刷新状态"
           >↻</button>
-          <button className={styles.btnIconSm} onClick={openSettings} title="全局设置">⚙</button>
+          <button className={styles.btnIconSm} onClick={() => openSettings()} title="全局设置">⚙</button>
         </div>
         <div className={styles.subtitle}>
           {userName ? `你好，${userName}` : 'AI Agent 平台'}
@@ -288,9 +296,9 @@ export default function Sidebar({ onSelect }) {
 
       {/* 全局设置弹窗（main：头像+用户名+入口按钮；password：修改密码子页） */}
       {showSettings && (
-        <div className={styles.nameEditModal}>
+        <div className={styles.nameEditModal} onClick={(e) => { if (e.target === e.currentTarget) setShowSettings(false); }}>
           <div className={styles.nameEditBox}>
-            {settingsView === 'main' ? (
+            {settingsView === 'main' && (
               <>
                 <div className={styles.nameEditTitle}>全局设置</div>
                 <div className={styles.settingAvatarRow}>
@@ -331,6 +339,11 @@ export default function Sidebar({ onSelect }) {
 
                 {/* 入口按钮 */}
                 <div style={{ borderTop: '1px solid #eee', paddingTop: '12px', marginTop: '4px' }}>
+                  {authUser?.role === 'admin' && (
+                    <button className={styles.settingsEntryBtn} onClick={() => setSettingsView('llm')}>
+                      LLM API 管理
+                    </button>
+                  )}
                   <button className={styles.settingsEntryBtn} onClick={() => { setOldPassword(''); setNewPassword(''); setNewPassword2(''); setPassMsg(null); setSettingsView('password'); }}>
                     修改密码
                   </button>
@@ -340,7 +353,9 @@ export default function Sidebar({ onSelect }) {
                   >退出登录</button>
                 </div>
               </>
-            ) : (
+            )}
+
+            {settingsView === 'password' && (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', marginBottom: '12px' }}>
                   <button className={styles.settingsBackBtn} onClick={() => setSettingsView('main')} title="返回设置">‹</button>
@@ -384,6 +399,16 @@ export default function Sidebar({ onSelect }) {
                     {passBusy ? '提交中…' : '保存'}
                   </button>
                 </div>
+              </>
+            )}
+
+            {settingsView === 'llm' && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', marginBottom: '12px' }}>
+                  <button className={styles.settingsBackBtn} onClick={() => setSettingsView('main')} title="返回设置">‹</button>
+                  <div className={styles.nameEditTitle}>LLM API 管理</div>
+                </div>
+                <LLMManager />
               </>
             )}
           </div>

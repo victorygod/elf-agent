@@ -15,7 +15,7 @@ import styles from './ConfigDrawer.module.css';
  * - manifest 声明了 component：从 agent UI 目录动态加载
  * - 默认：遍历 fields 渲染 ConfigField
  */
-function ConfigTabBody({ tab, agentId, formData, agent, availableTools, onFieldChange, onFieldCommit, bridge }) {
+function ConfigTabBody({ tab, agentId, formData, agent, availableTools, globalModels, onFieldChange, onFieldCommit, onModelIdChange, bridge }) {
   const [CustomComponent, setCustomComponent] = useState(undefined);
 
   useEffect(() => {
@@ -49,18 +49,104 @@ function ConfigTabBody({ tab, agentId, formData, agent, availableTools, onFieldC
   const editableFields = tab.fields.filter(f => f.type !== 'readonly-tags');
   const readonlyFields = tab.fields.filter(f => f.type === 'readonly-tags');
 
-  const renderField = (field) => (
-    <ConfigField
-      key={field.key}
-      field={field}
-      agentId={agentId}
-      value={formData[field.key] ?? ''}
-      currentAvatar={field.key === 'avatar' ? (agent?.avatar || null) : null}
-      options={field.options ?? (field.type === 'multiselect' ? availableTools : null)}
-      onChange={(val) => onFieldChange(field.key, val)}
-      onCommit={(val) => onFieldCommit(field.key, val)}
-    />
-  );
+  // 模型配置特殊处理
+  const isModelTab = tab.key === 'model';
+
+  const renderField = (field) => {
+    if (field.key === 'model_id') {
+      // 模型选择下拉框
+      const selectedModelId = formData.model_id || '';
+      const selectedModel = globalModels.find(m => m.model_id === selectedModelId);
+
+      return (
+        <div key={field.key} className={styles.modelField}>
+          <label className={styles.modelFieldLabel}>{field.label}</label>
+          <select
+            className={styles.modelSelect}
+            value={selectedModelId}
+            onChange={(e) => onModelIdChange(e.target.value)}
+          >
+            <option value="">请选择模型</option>
+            {globalModels.map(m => (
+              <option key={m.model_id} value={m.model_id}>{m.model_id}</option>
+            ))}
+          </select>
+          {field.hint && <div className={styles.modelFieldHint}>{field.hint}</div>}
+
+          {globalModels.length === 0 && (
+            <div className={styles.modelWarn}>
+              全局模型库为空，请先到「LLM API 管理」添加模型。
+              <button
+                className={styles.modelLinkBtn}
+                onClick={() => window.dispatchEvent(new CustomEvent('openSettings', { detail: { view: 'llm' } }))}
+              >
+                前往管理
+              </button>
+            </div>
+          )}
+
+          {selectedModel && (
+            <>
+              <div className={styles.modelInfo}>
+                <div><strong>base_url:</strong> {selectedModel.base_url}</div>
+                <div><strong>model:</strong> {selectedModel.model}</div>
+              </div>
+              <button
+                className={styles.modelLinkBtn}
+                onClick={() => window.dispatchEvent(new CustomEvent('openSettings', { detail: { view: 'llm' } }))}
+              >
+                跳转到 LLM API 管理
+              </button>
+            </>
+          )}
+        </div>
+      );
+    } else if (field.key.startsWith('model_params.')) {
+      // 动态参数字段
+      const paramKey = field.key.replace('model_params.', '');
+      return (
+        <ConfigField
+          key={field.key}
+          field={field}
+          agentId={agentId}
+          value={formData[field.key] ?? field.default ?? ''}
+          currentAvatar={null}
+          options={field.options || null}
+          onChange={(val) => onFieldChange(field.key, val)}
+          onCommit={(val) => onFieldCommit(field.key, val)}
+        />
+      );
+    } else {
+      return (
+        <ConfigField
+          key={field.key}
+          field={field}
+          agentId={agentId}
+          value={formData[field.key] ?? ''}
+          currentAvatar={field.key === 'avatar' ? (agent?.avatar || null) : null}
+          options={field.options ?? (field.type === 'multiselect' ? availableTools : null)}
+          onChange={(val) => onFieldChange(field.key, val)}
+          onCommit={(val) => onFieldCommit(field.key, val)}
+        />
+      );
+    }
+  };
+
+  // 动态生成参数字段
+  let paramFields = [];
+  if (isModelTab && formData.model_id) {
+    const selectedModel = globalModels.find(m => m.model_id === formData.model_id);
+    if (selectedModel?.params_schema) {
+      paramFields = Object.entries(selectedModel.params_schema).map(([paramKey, schema]) => ({
+        key: `model_params.${paramKey}`,
+        type: schema.type,
+        label: schema.label,
+        hint: schema.hint,
+        default: schema.default,
+        options: schema.options
+      }));
+    }
+  }
 
   return (
     <>
@@ -71,6 +157,15 @@ function ConfigTabBody({ tab, agentId, formData, agent, availableTools, onFieldC
             <span className={styles.sectionTitle}>当前能力（只读 · 改 config.json 后重启生效）</span>
           </div>
           {readonlyFields.map(renderField)}
+        </>
+      )}
+      {/* 动态参数字段 */}
+      {paramFields.length > 0 && (
+        <>
+          <div className={styles.sectionDivider}>
+            <span className={styles.sectionTitle}>模型参数</span>
+          </div>
+          {paramFields.map(renderField)}
         </>
       )}
       {/* prompt tab 底部额外面板由 agent UI 动态加载 */}
@@ -105,7 +200,7 @@ export default function ConfigDrawer({ onClose }) {
   const {
     config, layout, formData, activeTab,
     isSaving, isStarting, isStopping,
-    setActiveTab, handleFieldChange, handleFieldCommit,
+    setActiveTab, handleFieldChange, handleFieldCommit, handleModelIdChange,
     handleSave, handleStart, handleStop,
     handleClearAll, closeConfigStore,
   } = useConfig();
@@ -114,6 +209,15 @@ export default function ConfigDrawer({ onClose }) {
   const [availableTools, setAvailableTools] = useState([]);
   useEffect(() => {
     api.getAvailableTools().then(setAvailableTools).catch(() => setAvailableTools([]));
+  }, []);
+
+  // 全局模型库
+  const [globalModels, setGlobalModels] = useState([]);
+  useEffect(() => {
+    api.authFetch('/models')
+      .then(res => res.json())
+      .then(setGlobalModels)
+      .catch(() => setGlobalModels([]));
   }, []);
 
   // 「清空聊天与记忆」确认弹窗（替代原生 confirm()，避免被浏览器屏蔽导致按钮无响应）
@@ -131,7 +235,12 @@ export default function ConfigDrawer({ onClose }) {
   // 提取字段元数据
   const defaultTabs = (layout || manifestTabs) ? null : buildDefaultLayout(config);
 
-  const tabs = manifestTabs || layout?.tabs || defaultTabs?.tabs || [];
+  // 模型配置是平台标准（按 model_id 选模型 + 动态参数），不走 manifest 里各 agent 自带的旧
+  // base_url/auth_token/model 字段。统一替换 model tab 的 fields，单点修复所有 agent。
+  const MODEL_TAB_FIELDS = [{ key: 'model_id', type: 'select', label: '选择模型', hint: '从 LLM API 管理中选择一个模型' }];
+  const tabs = (manifestTabs || layout?.tabs || defaultTabs?.tabs || []).map(tab =>
+    tab.key === 'model' ? { ...tab, fields: MODEL_TAB_FIELDS } : tab
+  );
 
   return (
     <div className={styles.panel}>
@@ -180,8 +289,10 @@ export default function ConfigDrawer({ onClose }) {
                 formData={formData}
                 agent={agent}
                 availableTools={availableTools}
+                globalModels={globalModels}
                 onFieldChange={handleFieldChange}
                 onFieldCommit={handleFieldCommit}
+                onModelIdChange={handleModelIdChange}
                 bridge={bridge}
               />
             </div>
@@ -214,7 +325,8 @@ function buildDefaultLayout(config) {
   const skipKeys = new Set([
     'agentId', 'port', 'systemPromptPath',
     'avatar', 'userAvatar', '_ui', 'provider', 'systemPrompt',
-    'model', 'modelError',
+    'model', 'modelError', 'model_id', 'model_params',
+    'base_url', 'auth_token',
   ]);
 
   for (const [key, value] of Object.entries(config)) {
@@ -251,9 +363,7 @@ function buildDefaultLayout(config) {
         key: 'model',
         label: '模型配置',
         fields: [
-          { key: 'base_url', type: 'text', label: 'API Base URL', hint: 'LLM API 端点地址' },
-          { key: 'auth_token', type: 'text', label: 'Auth Token', hint: 'LLM API 认证密钥' },
-          { key: 'model', type: 'text', label: '模型名称', hint: '如 gpt-4o、GLM-5.1、deepseek-chat' },
+          { key: 'model_id', type: 'select', label: '选择模型', hint: '从 LLM API 管理中选择一个模型' },
         ],
       },
     ],

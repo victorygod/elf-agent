@@ -349,13 +349,18 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
         const missing = config.getModelMissingFields();
         if (missing) {
           try { config.load(); } catch (e) { logger.warn(`配置重载失败: ${e.message}`); }
+          const modelErrorAfterReload = config.getModelError();
           const missingAfterReload = config.getModelMissingFields();
-          if (missingAfterReload) {
+          if (modelErrorAfterReload || missingAfterReload) {
             res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
             if (res.socket) res.socket.setNoDelay(true);
-            const fieldLabels = { base_url: 'API Base URL', auth_token: 'Auth Token', model: '模型名称' };
-            const labeled = missingAfterReload.map(k => fieldLabels[k] || k).join('、');
-            res.write(`event: error\ndata: ${JSON.stringify({ message: `模型配置不完整，缺少以下字段：${labeled}。请在配置页面的「模型配置」选项卡中填写。` })}\n\n`);
+            let message = modelErrorAfterReload;
+            if (!message) {
+              const fieldLabels = { base_url: 'API Base URL', auth_token: 'Auth Token', model: '模型名称' };
+              const labeled = missingAfterReload.map(k => fieldLabels[k] || k).join('、');
+              message = `模型配置不完整，缺少以下字段：${labeled}。请在配置页面的「模型配置」选项卡中选择模型。`;
+            }
+            res.write(`event: error\ndata: ${JSON.stringify({ message })}\n\n`);
             res.end();
             return;
           }
@@ -372,8 +377,10 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
     const allConfig = config.getAll();
     const modelConfig = config.getModelConfig();
     if (modelConfig.provider !== 'mock') {
+      const modelError = config.getModelError();
       const missing = config.getModelMissingFields();
-      if (missing) allConfig.modelError = `模型配置不完整，请在「模型配置」选项卡中填写：${missing.join('、')}`;
+      if (modelError) allConfig.modelError = modelError;
+      else if (missing) allConfig.modelError = `模型配置不完整，缺少以下字段：${missing.join('、')}。请在配置页面的「模型配置」选项卡中选择模型。`;
     }
     res.json(allConfig);
   });
@@ -481,6 +488,22 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
     eventsClients.add(res);
     res.on('close', () => eventsClients.delete(res));
   });
+
+  // 配置热更新（多 agent 模式）：reload 指定 agent 的所有 live 实例（rooms 里的 RoomState.agent）。
+  // 未实例化的 agent 无需 reload——下次建房时自然读到最新 config。供 startAgentServer 的 fs.watch 调用。
+  function reloadLiveAgent(agentId) {
+    const m = rooms.get(agentId);
+    if (!m || m.size === 0) return;
+    for (const room of m.values()) {
+      try { room.agent?.reloadConfig?.(); } catch (e) { logger.warn(`reload ${agentId} 失败: ${e.message}`); }
+    }
+    logger.info(`配置热更新: reload ${agentId} 的 ${m.size} 个 live 实例`);
+  }
+  function reloadAllLiveAgents() {
+    for (const aid of rooms.keys()) reloadLiveAgent(aid);
+  }
+  app.reloadLiveAgent = reloadLiveAgent;
+  app.reloadAllLiveAgents = reloadAllLiveAgents;
 
   return app;
 }

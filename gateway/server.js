@@ -28,6 +28,7 @@ import { userDir } from '../shared/profiles_paths.js';
 import {
   listSkills, getSkillDetail, deleteSkill, installSkill, browseDirs, skillRoot,
 } from './skill_store.js';
+import { readGlobalModels, writeGlobalModels } from './api_key_store.js';
 
 const logger = createLogger('gateway-server', 'gateway.log');
 
@@ -258,6 +259,52 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
       res.json(result);
     } catch (err) {
       res.status(400).json({ error: err.message });
+    }
+  });
+
+  // ========================
+  // LLM API 管理（admin）
+  // ========================
+
+  // GET /models — 获取全局模型库
+  app.get('/models', (req, res) => {
+    try {
+      const models = readGlobalModels();
+      res.json(models);
+    } catch (err) {
+      logger.error(`读取模型库失败: ${err.message}`);
+      res.status(500).json({ error: `Failed to read models: ${err.message}` });
+    }
+  });
+
+  // PUT /models — 更新全局模型库（admin）
+  app.put('/models', requireAdmin, (req, res) => {
+    try {
+      const { models } = req.body || {};
+      if (!Array.isArray(models)) {
+        return res.status(400).json({ error: 'models must be an array' });
+      }
+
+      // 校验 model_id 唯一性
+      const modelIds = models.map(m => m.model_id).filter(Boolean);
+      const uniqueIds = new Set(modelIds);
+      if (modelIds.length !== uniqueIds.size) {
+        return res.status(400).json({ error: 'model_id 必须唯一' });
+      }
+
+      // 校验每个模型的必填字段
+      for (const model of models) {
+        if (!model.model_id || !model.base_url || !model.auth_token || !model.model) {
+          return res.status(400).json({ error: '每个模型必须包含 model_id、base_url、auth_token、model 字段' });
+        }
+      }
+
+      writeGlobalModels(models);
+      logger.info(`更新模型库成功，共 ${models.length} 个模型`);
+      res.json({ status: 'ok', count: models.length });
+    } catch (err) {
+      logger.error(`更新模型库失败: ${err.message}`);
+      res.status(500).json({ error: `Failed to write models: ${err.message}` });
     }
   });
 

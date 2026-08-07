@@ -27,7 +27,7 @@ describe('withRetry onRetry 钩子', () => {
     const mock = await startMockLLM({ failTimes: 2 }); // attempt1、2 失败，attempt3 成功
     try {
       const port = mock.addr.port;
-      const model = new LLMModel({ base_url: `http://127.0.0.1:${port}`, apiKey: 'x', connectTimeout: 1000, requestTimeout: 1000 });
+      const model = new LLMModel({ base_url: `http://127.0.0.1:${port}`, apiKey: 'x', model: 'test', connectTimeout: 1000, requestTimeout: 1000 });
       const retryInfos = [];
       const res = await model.chatStream([], null, {
         onRetry: (info) => retryInfos.push({ ...info }),
@@ -49,7 +49,7 @@ describe('withRetry onRetry 钩子', () => {
     const mock = await startMockLLM({ failTimes: 0 });
     try {
       const port = mock.addr.port;
-      const model = new LLMModel({ base_url: `http://127.0.0.1:${port}`, apiKey: 'x', connectTimeout: 1000, requestTimeout: 1000 });
+      const model = new LLMModel({ base_url: `http://127.0.0.1:${port}`, apiKey: 'x', model: 'test', connectTimeout: 1000, requestTimeout: 1000 });
       const res = await model.chatStream([], null, {});
       assert.equal(res.content, '');
     } finally {
@@ -61,7 +61,7 @@ describe('withRetry onRetry 钩子', () => {
     const mock = await startMockLLM({ failTimes: 99 });
     try {
       const port = mock.addr.port;
-      const model = new LLMModel({ base_url: `http://127.0.0.1:${port}`, apiKey: 'x', connectTimeout: 1000, requestTimeout: 1000 });
+      const model = new LLMModel({ base_url: `http://127.0.0.1:${port}`, apiKey: 'x', model: 'test', connectTimeout: 1000, requestTimeout: 1000 });
       const retryInfos = [];
       await assert.rejects(
         model.chatStream([], null, { onRetry: (info) => retryInfos.push({ ...info }) }),

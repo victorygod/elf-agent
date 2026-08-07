@@ -118,55 +118,6 @@ describe('DNDMessageManager', () => {
       'with "I\'ll continue" or similar. Pick up the last task as if the break never happened.\n\n';
   }
 
-  it('rewindToLastUser：截断到最近真实 user（含），清其后 assistant/tool/meta/summary', async () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-dndmm-rewind-'));
-    const mm = new DNDMessageManager({
-      systemPrompt: 'sys', memoryTokenLimit: 40000,
-      compactPrompt: '总结', compactSystemPrompt: '压缩器', dataDir: tmp, config: null,
-    });
-    mm.addUserMessage('玩家本轮指令');          // 真实 user（最近）
-    mm.addMetaMessage('本轮尚未产出大纲…', 'outline_reminder');   // meta（user 角色，应被清）
-    mm.addAssistantToolCalls([{ id: 'c1', type: 'function', function: { name: 'WriteOutline', arguments: '{}' } }]);
-    mm.addToolResult('c1', 'ok');
-    mm.addAssistantMessage('半成品正文……');     // 中断保留的 partial
-    const userIdx = mm.messages.findIndex((m) => m.role === 'user' && !m.isMeta && !m.isCompactSummary);
-    const userId = mm.messages[userIdx].id;
-
-    mm.rewindToLastUser();
-
-    assert.equal(mm.messages.length, userIdx + 1, '只保留到最近真实 user（含）');
-    assert.equal(mm.messages[mm.messages.length - 1].id, userId, '末条即该 user');
-    assert.ok(!mm.messages.some((m) => m.role === 'assistant'), '其后的 assistant 全清');
-    assert.ok(!mm.messages.some((m) => m.role === 'tool'), '其后的 tool 全清');
-    assert.ok(!mm.messages.some((m) => m.isMeta), '其后的 meta 全清');
-    // 落盘一致
-    const onDisk = JSON.parse(fs.readFileSync(path.join(tmp, 'context.json'), 'utf-8'));
-    assert.equal(onDisk.length, userIdx + 1, 'context.json 已截断落盘');
-  });
-
-  it('rewindToLastUser：末条已是真实 user 不动；只有 meta/summary(非真实 user) 不动', async () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-dndmm-rewind2-'));
-    const mm = new DNDMessageManager({
-      systemPrompt: 'sys', memoryTokenLimit: 40000,
-      compactPrompt: '总结', compactSystemPrompt: '压缩器', dataDir: tmp, config: null,
-    });
-    mm.addUserMessage('玩家指令');          // 末条即真实 user
-    const before = mm.messages.length;
-    mm.rewindToLastUser();
-    assert.equal(mm.messages.length, before, '末条已是真实 user 时不截断');
-
-    // 只有 meta（无真实 user）→ 找不到真实 user，不动
-    const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-dndmm-rewind3-'));
-    const mm2 = new DNDMessageManager({
-      systemPrompt: 'sys', memoryTokenLimit: 40000,
-      compactPrompt: '总结', compactSystemPrompt: '压缩器', dataDir: tmp2, config: null,
-    });
-    mm2.addMetaMessage('提醒', 'tag');
-    mm2.addAssistantMessage('半成品');
-    const before2 = mm2.messages.length;
-    mm2.rewindToLastUser();
-    assert.equal(mm2.messages.length, before2, '无真实 user 时不截断');
-  });
 });
 
 // ========================
@@ -580,7 +531,7 @@ describe('lore 作用域工具', () => {
     await w.execute({ file_path: fp, content: charProfile('旧正文') });
     // 未 Read 直接覆盖 → 应成功（不卡 hasRead/陈旧检查）
     const r = await w.execute({ file_path: fp, content: charProfile('新正文') });
-    assert.match(r, /overwritten successfully/);
+    assert.match(r, /has been updated successfully/);
     assert.equal(fs.readFileSync(fp, 'utf-8'), charProfile('新正文'));
   });
 

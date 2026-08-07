@@ -198,13 +198,17 @@ export class TurnStreamServer {
     // ── 终结：flush 尾 + 空 turn 兜底 ──
     let finished = false;
     if (eventName === 'aborted') {
-      // 中断：丢弃本轮已累积的 partial（不落盘 history）。elf-018 的全量回退(删 user+还 runtime+回填输入框)
-      //   由 agent 随后发的 abortRewind 信号触发 gateway rewindTo(latest) 统一处理,本处只清内存 partial。
+      // 中断：保留本轮已生成 partial——先 flushBubble 落盘 history（替代旧"丢弃"），再清内存累积器。
+      //   elf-018 的全量回退(删本轮 user + 还原 runtime + 回填输入框)由其随后发的 abortRewind 信号
+      //   触发 gateway rewindTo(latest) 用 pre-round checkpoint 整份覆盖 history.jsonl,此处先落盘的 partial
+      //   随之被一并清掉(顺序 aborted→done→abortRewind,同进程串行无竞态)。
       st.streaming = false;
       finished = true;
+      this._flushBubble(roomId);   // 空 turn 时 no-op;有内容则落盘 + 置 _hasHistoryOutput=true + 清累积器
+      // 不再置 _hasHistoryOutput=false(旧"丢弃"语义遗留)——否则会抹掉刚落盘的标志。
+      // _flushBubble 已清 assistantContent/toolCalls,下两行可省,保留无害。
       st.assistantContent = '';
       st.toolCalls = [];
-      st._hasHistoryOutput = false;
     } else if (eventName === 'done' || eventName === 'error') {
       st.streaming = false;
       finished = true;

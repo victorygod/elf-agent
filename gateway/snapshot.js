@@ -19,6 +19,7 @@ import path from 'path';
 import { createLogger } from '../shared/logger.js';
 import { agentRoomState } from '../shared/profiles_paths.js';
 import { readCpMeta, cpSeq, listCheckpointDirs } from '../shared/checkpoint_meta.js';
+import { makeSnapshot, restore, clearFileHistory, onCheckpointsEvicted } from '../shared/file_history.js';
 
 const logger = createLogger('snapshot', 'gateway.log');
 
@@ -125,8 +126,15 @@ export function snapshotBeforeSend(agentId, roomId, prompt, roomHistoryPath) {
       ),
       'utf-8'
     );
+    // 文件轴：为本 checkpoint 推一张自包含文件快照（追踪文件当前内容重抓；未变复用）。
+    //   makeSnapshot 无注册表 / 无追踪文件时安全空跑（首轮或 elf-018）。
+    try { makeSnapshot(dataDir, cpId, nextSeq); }
+    catch (e) { logger.warn(`makeSnapshot 失败 (${agentId}/${cpId}): ${e.message}`); }
     // 滑窗淘汰：超过上限删掉最旧的快照包
     _evictOld(agentId, roomId);
+    // 淘汰后丢掉失联 snapshot + 清孤立 backup（与滑窗同步）
+    try { onCheckpointsEvicted(dataDir); }
+    catch (e) { logger.warn(`onCheckpointsEvicted 失败 (${agentId}): ${e.message}`); }
     return cpId;
   } catch (err) {
     logger.error(`打快照失败 (${agentId}): ${err.message}`);
@@ -183,6 +191,9 @@ export function latestCheckpointId(agentId, roomId) {
  */
 export function clearCheckpoints(agentId, roomId) {
   _rmDir(_checkpointsDir(agentId, roomId));
+  // 文件轴：清栈连带清 file-history 注册表 + backup 目录
+  try { clearFileHistory(_dataDir(agentId, roomId)); }
+  catch (e) { logger.warn(`clearFileHistory 失败 (${agentId}/${roomId}): ${e.message}`); }
 }
 
 /**
@@ -272,6 +283,11 @@ export function rewindTo(agentId, roomId, checkpointId, roomHistoryPathOpt) {
         }
       }
     }
+
+    // 4.5 文件轴：还原目标 checkpoint 的 trackedFileBackups（null→unlink、变了→覆盖），弹注册表 ≥ targetSeq。
+    //   无注册表 / 目标无 snapshot 时空跑（elf-018 或目标早于首次编辑的轮）。
+    try { restore(dataDir, target.id, targetSeq); }
+    catch (e) { logger.warn(`file-history restore 失败 (${agentId}/${target.id}): ${e.message}`); }
 
     // 5. 删掉 target 及其之后的所有快照包
     //    target 本身也出栈：回退后栈顶下移到更旧那个，连续 rewind 才能一路往更旧走，

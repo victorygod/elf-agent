@@ -9,6 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import { createLogger } from '../shared/logger.js';
+import { resolveModelConfig } from './api_key_store.js';
 
 let logFileName = null;
 
@@ -16,14 +17,8 @@ export function setConfigStoreLogFileName(name) {
   logFileName = name;
 }
 
-/** API Key 必填字段 */
-const API_KEY_FIELDS = ['base_url', 'auth_token', 'model'];
-
-/** API Key 空模板 */
-const API_KEY_TEMPLATE = { base_url: '', auth_token: '', model: '' };
-
 /**
- * 读取 Agent 配置（config.json + type:"path" 文件 + api_key.json）
+ * 读取 Agent 配置（config.json + type:"path" 文件 + model_id 解析）
  * @param {string} configDir - 配置目录路径
  * @returns {object} 合并后的完整配置，包含 model 和可选的 modelError
  */
@@ -45,24 +40,15 @@ export function readAgentConfig(configDir) {
     }
   }
 
-  // 从 api_key.json 读取模型连接配置
-  const apiKeyPath = path.join(configDir, 'api_key.json');
-  let apiKeyData;
-  try {
-    apiKeyData = JSON.parse(fs.readFileSync(apiKeyPath, 'utf-8'));
-  } catch (err) {
-    apiKeyData = {};
-  }
-
-  raw.model = { provider: raw.provider || 'llm', ...apiKeyData };
-
-  // 检查模型配置是否完整（仅非 mock provider 时检查）
-  if (raw.model.provider !== 'mock') {
-    const modelMissing = API_KEY_FIELDS.filter(k => !raw.model[k]);
-    if (modelMissing.length > 0) {
-      raw.modelError = `模型配置不完整，请在「模型配置」选项卡中填写：${modelMissing.join('、')}`;
-    }
-  }
+  const useMock = raw.provider === 'mock' || process.env.ELF_FORCE_MOCK_MODEL === '1';
+  const { model, modelError } = resolveModelConfig({
+    model_id: raw.model_id,
+    provider: raw.provider,
+    model_params: raw.model_params,
+    useMock,
+  });
+  raw.model = model;
+  if (modelError) raw.modelError = modelError;
 
   return raw;
 }
@@ -92,31 +78,17 @@ export function writeAgentConfig(configDir, update) {
         logger.error(`写入文件 ${filePath} 失败: ${err.message}`);
       }
       // 不修改 config.json 中的路径声明
-    } else if (key === 'model' && typeof value === 'object') {
-      // model 字段：provider 写入 config.json，连接字段写入 api_key.json
-      const apiKeyPath = path.join(configDir, 'api_key.json');
-      let existingApiKey = {};
-      try {
-        existingApiKey = JSON.parse(fs.readFileSync(apiKeyPath, 'utf-8'));
-      } catch (err) {
-        // api_key.json 不存在
-      }
-
-      const apiKeyUpdate = {};
-      for (const apiKeyField of API_KEY_FIELDS) {
-        if (value[apiKeyField] !== undefined) {
-          apiKeyUpdate[apiKeyField] = value[apiKeyField];
-        }
-      }
-
-      if (value.provider !== undefined) {
-        existing.provider = value.provider;
-      }
-
-      if (Object.keys(apiKeyUpdate).length > 0) {
-        const mergedApiKey = { ...existingApiKey, ...apiKeyUpdate };
-        fs.writeFileSync(apiKeyPath, JSON.stringify(mergedApiKey, null, 2), 'utf-8');
-      }
+    } else if (key === 'model_id') {
+      // model_id 字段：直接写入 config.json
+      existing.model_id = value;
+    } else if (key === 'model_params') {
+      // model_params 整体替换（切换模型时清空旧参数）
+      existing.model_params = value;
+    } else if (key.startsWith('model_params.')) {
+      // model_params 字段：解析嵌套字段
+      const paramKey = key.replace('model_params.', '');
+      if (!existing.model_params) existing.model_params = {};
+      existing.model_params[paramKey] = value;
     } else {
       // 普通字段：直接合并写入 config.json
       if (value && typeof value === 'object' && !Array.isArray(value) && existing[key] && typeof existing[key] === 'object') {

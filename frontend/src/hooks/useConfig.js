@@ -30,15 +30,20 @@ export default function useConfig() {
           // 初始化 formData
           const initial = {};
           const model = data.config?.model || {};
+          initial.model_id = data.config?.model_id || '';
+          // 展开 model_params
+          if (data.config?.model_params) {
+            for (const [k, v] of Object.entries(data.config.model_params)) {
+              initial[`model_params.${k}`] = v;
+            }
+          }
           initial.systemPrompt = data.config?.systemPrompt || '';
-          initial.base_url = model.base_url || '';
-          initial.auth_token = model.auth_token || '';
-          initial.model = model.model || '';
 
           // 从 config 提取其他字段
           if (data.config) {
             const skip = new Set(['agentId', 'port', 'systemPromptPath',
-              'avatar', 'userAvatar', '_ui', 'provider', 'systemPrompt', 'model', 'modelError']);
+              'avatar', 'userAvatar', '_ui', 'provider', 'systemPrompt', 'model', 'modelError',
+              'base_url', 'auth_token']);   // 旧字段：已迁到全局模型库，不在面板编辑
             for (const [k, v] of Object.entries(data.config)) {
               if (skip.has(k)) continue;
               if (v && typeof v === 'object' && !Array.isArray(v)) continue;
@@ -65,6 +70,24 @@ export default function useConfig() {
   // 失焦提交（text/textarea/number/password）。checkbox/multiselect 在变更时即时 commit。
   const handleFieldCommit = useCallback((key, value) => {
     _saveField(configAgentId, key, value, refreshAgents);
+  }, [configAgentId, refreshAgents]);
+
+  // 切换模型：即时保存 model_id，同时清空旧模型的 model_params（整体替换为空），避免旧参数透传到新模型请求
+  const handleModelIdChange = useCallback(async (newId) => {
+    if (!configAgentId) return;
+    setFormData(prev => {
+      const next = { ...prev };
+      for (const k of Object.keys(next)) if (k.startsWith('model_params.')) delete next[k];
+      next.model_id = newId;
+      return next;
+    });
+    if (!api.updateConfig) return;
+    try {
+      await api.updateConfig(configAgentId, { model_id: newId, model_params: {} });
+      await refreshAgents();
+    } catch (e) {
+      useAgentStore.getState().showToast('保存失败: ' + e.message);
+    }
   }, [configAgentId, refreshAgents]);
 
   const handleSave = useCallback(async () => {
@@ -136,7 +159,7 @@ export default function useConfig() {
   return {
     config, layout, formData, activeTab,
     isSaving, isStarting, isStopping,
-    setActiveTab, handleFieldChange, handleFieldCommit,
+    setActiveTab, handleFieldChange, handleFieldCommit, handleModelIdChange,
     handleSave, handleStart, handleStop,
     handleClearAll, closeConfigStore,
   };
@@ -158,12 +181,21 @@ async function _saveField(agentId, key, value, refreshAgents) {
 async function _saveAllFields(agentId, formData) {
   const update = {};
   if (formData.systemPrompt !== undefined) update.systemPrompt = formData.systemPrompt;
-  const modelUpdate = {};
-  if (formData.base_url !== undefined) modelUpdate.base_url = formData.base_url;
-  if (formData.auth_token !== undefined) modelUpdate.auth_token = formData.auth_token;
-  if (formData.model !== undefined) modelUpdate.model = formData.model;
-  if (Object.keys(modelUpdate).length > 0) update.model = modelUpdate;
-  const skip = new Set(['systemPrompt', 'base_url', 'auth_token', 'model']);
+
+  // 处理 model_id
+  if (formData.model_id !== undefined) update.model_id = formData.model_id;
+
+  // 处理 model_params（合并所有 model_params.* 字段）
+  const modelParams = {};
+  for (const [k, v] of Object.entries(formData)) {
+    if (k.startsWith('model_params.')) {
+      const paramKey = k.replace('model_params.', '');
+      modelParams[paramKey] = v;
+    }
+  }
+  if (Object.keys(modelParams).length > 0) update.model_params = modelParams;
+
+  const skip = new Set(['systemPrompt', 'model_id', ...Object.keys(formData).filter(k => k.startsWith('model_params.'))]);
   for (const [k, v] of Object.entries(formData)) {
     if (skip.has(k)) continue;
     update[k] = v;
@@ -176,10 +208,11 @@ function _buildUpdate(key, value) {
   const update = {};
   if (key === 'systemPrompt') {
     update.systemPrompt = value;
-  } else if (key === 'base_url' || key === 'auth_token' || key === 'model') {
-    const modelUpdate = {};
-    modelUpdate[key] = value;
-    update.model = modelUpdate;
+  } else if (key === 'model_id') {
+    update.model_id = value;
+  } else if (key.startsWith('model_params.')) {
+    const paramKey = key.replace('model_params.', '');
+    update[`model_params.${paramKey}`] = value;
   } else {
     update[key] = value;
   }

@@ -4,7 +4,8 @@ import React, { useEffect, useState } from 'react';
  * 把 notice 字段拼成居中文案。
  *   string/有 text      → 直接用
  *   kind:'retry'        → {name}(id) LLM 请求失败，重试第 {attempt} 次
- *   kind:'error'        → {name}(id) LLM 请求失败，已重试 {maxRetries} 次仍失败：{error}
+ *   kind:'error' + 重试上下文 → {name}(id) LLM 请求失败，已重试 {maxRetries} 次仍失败：{error}
+ *   kind:'error' 其他   → {name}(id) {error}（模型未配置/工具失败/max 迭代等非重试终端错误）
  *   其余                → {text || '...'}
  */
 export function formatNotice(f) {
@@ -18,8 +19,11 @@ export function formatNotice(f) {
     return `${tag} LLM 请求失败，重试第 ${n} 次`;
   }
   if (f.kind === 'error') {
-    const n = f.maxRetries ?? f.attempt ?? '?';
-    return `${tag} LLM 请求失败，已重试 ${n} 次仍失败：${f.error || ''}`;
+    if (f.maxRetries != null || f.attempt != null) {
+      const n = f.maxRetries ?? f.attempt;
+      return `${tag} LLM 请求失败，已重试 ${n} 次仍失败：${f.error || ''}`;
+    }
+    return tag ? `${tag} ${f.error || ''}` : (f.error || '');
   }
   return tag ? `${tag} ${f.error || ''}` : (f.error || '');
 }

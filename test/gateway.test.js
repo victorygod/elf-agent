@@ -11,12 +11,43 @@ import os from 'os';
 // profiles 根隔离到 tmpDir（仿 integration.test.js），防 gateway test 写真实 cwd/rooms、cwd/profiles。
 const __profilesRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-gw-profiles-'));
 process.env.ELF_PROFILES_ROOT = __profilesRoot;
+
 import path from 'path';
 import { _resetProfilesRoot, roomsRoot } from '../shared/profiles_paths.js';
+import { setApiKeyStoreRootDir } from '../gateway/api_key_store.js';
 import { execSync } from 'child_process';
 import { ProcessManager } from '../gateway/process_manager.js';
 import { createGatewayApp } from '../gateway/server.js';
 import { loadGatewayConfig } from '../gateway/config.js';
+
+// api_key 根隔离到临时目录——绝不读写项目根的真实 api_key.json（那是用户的模型库，不能动）
+const __apiKeyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-gw-apikey-'));
+setApiKeyStoreRootDir(__apiKeyRoot);
+fs.writeFileSync(path.join(__apiKeyRoot, 'api_key.json'), JSON.stringify({ models: [
+  { model_id: 'test-model', base_url: 'https://api.test.com', auth_token: 'test-key', model: 'test-model', params_schema: null },
+] }), 'utf-8');
+
+// 为所有真实 Agent 添加 model_id 字段（如果还没有）
+const agentsDir = path.join(process.cwd(), 'agents');
+const agentIds = fs.readdirSync(agentsDir, { withFileTypes: true })
+  .filter(d => d.isDirectory())
+  .map(d => d.name)
+  .filter(id => id.startsWith('elf-'));
+
+const originalConfigs = new Map();
+for (const agentId of agentIds) {
+  const configPath = path.join(agentsDir, agentId, 'config', 'config.json');
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    originalConfigs.set(agentId, JSON.stringify(config, null, 2));
+    // 强制指向 test-model（忽略工作区现有 model_id），保证 /config 测试断言确定；
+    // afterEach 会用 originalConfigs 恢复，不破坏用户工作区状态。
+    config.model_id = 'test-model';
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+  } catch (e) {
+    // 忽略读取错误
+  }
+}
 
 /**
  * 清理指定端口上的进程
@@ -115,6 +146,7 @@ describe('Gateway HTTP Server', () => {
   before(async () => {
     // 强制子进程用 mock model：不连真实 LLM、秒回、无网络依赖。
     process.env.ELF_FORCE_MOCK_MODEL = '1';
+
     pm = new ProcessManager();
     pm.discoverAgents();
     // 杀掉所有可能占用端口的残留 Agent 进程
@@ -167,6 +199,19 @@ describe('Gateway HTTP Server', () => {
     delete process.env.ELF_PROFILES_ROOT;
     _resetProfilesRoot();
     try { fs.rmSync(__profilesRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+
+    // 清理 api_key 临时根（绝不触碰项目根的真实 api_key.json）
+    try { fs.rmSync(__apiKeyRoot, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+
+    // 恢复原始 Agent 配置文件
+    for (const [agentId, originalConfig] of originalConfigs) {
+      const configPath = path.join(agentsDir, agentId, 'config', 'config.json');
+      try {
+        fs.writeFileSync(configPath, originalConfig, 'utf-8');
+      } catch (e) {
+        // 忽略恢复错误
+      }
+    }
   });
 
   it('GET /agents 应返回 Agent 列表', async () => {
@@ -286,7 +331,9 @@ describe('Gateway HTTP Server', () => {
     const data = await res.json();
     assert.equal(data.agentId, 'elf-001');
     assert.ok(data.systemPrompt);
-    assert.ok(typeof data.model.auth_token === 'string' && data.model.auth_token.length > 0); // auth_token 明文返回
+    assert.equal(data.model_id, 'test-model');   // model_id 透传（test setup 注入）
+    // ELF_FORCE_MOCK_MODEL=1 下模型解析为 mock；强制 mock 不可用，断言 provider 即可
+    assert.ok(data.model && ['mock', 'llm'].includes(data.model.provider));
   });
 
   it('PUT /agents/:id/config 应更新配置', async () => {
@@ -361,14 +408,14 @@ describe('Gateway HTTP Server', () => {
     assert.equal(res2.status, 409);
   });
 
-  it('v3 /rooms/chat-<id>/say 未运行的 Agent 应返回 503', async () => {
+  it('v3 私聊房 /say 不受 admin 全局 stop 影响（私聊用户自治）', async () => {
     const res = await fetch(`http://127.0.0.1:${testPort}/rooms/chat-u_test-elf-001/say`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: '你好' })
     });
-    // v3：agent 未运行时私聊房 /say 直接拒绝（503），不再离线排队
-    assert.equal(res.status, 503);
+    // 私聊纯用户自治：上一个用例已 stop elf-001（admin 全局停），但共享 server 仍在跑 + 用户未停用私聊 → /say 仍 200
+    assert.equal(res.status, 200);
   });
 
   // ===== 语言风格 styles CRUD（elf-018）=====

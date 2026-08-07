@@ -120,6 +120,57 @@
   letter-spacing: 0.3px;
 }
 
+/* ===== 模型配置 tab（与 ConfigField 风格一致）===== */
+.modelField { margin-bottom: 16px; }
+.modelFieldLabel {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: #999;
+  margin-bottom: 8px;
+}
+.modelFieldHint { font-size: 11px; color: #bbb; margin-top: 4px; }
+.modelSelect {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  font-size: 14px;
+  background: #fff;
+  color: #333;
+  box-sizing: border-box;
+}
+.modelSelect:focus { border-color: #07c160; outline: none; }
+.modelInfo {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: #f6f8fa;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #555;
+  line-height: 1.6;
+}
+.modelLinkBtn {
+  font-size: 12px;
+  color: #07c160;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+  margin-top: 8px;
+}
+.modelLinkBtn:hover { text-decoration: underline; }
+.modelWarn {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: #fff7e6;
+  border: 1px solid #ffd591;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #ad6800;
+  line-height: 1.6;
+}
+
 @media (max-width: 768px) {
   .panel {
     width: 100%;

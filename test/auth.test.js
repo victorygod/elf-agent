@@ -29,7 +29,7 @@ import { ChatHistory } from '../gateway/chat_history.js';
 import { roomsRoot } from '../shared/profiles_paths.js';
 
 const testPort = 9911;
-let server;
+let server, pm;
 const base = `http://127.0.0.1:${testPort}`;
 
 async function api(pathname, { method = 'GET', token, body } = {}) {
@@ -44,7 +44,7 @@ async function api(pathname, { method = 'GET', token, body } = {}) {
 
 before(async () => {
   _resetProfilesRoot();
-  const pm = new ProcessManager();
+  pm = new ProcessManager();
   await pm.discoverAgents();
   const roomsDir = roomsRoot();
   fs.mkdirSync(roomsDir, { recursive: true });
@@ -57,6 +57,9 @@ before(async () => {
 });
 
 after(async () => {
+  // 停共享 agent-server + 断 __server__ /events SSE 长连，否则 node --test 因残留句柄挂住不退出
+  // （visitor start 用例会经 ensureServerUp 拉起共享 server 并建 SSE 长连）。对照 integration.test.js 的 after。
+  if (pm) { try { await pm.stopServer(); } catch (e) { /* ignore */ } }
   if (server) await new Promise((resolve) => server.close(resolve));
   try { fs.rmSync(__profilesRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 });

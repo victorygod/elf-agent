@@ -396,18 +396,24 @@ export class Agent {
           onChunk: (chunk) => {
             if (chunk.type === 'token') emit({ event: 'token', data: { content: chunk.content, loop: this._currentLoop } });
           },
-          onRetry: (info) => sendNotice(
-            { emit, runContext: this.runContext },
-            {
-              kind: info.final ? 'error' : 'retry',
-              agentId: this.runContext?.agentId,
-              memberName: this.runContext?.memberName,
-              attempt: info.attempt,
-              maxRetries: info.maxRetries,
-              error: String(info.error?.message || info.error || ''),
-              final: info.final === true,
-            },
-          ),
+          onRetry: (info) => {
+            const errText = String(info.error?.message || info.error || '');
+            // final 时记录错误文本，供 emitError 去重——重试耗尽的 error notice 已由此处发出，
+            // 之后抛出的同一错误再经 emitError 时跳过，避免冒两个气泡。
+            if (info.final) this._lastNoticedError = errText;
+            return sendNotice(
+              { emit, runContext: this.runContext },
+              {
+                kind: info.final ? 'error' : 'retry',
+                agentId: this.runContext?.agentId,
+                memberName: this.runContext?.memberName,
+                attempt: info.attempt,
+                maxRetries: info.maxRetries,
+                error: errText,
+                final: info.final === true,
+              },
+            );
+          },
         });
         return res;   // { content, toolCalls } —— model 聚合
       },

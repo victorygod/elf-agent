@@ -15,6 +15,7 @@ import { LLMModel } from '../engine/models/index.js';
 import { MockModel } from '../engine/models/index.js';
 import { createLogger } from '../shared/logger.js';
 import { Config } from '../engine/config_loader.js';
+import { setApiKeyStoreRootDir } from '../gateway/api_key_store.js';
 import { MessageManager } from '../engine/message_manager.js';
 import { Agent } from '../engine/agent.js';
 import { ToolManager } from '../engine/tools/tool_manager.js';
@@ -136,7 +137,7 @@ describe('LLMModel', () => {
   }
 
   it('chatStream 建连 5xx 应重试，第3次成功后返回聚合 content', async () => {
-    const model = new LLMModel({ base_url: 'https://x.example.com', model: 't' });
+    const model = new LLMModel({ base_url: 'https://x.example.com', auth_token: 'k', model: 't' });
     let calls = 0;
     const orig = globalThis.fetch;
     globalThis.fetch = async () => {
@@ -154,7 +155,7 @@ describe('LLMModel', () => {
   });
 
   it('chatStream 4xx 不应重试，立即抛', async () => {
-    const model = new LLMModel({ base_url: 'https://x.example.com', model: 't' });
+    const model = new LLMModel({ base_url: 'https://x.example.com', auth_token: 'k', model: 't' });
     let calls = 0;
     const orig = globalThis.fetch;
     // 真实 4xx 形态：fetch 成功返回 {ok:false, status:404}（非 throw）
@@ -398,20 +399,25 @@ describe('Logger', () => {
 // ========================
 describe('Config', () => {
   let tmpDir;
+  let rootDir;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-config-test-'));
+    rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-config-root-'));
+    // 全局模型库放在独立 root，并通过 setApiKeyStoreRootDir 指定，避免污染项目根
+    setApiKeyStoreRootDir(rootDir);
+    fs.writeFileSync(path.join(rootDir, 'api_key.json'), JSON.stringify({ models: [
+      { model_id: 'test-model', base_url: 'https://api.test.com', auth_token: 'sk-123', model: 'test-model', params_schema: null },
+    ] }), 'utf-8');
   });
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
   });
 
-  function writeConfig(dir, config, apiKey, prompts) {
+  function writeConfig(dir, config, prompts) {
     fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config, null, 2), 'utf-8');
-    if (apiKey !== undefined) {
-      fs.writeFileSync(path.join(dir, 'api_key.json'), JSON.stringify(apiKey, null, 2), 'utf-8');
-    }
     if (prompts) {
       for (const [name, content] of Object.entries(prompts)) {
         fs.writeFileSync(path.join(dir, name), content, 'utf-8');
@@ -419,10 +425,9 @@ describe('Config', () => {
     }
   }
 
-  it('应该加载 config.json 和 api_key.json（type:path 格式）', () => {
+  it('应该加载 config.json（type:path）并按 model_id 解析全局模型', () => {
     writeConfig(tmpDir,
-      { agentId: 'test-agent', port: 9000, provider: 'llm', systemPrompt: { type: 'path', content: 'sys.md' }, prefix_prompt: { type: 'path', content: 'pre.md' }, suffix_prompt: { type: 'path', content: 'suf.md' } },
-      { base_url: 'https://api.test.com', auth_token: 'sk-123', model: 'test-model' },
+      { agentId: 'test-agent', port: 9000, provider: 'llm', model_id: 'test-model', systemPrompt: { type: 'path', content: 'sys.md' }, prefix_prompt: { type: 'path', content: 'pre.md' }, suffix_prompt: { type: 'path', content: 'suf.md' } },
       { 'sys.md': '你是助手', 'pre.md': '前缀', 'suf.md': '后缀' }
     );
 
@@ -438,12 +443,12 @@ describe('Config', () => {
     assert.equal(config.getModelConfig().auth_token, 'sk-123');
     assert.equal(config.getModelConfig().model, 'test-model');
     assert.equal(config.getModelConfig().provider, 'llm');
+    assert.equal(config.getModelError(), null);
   });
 
   it('应该加载 type:path 格式的配置', () => {
     writeConfig(tmpDir,
-      { agentId: 'test-agent', port: 9000, provider: 'llm', systemPrompt: { type: 'path', content: 'sys.md' }, prefix_prompt: { type: 'path', content: 'pre.md' } },
-      { base_url: 'https://api.test.com', auth_token: 'sk-123', model: 'test-model' },
+      { agentId: 'test-agent', port: 9000, provider: 'llm', model_id: 'test-model', systemPrompt: { type: 'path', content: 'sys.md' }, prefix_prompt: { type: 'path', content: 'pre.md' } },
       { 'sys.md': '你是助手', 'pre.md': '前缀' }
     );
 
@@ -456,8 +461,7 @@ describe('Config', () => {
 
   it('prompt 文件不存在时应设为空字符串而不报错', () => {
     writeConfig(tmpDir,
-      { agentId: 'test', port: 9000, systemPrompt: { type: 'path', content: 'nonexistent.md' }, prefix_prompt: { type: 'path', content: 'nope.md' } },
-      { base_url: 'https://api.test.com', auth_token: 'key', model: 'm' }
+      { agentId: 'test', port: 9000, model_id: 'test-model', systemPrompt: { type: 'path', content: 'nonexistent.md' }, prefix_prompt: { type: 'path', content: 'nope.md' } }
     );
 
     const config = new Config(tmpDir);
@@ -469,8 +473,7 @@ describe('Config', () => {
 
   it('type:path 文件不存在时应设为空字符串', () => {
     writeConfig(tmpDir,
-      { agentId: 'test', port: 9000, systemPrompt: { type: 'path', content: 'missing.md' } },
-      { base_url: 'https://api.test.com', auth_token: 'key', model: 'm' }
+      { agentId: 'test', port: 9000, model_id: 'test-model', systemPrompt: { type: 'path', content: 'missing.md' } }
     );
 
     const config = new Config(tmpDir);
@@ -479,48 +482,42 @@ describe('Config', () => {
     assert.equal(config.get('systemPrompt'), '');
   });
 
-  it('api_key.json 不存在时应自动创建空模板', () => {
-    writeConfig(tmpDir,
-      { agentId: 'test', port: 9000 }
-      // 不写 api_key.json，也不写 prompt 文件
-    );
+  it('model_id 为空时应返回空 model 对象且无 modelError', () => {
+    writeConfig(tmpDir, { agentId: 'test', port: 9000, provider: 'llm' });
 
     const config = new Config(tmpDir);
     config.load();
 
-    // 应自动创建 api_key.json
-    const apiKeyPath = path.join(tmpDir, 'api_key.json');
-    assert.ok(fs.existsSync(apiKeyPath), 'api_key.json 应已自动创建');
-    const apiKey = JSON.parse(fs.readFileSync(apiKeyPath, 'utf-8'));
-    assert.equal(apiKey.base_url, '');
-    assert.equal(apiKey.auth_token, '');
-    assert.equal(apiKey.model, '');
-
-    // model 中应有 provider
     assert.equal(config.getModelConfig().provider, 'llm');
+    assert.equal(config.getModelConfig().base_url, undefined);
+    assert.equal(config.getModelConfig().auth_token, undefined);
+    assert.equal(config.getModelConfig().model, undefined);
+    assert.equal(config.getModelError(), null);
+    const missing = config.getModelMissingFields();
+    assert.ok(missing && missing.includes('base_url') && missing.includes('auth_token') && missing.includes('model'));
   });
 
-  it('getModelMissingFields 应返回缺失字段', () => {
-    writeConfig(tmpDir,
-      { agentId: 'test', port: 9000 },
-      { base_url: 'https://api.test.com', auth_token: '', model: '' }
-    );
+  it('model_id 引用不存在的模型时应设置 modelError', () => {
+    writeConfig(tmpDir, { agentId: 'test', port: 9000, provider: 'llm', model_id: 'non-existent' });
 
     const config = new Config(tmpDir);
     config.load();
 
-    const missing = config.getModelMissingFields();
-    assert.ok(missing);
-    assert.ok(missing.includes('auth_token'));
-    assert.ok(missing.includes('model'));
-    assert.ok(!missing.includes('base_url'));
+    assert.ok(config.getModelError() && config.getModelError().includes('non-existent'));
+  });
+
+  it('model_params 应展平到 model 顶层', () => {
+    writeConfig(tmpDir, { agentId: 'test', port: 9000, model_id: 'test-model', model_params: { effort: 'high', temperature: 0.8 } });
+
+    const config = new Config(tmpDir);
+    config.load();
+
+    assert.equal(config.getModelConfig().effort, 'high');
+    assert.equal(config.getModelConfig().temperature, 0.8);
   });
 
   it('getModelMissingFields 全部填写时应返回 null', () => {
-    writeConfig(tmpDir,
-      { agentId: 'test', port: 9000 },
-      { base_url: 'https://api.test.com', auth_token: 'key', model: 'gpt-4o' }
-    );
+    writeConfig(tmpDir, { agentId: 'test', port: 9000, model_id: 'test-model' });
 
     const config = new Config(tmpDir);
     config.load();
@@ -529,10 +526,7 @@ describe('Config', () => {
   });
 
   it('getAll 应返回包含所有字段的配置副本', () => {
-    writeConfig(tmpDir,
-      { agentId: 'test', port: 9000, customField: 'hello' },
-      { base_url: 'https://api.test.com', auth_token: 'key', model: 'gpt-4o' }
-    );
+    writeConfig(tmpDir, { agentId: 'test', port: 9000, customField: 'hello', model_id: 'test-model' });
 
     const config = new Config(tmpDir);
     config.load();
@@ -883,7 +877,7 @@ describe('Shared Tools', () => {
         file_path: testFile,
         content: 'updated'
       });
-      assert.match(result, /File overwritten successfully/);
+      assert.match(result, /has been updated successfully/);
     });
   });
 

@@ -20,6 +20,10 @@
  */
 import path from 'path';
 
+// 必须在 logger.js 缓存 LOG_DIR 之前触发 test_mode 隔离：本模块被 logger import 加载时，
+// 这行先执行 → test_mode 设好 ELF_LOG_DIR 等 env → 之后 logger:18 const LOG_DIR=logsDir() 才读。
+import './test_mode.js';
+
 let _root = null;
 
 /** profiles 根目录（绝对路径）。ELF_PROFILES_ROOT 可覆盖，默认 <cwd>/profiles。 */

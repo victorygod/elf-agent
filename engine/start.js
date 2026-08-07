@@ -191,6 +191,26 @@ export async function startAgentServer({ port, gatewayUrl } = {}) {
     else logger.error(`HTTP 服务错误: ${err.message}`);
     process.exit(1);
   });
+
+  // 配置热更新——生产路径此前无热更新（agent 配置/模型改后需重启才生效，导致"配了模型还说没配置"）。
+  // 监听各 agent configDir + 全局 api_key.json，变更时 reload 对应 live 实例（调已有的 agent.reloadConfig()）。
+  // persistent:false → 不阻止进程退出，免得测试/关闭时挂起。
+  for (const aid of agentIds) {
+    const cdir = configDirFn(aid);
+    try {
+      fs.watch(cdir, { persistent: false }, (_t, filename) => {
+        logger.info(`[${aid}] 配置变化 ${filename}, reload live 实例`);
+        try { app.reloadLiveAgent(aid); } catch (e) { logger.warn(`reload ${aid} 失败: ${e.message}`); }
+      });
+    } catch (e) { logger.warn(`无法监听 ${cdir}: ${e.message}`); }
+  }
+  try {
+    fs.watch(path.join(process.cwd(), 'api_key.json'), { persistent: false }, () => {
+      logger.info('全局 api_key.json 变化, reload 所有 live agent');
+      try { app.reloadAllLiveAgents(); } catch (e) { logger.warn(`reload all 失败: ${e.message}`); }
+    });
+  } catch (e) { /* api_key.json 可能不存在（用户尚未在前端创建），忽略 */ }
+
   return { app, server, agentIds };
 }
 

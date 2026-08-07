@@ -714,23 +714,6 @@ export class MessageManager {
   }
 
   /**
-   * 截断到最近一条真实 user 消息（含），删除其后所有 assistant/tool/meta/summary，_save 落盘。
-   * 用途：用户终止后把 MM 还原到"刚收到这条 user"的状态——丢弃本轮已产出的半成品（partial 正文、
-   *   工具调用/结果、提醒 meta），配合 ⟲ 重发或观测式续跑按原 user 重玩本轮。
-   *   isMeta/isCompactSummary 不算"真实 user"；找不到或末条已是真实 user 则不动。
-   */
-  rewindToLastUser() {
-    let lastUserIdx = -1;
-    for (let i = this.messages.length - 1; i >= 0; i--) {
-      const m = this.messages[i];
-      if (m.role === 'user' && !m.isMeta && !m.isCompactSummary) { lastUserIdx = i; break; }
-    }
-    if (lastUserIdx < 0 || lastUserIdx === this.messages.length - 1) return;   // 无真实 user / 其后无内容
-    this.messages = this.messages.slice(0, lastUserIdx + 1);
-    this._save();
-  }
-
-  /**
    * 持久化：全量写回 context.json
    */
   _save() {

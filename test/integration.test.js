@@ -168,7 +168,7 @@ describe('Agent + Gateway 集成测试', () => {
     assert.ok(runningCount >= 2, `应有至少2个running的Agent, 实际${runningCount}`);
   });
 
-  it('停止 Agent 后应不可对话（503）', async () => {
+  it('admin stop Agent 后私聊仍可对话（私聊用户自治）', async () => {
     await fetch(`http://127.0.0.1:${GATEWAY_PORT}/agents/elf-002/stop`, { method: 'POST' });
     await new Promise(r => setTimeout(r, 800));
 
@@ -176,8 +176,8 @@ describe('Agent + Gateway 集成测试', () => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: '你好' }),
     });
-    // v3：agent 未运行 → /rooms/chat-<id>/say 503
-    assert.equal(chatRes.status, 503);
+    // 私聊纯用户自治：admin stop 不阻断私聊 /say（共享 server 仍跑 + 用户未停用私聊 → 200）
+    assert.equal(chatRes.status, 200);
   });
 
   it('配置更新后应持久化到文件', async () => {

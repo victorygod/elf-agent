@@ -193,10 +193,20 @@ async ensureServerUp() {
       // 探活失败则继续走 spawn 分支（重起）。
     }
 
-    // 端口被占用 → 试着清掉（可能是上次崩溃残留）。
+    // 端口被占用 → 先探活：健康就收养复用，不杀不 spawn（adopt-priority L1）。
+    //   堵 fresh-PM（未探活）遇见健康 agent-server 时无脑杀的旧路径（如测试 PM 杀 prod）。
+    //   边缘风险（L2）：收养用的是占用者 spawn 时的 ELF_INTERNAL_TOKEN/gateway-url，
+    //     若崩溃期间 profiles/auth.json 被重生成 → token 错配 → 回调 401 → sync 静默跳过（降级非崩）。
     const occupiedPid = this.findPidFromPort(this.server.port);
     if (occupiedPid) {
-      logger.warn(`端口 ${this.server.port} 被进程 PID ${occupiedPid} 占用，正在终止该进程`);
+      // 探活占用者：ok 即收养（probeServer 会设 running/pid/instanceErrors + 连 SSE）。
+      const adopted = await this.probeServer();
+      if (adopted) {
+        logger.info(`端口 ${this.server.port} 被进程 PID ${occupiedPid} 占用但探活健康，收养复用 (pid ${this.server.pid})，不杀不 spawn`);
+        return;
+      }
+      // 探活无响应（真僵尸/卡死/非 agent-server）→ 清占用者
+      logger.warn(`端口 ${this.server.port} 被进程 PID ${occupiedPid} 占用且探活无响应，正在终止该进程`);
       try {
         process.kill(occupiedPid, 'SIGTERM');
         await this._waitForPortFree(this.server.port, 3000);
@@ -296,8 +306,9 @@ async ensureServerUp() {
       throw Object.assign(new Error('Agent already stopped'), { statusCode: 409 });
     }
     agent.status = 'stopped';
-    // 私聊实例语义：标 disabled（私聊 /say 已 503 挡新消息）+ 中断在飞回合。
-    //   私聊实例（PrivateChatPlugin）无自驱定时器，挡住新消息 + 中断在飞即 inert；不清 memory、不 dispose RoomState（start 后可续）。
+    // 私聊纯用户自治：admin stop 不阻断私聊房 /say——503 仅由「共享 server 未起」(getServerPort falsy)
+    //   或「用户停用自己的私聊」(isRoomEnabledForUser false) 触发，与 admin 全局 stop 无关。
+    //   此处只标 stopped（admin 视角状态）+ 中断该 agent 名下在飞回合（运维），不碰用户 room 开关、不关共享 server（兄弟 agent 可能在用）。
     //   群聊实例独立生命周期（群成员退订管），私聊 stop 不碰。
     //   多用户：中断该 agent 名下全部用户私聊房的在飞回合（chat-<uid>-<id> 按 agent 批量 abort）。
     if (this.server.status === 'running' && this.server.port) {

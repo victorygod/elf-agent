@@ -70,7 +70,7 @@ export function makeWrite(agent) {
       markRead(fp, { content, timestamp: Math.floor(Date.now()) });
 
       return existed
-        ? `File overwritten successfully at: ${fp} (file state is current in your context — no need to Read it back)`
+        ? `The file ${fp} has been updated successfully. (file state is current in your context — no need to Read it back)`
         : `File created successfully at: ${fp} (file state is current in your context — no need to Read it back)`;
     },
   };

@@ -1,9 +1,11 @@
 /**
  * 配置加载器
  *
- * 读取 config/ 目录下的 config.json 和 api_key.json
+ * 读取 config/ 目录下的 config.json：
  * - config.json 中 type:"path" 字段自动读取对应文件内容
- * - api_key.json 单独固定加载，合并到 model 配置中
+ * - model 配置按 model_id 从全局 LLM API 管理（项目根 api_key.json）解析
+ *   （解析逻辑收口在 api_key_store.resolveModelConfig，与 gateway 共用同一真相源）
+ * - model_params 展平进 model 顶层，LLMModel.extractExtraParams 据此透传到请求 body
  * - 支持热重载: load() 可重复调用
  * - 支持写回: writeAgentConfig() 保留 path 声明，内容写文件
  */
@@ -11,6 +13,7 @@
 import fs from 'fs';
 import path from 'path';
 import { createLogger } from '../shared/logger.js';
+import { resolveModelConfig } from '../gateway/api_key_store.js';
 
 let logFileName = null;
 
@@ -21,15 +24,8 @@ export function setLogFileName(name) {
   logFileName = name;
 }
 
-/** api_key.json 必填字段 */
-const API_KEY_REQUIRED_FIELDS = ['base_url', 'auth_token', 'model'];
-
-/** api_key.json 空模板 */
-const API_KEY_TEMPLATE = {
-  base_url: '',
-  auth_token: '',
-  model: '',
-};
+/** model 必填字段（用于 LLM 调用前的完整性检查） */
+const MODEL_REQUIRED_FIELDS = ['base_url', 'auth_token', 'model'];
 
 export class Config {
   constructor(configDir) {
@@ -39,12 +35,13 @@ export class Config {
   }
 
   /**
-   * 加载配置：读取 config.json 和 api_key.json
+   * 加载配置：读取 config.json，按 model_id 解析全局模型
    * - config.json 中值为 { type: "path", content: "filename" } 的字段，自动读取文件内容
-   * - api_key.json 不存在时自动创建空模板
-   * - provider 由 config.json 提供
+   * - model_id 为空时返回空 model 对象（base_url/auth_token/model 均为 undefined），由 LLMModel.chatStream 检查
+   * - model_id 引用不存在的模型时设置 modelError
    */
   load() {
+    const logger = createLogger('config', logFileName);
     try {
       const configPath = path.join(this.configDir, 'config.json');
       const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
@@ -58,59 +55,50 @@ export class Config {
           try {
             raw[key] = fs.readFileSync(filePath, 'utf-8');
           } catch (err) {
-            const logger = createLogger('config', logFileName);
             logger.warn(`无法读取 path 文件: ${filePath}, ${err.message}`);
             raw[key] = '';
           }
         }
       }
 
-      // 从 api_key.json 读取模型连接配置
-      const apiKeyPath = path.join(this.configDir, 'api_key.json');
-      let apiKeyData;
-      try {
-        apiKeyData = JSON.parse(fs.readFileSync(apiKeyPath, 'utf-8'));
-      } catch (err) {
-        const logger = createLogger('config', logFileName);
-        logger.warn(`api_key.json 不存在或解析失败，已自动创建空模板，请填写模型配置`);
-        apiKeyData = { ...API_KEY_TEMPLATE };
-        try {
-          fs.writeFileSync(apiKeyPath, JSON.stringify(apiKeyData, null, 2), 'utf-8');
-          logger.info(`已自动创建 ${apiKeyPath}`);
-        } catch (writeErr) {
-          logger.error(`自动创建 api_key.json 失败: ${writeErr.message}`);
-        }
-      }
+      // 全局 api_key.json 的根目录由 api_key_store 解析：回退到 process.cwd()（生产 cwd=项目根），
+      // 或由 gateway/测试启动时显式 setApiKeyStoreRootDir 设定。这里不再覆盖，避免与 gateway 冲突。
+      // ELF_FORCE_MOCK_MODEL=1（测试用）强制 provider=mock，不起真实 LLM 请求、不校验必填。
+      const useMock = raw.provider === 'mock' || process.env.ELF_FORCE_MOCK_MODEL === '1';
+      const { model, modelError } = resolveModelConfig({
+        model_id: raw.model_id,
+        provider: raw.provider,
+        model_params: raw.model_params,
+        useMock,
+      });
+      raw.model = model;
+      if (modelError) raw.modelError = modelError;
 
-      // 合并：provider 来自 config.json，连接信息来自 api_key.json
-      // ELF_FORCE_MOCK_MODEL=1（测试用）强制 provider=mock，不起真实 LLM 请求、不校验 api_key 必填。
-      const forcedMock = process.env.ELF_FORCE_MOCK_MODEL === '1';
-      raw.model = {
-        provider: forcedMock ? 'mock' : (raw.provider || 'llm'),
-        ...apiKeyData,
-      };
-      if (forcedMock) raw.model.provider = 'mock';
-
-      const logger = createLogger('config', logFileName);
-      logger.info(`模型配置已加载 (model=${apiKeyData.model || '(未配置)'})`);
-
+      logger.info(`模型配置已加载 (model=${model.model || '(未配置)'})`);
       this.data = raw;
       logger.info(`配置已加载: agentId=${raw.agentId}`);
     } catch (err) {
-      const logger = createLogger('config', logFileName);
       logger.error(`配置加载失败: ${err.message}`);
       throw err;
     }
   }
 
   /**
-   * 检查 api_key.json 必填字段是否全部填写
+   * 检查 model 必填字段是否全部填写
    * @returns {string[]|null} 缺失字段列表，全部填写则返回 null
    */
   getModelMissingFields() {
     const model = this.data.model || {};
-    const missing = API_KEY_REQUIRED_FIELDS.filter(k => !model[k]);
+    const missing = MODEL_REQUIRED_FIELDS.filter(k => !model[k]);
     return missing.length > 0 ? missing : null;
+  }
+
+  /**
+   * 配置解析时的错误（如 model_id 引用不存在的模型）
+   * @returns {string|null}
+   */
+  getModelError() {
+    return this.data.modelError || null;
   }
 
   /**
@@ -140,12 +128,12 @@ export class Config {
    * 非路径字段直接合并写入 config.json
    */
   writeAgentConfig(updates) {
+    const logger = createLogger('config', logFileName);
     const configPath = path.join(this.configDir, 'config.json');
     let raw;
     try {
       raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     } catch (err) {
-      const logger = createLogger('config', logFileName);
       logger.error(`读取 config.json 失败: ${err.message}`);
       return;
     }
@@ -159,7 +147,6 @@ export class Config {
           try {
             fs.writeFileSync(filePath, value, 'utf-8');
           } catch (err) {
-            const logger = createLogger('config', logFileName);
             logger.error(`写入文件 ${filePath} 失败: ${err.message}`);
           }
         }
@@ -172,7 +159,6 @@ export class Config {
     try {
       fs.writeFileSync(configPath, JSON.stringify(raw, null, 2), 'utf-8');
     } catch (err) {
-      const logger = createLogger('config', logFileName);
       logger.error(`写入 config.json 失败: ${err.message}`);
     }
   }

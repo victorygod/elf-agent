@@ -7,6 +7,7 @@
 import fs from 'fs';
 import crypto from 'crypto';
 import { hasRead, getReadState, markRead, hashContent } from './read_state.js';
+import { track as trackFileHistory } from '../../shared/file_history.js';
 
 export const Edit = {
   name: 'Edit',
@@ -43,7 +44,7 @@ export const Edit = {
     required: ['file_path', 'old_string', 'new_string']
   },
 
-  execute: async (args, signal) => {
+  execute: async (args, signal, ctx) => {
     if (signal?.aborted) return 'Error: aborted';
     const filePath = args.file_path;
     const oldString = args.old_string;
@@ -115,6 +116,9 @@ export const Edit = {
       ? content.split(oldString).join(newString)
       : content.replace(oldString, newString);
 
+    // 文件轴 rewind：写盘前抓"改前内容"快照到 file-history（dataDir 经 ctx.agent 取私聊房；无则跳过，如直跑测试）
+    trackFileHistory(ctx?.agent?.messageManager?.dataDir, filePath);
+
     try {
       fs.writeFileSync(filePath, newContent, 'utf-8');
     } catch (err) {
@@ -128,7 +132,7 @@ export const Edit = {
     });
 
     if (replaceAll && count > 1) {
-      return `The file ${filePath} has been updated successfully (${count} replacements). (file state is current in your context — no need to Read it back)`;
+      return `The file ${filePath} has been updated. All occurrences were successfully replaced. (file state is current in your context — no need to Read it back)`;
     }
     return `The file ${filePath} has been updated successfully. (file state is current in your context — no need to Read it back)`;
   }

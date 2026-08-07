@@ -90,7 +90,7 @@ export function makeEdit(agent) {
       markRead(fp, { content: r.result, timestamp: Math.floor(Date.now()) });
 
       return replaceAll && count > 1
-        ? `The file ${fp} has been updated successfully (${count} replacements). (file state is current in your context — no need to Read it back)`
+        ? `The file ${fp} has been updated. All occurrences were successfully replaced. (file state is current in your context — no need to Read it back)`
         : `The file ${fp} has been updated successfully. (file state is current in your context — no need to Read it back)`;
     },
   };

@@ -177,6 +177,19 @@ describe('private_room_stream 行为锚定（#8 修复点）', () => {
     assert.equal(snap.activeTurn.userMessage?.id, u.id, 'activeTurn 含当前 user');
   });
 
+  // 5. abort 保留已生成 partial（落盘 history，非丢弃）——与其他 agent 的 stop 语义一致；
+  //    elf-018 的全量回退另由 abortRewind 信号触发 rewindTo 整份覆盖，不走此分支的断言。
+  it('aborted 保留已生成 partial 落盘（非丢弃）', () => {
+    beginTurn('玩家指令', null);
+    handlePrivateAgentEvent('token', { _roomId: roomId, content: '生成的半' }, history);
+    handlePrivateAgentEvent('token', { _roomId: roomId, content: '成品正文' }, history);
+    handlePrivateAgentEvent('aborted', { _roomId: roomId }, history);
+    const recs = fs.readFileSync(path.join(root, roomId, 'history.jsonl'), 'utf-8').trim().split('\n').map(l => JSON.parse(l));
+    const asst = recs.find(r => r.role === 'assistant');
+    assert.ok(asst, 'aborted 保留了 partial 落盘（旧"丢弃"行为下此处会缺失）');
+    assert.equal(asst.content, '生成的半成品正文', 'partial 文本完整落盘');
+  });
+
   // 5. snapshot 补全整轮：多轮中（第1轮已落盘 A1 + 第2轮未落盘尾），activeTurn.bubbles 含 A1(sealed) + 尾
   it('snapshot 补全整轮：activeTurn 含已落盘 A1(sealed) + 未落盘尾 bubble', () => {
     beginTurn('多轮', null);

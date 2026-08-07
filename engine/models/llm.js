@@ -82,7 +82,8 @@ async function withRetry(fn, onRetry) {
 export class LLMModel {
   constructor(config) {
     this.baseUrl = (config.base_url || config.baseUrl || '').trim().replace(/\/+$/, '');
-    this.authToken = config.auth_token || config.apiKey || '';
+    // config_store / config_loader 产出 snake_case auth_token；同时兼容旧 camelCase / apiKey 别名
+    this.authToken = config.auth_token || config.authToken || config.apiKey || '';
     this.model = config.model;
     this.extraParams = extractExtraParams(config);
     this.connectTimeout = config.connectTimeout || DEFAULT_CONNECT_TIMEOUT;
@@ -135,6 +136,18 @@ export class LLMModel {
    */
   async chatStream(messages, tools, options = {}) {
     const onChunk = options.onChunk || (() => {});
+
+    // 校验配置完整性
+    if (!this.baseUrl || !this.baseUrl.trim()) {
+      throw new Error('LLM 配置不完整：base_url 未设置，请在 Agent 配置中选择模型或配置 API 地址');
+    }
+    if (!this.authToken || !this.authToken.trim()) {
+      throw new Error('LLM 配置不完整：auth_token 未设置，请在 Agent 配置中选择模型或配置 API 密钥');
+    }
+    if (!this.model || !this.model.trim()) {
+      throw new Error('LLM 配置不完整：model 未设置，请在 Agent 配置中选择模型或配置模型名称');
+    }
+
     const url = `${this.baseUrl}/chat/completions`;
     const body = this._body(messages, true, tools, options);
 
@@ -269,6 +282,17 @@ export class LLMModel {
    * 非流式调用（用于记忆压缩等内部调用）
    */
   async chat(messages, options = {}) {
+    // 校验配置完整性（与 chatStream 对称——记忆压缩等非流式调用同样不能带着空配置发起请求）
+    if (!this.baseUrl || !this.baseUrl.trim()) {
+      throw new Error('LLM 配置不完整：base_url 未设置，请在 Agent 配置中选择模型或配置 API 地址');
+    }
+    if (!this.authToken || !this.authToken.trim()) {
+      throw new Error('LLM 配置不完整：auth_token 未设置，请在 Agent 配置中选择模型或配置 API 密钥');
+    }
+    if (!this.model || !this.model.trim()) {
+      throw new Error('LLM 配置不完整：model 未设置，请在 Agent 配置中选择模型或配置模型名称');
+    }
+
     const url = `${this.baseUrl}/chat/completions`;
     const body = this._body(messages, false, null, options);
 

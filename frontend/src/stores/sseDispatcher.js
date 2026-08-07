@@ -363,10 +363,12 @@ export function handleSSEEvent(agentId, event, data) {
     }
 
     case 'aborted': {
-      // 中断 = 丢弃本轮 partial：与 elf-018 auto-rewind（rewindToLastUser）一致——
-      //   用户点终止即回退到 user 前，partial 不入 turns、不保留。后端 history 也同步丢弃。
-      //   （旧逻辑 finalizeActiveTurn 把 partial 存为可见 turn，与 auto-rewind 设计冲突。）
-      _patchChat(agentId, { activeTurn: null });
+      // 中断 = 保留本轮已生成 partial 为可见 turn（停但留已生成，对齐 Claude/ChatGPT 等 stop 语义）。
+      //   后端 turn-stream 同步把 partial 落 history.jsonl（见 turn-stream-server aborted 分支）。
+      //   仅 elf-018 的全量回退(删本轮 user + 回填输入框)由其随后发的 abortRewind 信号触发
+      //   loadHistory(force) 把 turns 整份重建掉——'aborted' 在前收成 turn、'abortRewind' 在后 force-reload
+      //   覆盖;两者背靠背到达,partial 顶多闪一帧。
+      finalizeActiveTurn(agentId);
       _pushNotice(agentId, { text: '已停止生成' });
       break;
     }

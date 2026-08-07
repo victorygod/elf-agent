@@ -9,6 +9,25 @@
  */
 
 import { useAuthStore, privateRoomId } from '../stores/authStore.js';
+import useAgentStore from '../stores/agentStore.js';
+
+/**
+ * 前端错误上报 → 后端 frontend.log（best-effort，失败静默）。
+ * 走 /api/log（复用既有前端日志通道），用裸 fetch 而非 authFetch，避免与 toast/上报自身递归。
+ */
+export function reportClientError(err, context) {
+  const baseMsg = (err && (err.message || err)) || String(err);
+  const stack = err?.stack ? `\n${err.stack}` : '';
+  const ctxStr = context ? ` | ctx=${typeof context === 'string' ? context : JSON.stringify(context)}` : '';
+  const token = useAuthStore.getState().token;
+  try {
+    fetch(`${API_BASE}/api/log`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ level: 'error', message: `${baseMsg}${ctxStr}${stack}` }),
+    }).catch(() => {});
+  } catch (_) { /* best-effort */ }
+}
 
 export const API_BASE = '';
 
@@ -35,10 +54,25 @@ export async function authFetch(url, opts = {}) {
   const token = useAuthStore.getState().token;
   const headers = { ...(opts.headers || {}) };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(url, { ...opts, headers });
+  let res;
+  try {
+    res = await fetch(url, { ...opts, headers });
+  } catch (err) {
+    // 网络层错误（断网/DNS/ CORS）：toast + 上报，原样抛
+    if (!opts.silent) useAgentStore.getState().showToast(`网络请求失败：${err.message || err}`);
+    reportClientError(err, { url, phase: 'fetch' });
+    throw err;
+  }
   if (res.status === 401) {
     useAuthStore.getState().logout();
     throw Object.assign(new Error('登录已过期'), { status: 401 });
+  }
+  if (!res.ok && !opts.silent) {
+    // 4xx/5xx：读后端 {error} 文案 toast + 上报。调用点可传 silent:true 跳过（自行处理 or 可选加载）
+    let msg = `请求失败 (${res.status})`;
+    try { const ebody = await res.clone().json(); if (ebody?.error) msg = ebody.error; } catch (_) { /* 非 JSON 响应 */ }
+    useAgentStore.getState().showToast(msg);
+    reportClientError(new Error(msg), { url, status: res.status });
   }
   return res;
 }
@@ -170,7 +204,7 @@ export async function getAgent(id) {
 
 /** 启动 agent（admin=全局；visitor=启用自己的私聊 room，后端按角色分派） */
 export async function startAgent(id) {
-  const res = await authFetch(`${API_BASE}/agents/${id}/start`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/agents/${id}/start`, { method: 'POST', silent: true });
   const data = await res.json();
   if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status, data });
   return data;
@@ -178,7 +212,7 @@ export async function startAgent(id) {
 
 /** 停止 agent（admin=全局；visitor=停用自己的私聊 room） */
 export async function stopAgent(id) {
-  const res = await authFetch(`${API_BASE}/agents/${id}/stop`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/agents/${id}/stop`, { method: 'POST', silent: true });
   const data = await res.json();
   if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status, data });
   return data;
@@ -340,13 +374,13 @@ export async function getHistory(agentId, { limit = HISTORY_PAGE_SIZE, before, a
 
 /** 清空聊天历史 — v3 私聊走 /rooms/chat-<uid>-<id>/history */
 export async function deleteHistory(agentId) {
-  const res = await authFetch(`${API_BASE}/rooms/${myPrivateRoomId(agentId)}/history`, { method: 'DELETE' });
+  const res = await authFetch(`${API_BASE}/rooms/${myPrivateRoomId(agentId)}/history`, { method: 'DELETE', silent: true });
   return res.ok;
 }
 
 /** 清空 agent 记忆 — v3 私聊走 /rooms/chat-<uid>-<id>/memory */
 export async function deleteMemory(agentId) {
-  const res = await authFetch(`${API_BASE}/rooms/${myPrivateRoomId(agentId)}/memory`, { method: 'DELETE' });
+  const res = await authFetch(`${API_BASE}/rooms/${myPrivateRoomId(agentId)}/memory`, { method: 'DELETE', silent: true });
   return res.ok;
 }
 
@@ -433,7 +467,8 @@ export async function updateConfig(agentId, data) {
   const res = await authFetch(`${API_BASE}/agents/${agentId}/config`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
+    body: JSON.stringify(data),
+    silent: true,
   });
   if (!res.ok) {
     const err = await res.json();
