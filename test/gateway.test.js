@@ -11,32 +11,38 @@ import os from 'os';
 // profiles 根隔离到 tmpDir（仿 integration.test.js），防 gateway test 写真实 cwd/rooms、cwd/profiles。
 const __profilesRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-gw-profiles-'));
 process.env.ELF_PROFILES_ROOT = __profilesRoot;
+// 端口隔离：测试共享 agent-server 用 18180，绝不与生产 8180 撞（否则会收养/杀掉生产 server）。
+// agents 目录不复制——elf-018/ui/api.js 用相对路径引用项目内 shared/agents/*，副本会断裂。
+//   代价：测试 force model_id 写真实 agents/*/config.json，生产共享 server 的 fs.watch 会触发 reload；
+//   但 after() 恢复 config 即恢复，不需重启（远好于之前的"server 被杀需手动重启"）。
+process.env.ELF_PORT_OFFSET = process.env.ELF_PORT_OFFSET || '10000';
 
 import path from 'path';
-import { _resetProfilesRoot, roomsRoot } from '../shared/profiles_paths.js';
+import { _resetProfilesRoot, roomsRoot, agentsDir } from '../shared/profiles_paths.js';
 import { setApiKeyStoreRootDir } from '../gateway/api_key_store.js';
 import { execSync } from 'child_process';
 import { ProcessManager } from '../gateway/process_manager.js';
 import { createGatewayApp } from '../gateway/server.js';
 import { loadGatewayConfig } from '../gateway/config.js';
 
-// api_key 根隔离到临时目录——绝不读写项目根的真实 api_key.json（那是用户的模型库，不能动）
+// api_key 根隔离到临时目录——绝不读写项目根的真实 config/api_key.json（那是用户的模型库，不能动）
 const __apiKeyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-gw-apikey-'));
 setApiKeyStoreRootDir(__apiKeyRoot);
-fs.writeFileSync(path.join(__apiKeyRoot, 'api_key.json'), JSON.stringify({ models: [
+fs.mkdirSync(path.join(__apiKeyRoot, 'config'), { recursive: true });
+fs.writeFileSync(path.join(__apiKeyRoot, 'config', 'api_key.json'), JSON.stringify({ models: [
   { model_id: 'test-model', base_url: 'https://api.test.com', auth_token: 'test-key', model: 'test-model', params_schema: null },
 ] }), 'utf-8');
 
-// 为所有真实 Agent 添加 model_id 字段（如果还没有）
-const agentsDir = path.join(process.cwd(), 'agents');
-const agentIds = fs.readdirSync(agentsDir, { withFileTypes: true })
+// 为所有真实 Agent 添加 model_id 字段（如果还没有）——走 agentsDir()(test mode 下=tmp 副本,不写真 agents/)
+const agentsDirPath = agentsDir();
+const agentIds = fs.readdirSync(agentsDirPath, { withFileTypes: true })
   .filter(d => d.isDirectory())
   .map(d => d.name)
   .filter(id => id.startsWith('elf-'));
 
 const originalConfigs = new Map();
 for (const agentId of agentIds) {
-  const configPath = path.join(agentsDir, agentId, 'config', 'config.json');
+  const configPath = path.join(agentsDirPath, agentId, 'config', 'config.json');
   try {
     const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     originalConfigs.set(agentId, JSON.stringify(config, null, 2));
@@ -196,6 +202,7 @@ describe('Gateway HTTP Server', () => {
       await new Promise((resolve) => server.close(resolve));
     }
     delete process.env.ELF_FORCE_MOCK_MODEL;
+    delete process.env.ELF_PORT_OFFSET;
     delete process.env.ELF_PROFILES_ROOT;
     _resetProfilesRoot();
     try { fs.rmSync(__profilesRoot, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -205,7 +212,7 @@ describe('Gateway HTTP Server', () => {
 
     // 恢复原始 Agent 配置文件
     for (const [agentId, originalConfig] of originalConfigs) {
-      const configPath = path.join(agentsDir, agentId, 'config', 'config.json');
+      const configPath = path.join(agentsDirPath, agentId, 'config', 'config.json');
       try {
         fs.writeFileSync(configPath, originalConfig, 'utf-8');
       } catch (e) {

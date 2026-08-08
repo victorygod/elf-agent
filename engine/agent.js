@@ -22,6 +22,8 @@ import { Config } from './config_loader.js';
 import { LLMModel, MockModel } from './models/index.js';
 import { extractExtraParams } from './models/llm.js';
 import { MessageManager } from './message_manager.js';
+import { UsageRecorder } from './usage_recorder.js';
+import { estimateUsage } from './models/usage.js';
 
 let logFileName = null;
 
@@ -104,6 +106,11 @@ export class Agent {
     this.promptAssembler = new PromptAssembler();
     this.messageManager._setPromptAssembler?.(this.promptAssembler);
     this.messageManager._eventSink = (event, data) => this.harness.emit(this.callbacks, event, data);
+
+    // 用量记录器(engine 进程侧落盘 profiles/usage/<agentId>.jsonl)。
+    //   runContext.agentId 生产路径必有(buildAgentFromConfig 注入);测试无 runContext 时禁用录制
+    //   (不崩,仅 emit 不落盘)——避免 new Agent({...}) 无 runContext 的旧测试因缺 agentId 抛错。
+    this.usageRecorder = this.runContext?.agentId ? new UsageRecorder({ agentId: this.runContext.agentId }) : null;
   }
 
   /** 外部调用：中断当前请求。委托 Harness（机制层控制面），操作本 agent 字段。 */
@@ -268,7 +275,21 @@ export class Agent {
     if (!scene || typeof scene.shouldFlushObserve !== 'function') return;
     if (!scene.shouldFlushObserve()) return;   // 复核：防重复触发、buffer 已空
     const emit = options.emit || ((e) => this._pushEvent?.(e.event, e.data));
-    await this._runFlushLoop({ emit, trigger: reason });
+    try {
+      await this._runFlushLoop({ emit, trigger: reason });
+    } catch (err) {
+      // 故障隔离：自驱动触发（observe 窗口到期）的 reasoning 失败不得冒泡成
+      // unhandled rejection 拖垮承载全部 agent 的共享 server——单 agent 配置错（如模型未配置→
+      // LLMModel.chatStream 同步 throw base_url 未设置）会连累其余 N 个 agent 全失活。
+      // 这里接住：显著记日志 + emitError（含前端 Toast notice，与"模型未配置"同款可见上报）
+      // + emitDone 收尾前端 loading + 停该 agent 自驱（清 observe timer，避免每窗口重试刷屏）。
+      // 错误照样上送可见，只是不再炸进程；其余 agent 不受影响照常群聊。
+      const logger = createLogger('agent', logFileName);
+      logger.error(`triggerRoomFlush(${reason}) 失败 [${this.runContext?.agentId}]: ${err.message}`);
+      try { this.abortFlow.emitError(emit, err.message); } catch (_) { /* emitError 失败不影响隔离 */ }
+      try { this.abortFlow.emitDone(emit); } catch (_) { /* 前端 loading 收尾尽力 */ }
+      try { scene?.dispose?.(); } catch (_) { /* 停自驱失败不重抛 */ }
+    }
   }
 
   /**
@@ -316,7 +337,7 @@ export class Agent {
       logger.info('用户中断了请求（兜底压缩期间）');
       return;
     }
-    this.abortFlow.emitDone(emit, { promptTokens: this.messageManager.estimateTokens() });
+    this.abortFlow.emitDone(emit);
   }
 
   // ============ Reasoning 段方法（protected，供 reasoning 与子类多 loop workflow 复用） ============
@@ -369,10 +390,55 @@ export class Agent {
         signal,
         onEvent: ev,
         onDone: () => this.skillLister?.reinvokeAfterCompact(),
+        onUsage: (usage) => this._recordUsage(usage, { phase: bottom ? 'compact-bottom' : 'compact' }, emit),
       }),
       emit,
     );
     return { aborted: r.aborted };
+  }
+
+  /**
+   * 记一笔 LLM 用量并推 'usage' SSE 事件(单次调用粒度)。
+   *   usage 来自 model.chatStream/chat 的 res.usage 或 onUsage 回调(provider 真实 / tokenizer 估算 / mock)。
+   *   context_tokens 取收尾时 messageManager.estimateTokens() 快照(当前对话体积,与压缩阈值同源)。
+   *   recorder 缺(测试无 runContext)则只 emit 不落盘——SSE 事件仍发,链路可测。
+   * @param {object} usage - 归一化用量 { prompt_tokens, completion_tokens, total_tokens, cached_tokens, ... }
+   * @param {object} meta - { phase, iteration, aborted }
+   * @param {(e:object)=>void} emit
+   */
+  _recordUsage(usage, meta, emit) {
+    if (!usage) return;
+    const contextTokens = this.messageManager?.estimateTokens?.() ?? null;
+    const rec = this.usageRecorder
+      ? this.usageRecorder.record({
+          userId: this.runContext?.userId ?? null,
+          roomId: this.runContext?.roomId ?? null,
+          phase: meta?.phase ?? 'turn',
+          loop: this._currentLoop ?? null,
+          iteration: meta?.iteration ?? null,
+          model: this.model?.model ?? null,
+          context_tokens: contextTokens,
+          ...usage,
+          aborted: meta?.aborted ?? false,
+        })
+      : null;
+    emit?.({
+      event: 'usage',
+      data: {
+        agentId: this.runContext?.agentId ?? null,
+        roomId: this.runContext?.roomId ?? null,
+        prompt_tokens: usage.prompt_tokens ?? 0,
+        completion_tokens: usage.completion_tokens ?? 0,
+        total_tokens: usage.total_tokens ?? 0,
+        cached_tokens: usage.cached_tokens ?? 0,
+        reasoning_tokens: usage.reasoning_tokens ?? 0,
+        cache_creation_tokens: usage.cache_creation_tokens ?? 0,
+        context_tokens: contextTokens,
+        source: usage.source ?? 'estimate',
+        phase: meta?.phase ?? 'turn',
+        ts: rec?.ts ?? Date.now(),
+      },
+    });
   }
 
   /** 构建 LLM 请求：base → PromptAssembler 拼装 + 工具列表。 */
@@ -388,13 +454,17 @@ export class Agent {
     logger.info(`LLM Request [第${iteration || '?'}轮] messages: ${JSON.stringify(messages, null, 2)}`);
     emit({ event: 'status', data: { state: 'thinking', loop: this._currentLoop } });
 
+    let partialContent = '';   // 中断时无 res.value,本地累积 partial 估算用量(不丢中断 token,§3.9)
     const r = await this.abortFlow.runAborable(
       { reason: 'llm-stream' },
       async (signal) => {
         const res = await this.model.chatStream(messages, tools, {
           signal,
           onChunk: (chunk) => {
-            if (chunk.type === 'token') emit({ event: 'token', data: { content: chunk.content, loop: this._currentLoop } });
+            if (chunk.type === 'token') {
+              partialContent += chunk.content;
+              emit({ event: 'token', data: { content: chunk.content, loop: this._currentLoop } });
+            }
           },
           onRetry: (info) => {
             const errText = String(info.error?.message || info.error || '');
@@ -419,7 +489,13 @@ export class Agent {
       },
       emit,
     );
-    if (r.aborted) return { aborted: true };
+    if (r.aborted) {
+      // 中断也记一笔(prompt 已花,completion 按 partial 估算);不丢中断用量,保总账闭合(§3.9)。
+      this._recordUsage(estimateUsage(messages, partialContent, { source: 'estimate' }), { phase: 'turn', iteration, aborted: true }, emit);
+      return { aborted: true };
+    }
+    // 收尾记一笔 turn 用量(provider 真实 / tokenizer 估算 / mock)+ 推 'usage' SSE 事件。
+    this._recordUsage(r.value?.usage, { phase: 'turn', iteration }, emit);
     const content = r.value.content;
     const toolCalls = r.value.toolCalls && r.value.toolCalls.length > 0 ? r.value.toolCalls : null;
     if (toolCalls) {

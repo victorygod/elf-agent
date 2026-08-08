@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
+import { agentConfigDir } from '../shared/profiles_paths.js';
 
 // profiles 根隔离到 tmpDir：logger.js 顶层在 import 阶段就求值 logsDir()→profilesRoot() 并缓存，
 //   必须在 import gateway 模块（触发 logger）之前设 env，否则 _root 锁死成真实 cwd/profiles。
@@ -192,7 +193,7 @@ describe('Agent + Gateway 集成测试', () => {
     });
 
     // 验证文件
-    const promptPath = path.join(process.cwd(), 'agents', 'elf-001', 'config', 'system_prompt.md');
+    const promptPath = path.join(agentConfigDir('elf-001'), 'system_prompt.md');
     const content = fs.readFileSync(promptPath, 'utf-8');
     assert.equal(content, '这是一个测试提示词。');
 

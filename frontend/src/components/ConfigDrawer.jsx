@@ -4,6 +4,7 @@ import useConfig from '../hooks/useConfig';
 import useBridge from '../hooks/useBridge';
 import * as api from '../api/index.js';
 import ConfigField from './ConfigField';
+import AgentUsageChart from './AgentUsageChart';
 import ConfirmModal from './ConfirmModal';
 import { getAgentManifest, loadAgentComponent } from '../pluginRegistry';
 import { useAuthStore } from '../stores/authStore';
@@ -170,6 +171,8 @@ function ConfigTabBody({ tab, agentId, formData, agent, availableTools, globalMo
       )}
       {/* prompt tab 底部额外面板由 agent UI 动态加载 */}
       {tab.key === 'prompt' && <AgentPromptExtras agentId={agentId} />}
+      {/* 模型配置 tab:单 agent 用量图(分天/分时 × 模型,最近 7 天) */}
+      {tab.key === 'model' && <AgentUsageChart agentId={agentId} />}
     </>
   );
 }

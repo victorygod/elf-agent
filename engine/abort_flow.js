@@ -66,12 +66,13 @@ export class AbortFlow {
   }
 
   /**
-   * 终止/结束事件 helper：集中 done 事件的 usage 构造（全 agent 唯一出口，防散落重复）。
+   * 结束事件 helper：done 只承载 turn 结束语义（前端 loading 收尾）。
+   *   LLM 用量改由 agent 层 emit 'usage' 事件（单次调用粒度、真实/估算口径）推送；
+   *   done 不再背 usage（旧 prompt_tokens=estimateTokens/completion=0 语义错且前端从不读，已删）。
    * @param {(event:object)=>void} emit
-   * @param {{promptTokens?:number, completionTokens?:number}} [usage]
    */
-  emitDone(emit, { promptTokens = 0, completionTokens = 0 } = {}) {
-    emit({ event: 'done', data: { usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens } } });
+  emitDone(emit) {
+    emit({ event: 'done', data: {} });
   }
 
   /** 错误事件 helper。@param {(event:object)=>void} emit @param {string} msg */

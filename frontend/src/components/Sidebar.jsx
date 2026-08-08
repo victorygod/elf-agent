@@ -8,6 +8,8 @@ import { useAuthStore } from '../stores/authStore';
 import * as api from '../api/index';
 import CreateRoomModal from './CreateRoomModal';
 import CreateAgentModal from './CreateAgentModal';
+import UsageBadge from './UsageBadge';
+import Dashboard from './Dashboard';
 import styles from './Sidebar.module.css';
 
 /**
@@ -344,6 +346,11 @@ export default function Sidebar({ onSelect }) {
                       LLM API 管理
                     </button>
                   )}
+                  {authUser?.role === 'admin' && (
+                    <button className={styles.settingsEntryBtn} onClick={() => setSettingsView('dashboard')}>
+                      Token 用量看板
+                    </button>
+                  )}
                   <button className={styles.settingsEntryBtn} onClick={() => { setOldPassword(''); setNewPassword(''); setNewPassword2(''); setPassMsg(null); setSettingsView('password'); }}>
                     修改密码
                   </button>
@@ -409,6 +416,16 @@ export default function Sidebar({ onSelect }) {
                   <div className={styles.nameEditTitle}>LLM API 管理</div>
                 </div>
                 <LLMManager />
+              </>
+            )}
+
+            {settingsView === 'dashboard' && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', marginBottom: '12px' }}>
+                  <button className={styles.settingsBackBtn} onClick={() => setSettingsView('main')} title="返回设置">‹</button>
+                  <div className={styles.nameEditTitle}>Token 用量看板</div>
+                </div>
+                <Dashboard />
               </>
             )}
           </div>
@@ -478,6 +495,7 @@ export default function Sidebar({ onSelect }) {
                   {agent.status === 'running' ? '运行中' : agent.status === 'error' ? '错误' : '已停止'}
                 </span>
               </div>
+              <UsageBadge agentId={agent.agentId} compact />
             </div>
           </div>
         ))}

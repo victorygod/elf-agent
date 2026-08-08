@@ -79,6 +79,13 @@ for (file of targetCp.trackedFileBackups):
 
 > MVP UI 文案统一："仅回退对话 + 被追踪本地文件；Bash/远程改动不在保证内"。
 
+### 回退范围二选一（对话+文件 / 只对话）
+
+rewind 默认"对话+文件一起退"。当选中的 checkpoint `hasFileChanges`（`snapshotWouldChangeFiles` 判定回退会动文件）时，菜单进二段式：↑↓ 在「回退对话和文件 / 只回退对话」间二选一再回退；无文件改动则直接退。
+
+- 后端：`rewindTo(..., { restoreFiles })` → `restore(..., { applyFiles })`。`restoreFiles=false` 跳过文件覆盖但**照常弹栈**（对话栈与文件栈按 cpId/seq 耦合，两模式 truncate 一致；差别仅在要不要把当前文件覆盖回目标快照）。`POST /rewind` body 带 `restoreFiles`，默认 true。
+- 前端：`RewindMenu`（list 阶段）选中带文件改动的 cp → `RewindFileChoice`（choose 阶段）二选一。「只对话」= 保留当前代码、只回到那句话之前（对标 CC `Restore conversation`）。
+
 ## 五、清理 / 淘汰
 
 - **滑窗淘汰**（`MAX_CHECKPOINTS=10`）：删旧 checkpoint 时同步删 `file-history/` 里被淘汰且无人再引用的 backup（对应 CC `nCg`）。

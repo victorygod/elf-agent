@@ -5,6 +5,7 @@ import CompactBadge from './CompactBadge';
 import MarkdownContent from './MarkdownContent';
 import EmptyState from './EmptyState';
 import RewindMenu from './RewindMenu';
+import RewindFileChoice from './RewindFileChoice';
 import ToastStack from './Toast';
 import useChat from '../hooks/useChat';
 import useAgentStore from '../stores/agentStore';
@@ -460,16 +461,22 @@ export default function ChatPanel({ agentId }) {
 
   // ===== Rewind 菜单打开/回退 =====
   const [rewindSelected, setRewindSelected] = useState(0);
+  // 二段式：list=选 checkpoint；choose=选中"带文件改动"的 cp 后，二选一回退范围（对话+文件 / 只对话）
+  const [rewindPhase, setRewindPhase] = useState('list');
+  const [rewindModeSelected, setRewindModeSelected] = useState(0);   // 0=对话+文件，1=只对话
+  const [pendingCp, setPendingCp] = useState(null);                  // choose 阶段待回退的 {id,prompt}
   const openRewindMenu = useCallback(async () => {
     const cps = await listCheckpoints();
     setRewindCheckpoints(cps);
     setRewindSelected(Math.max(0, cps.length - 1));   // 默认聚焦最近一项（列表最下）
+    setRewindPhase('list');
     setRewindOpen(true);
   }, [listCheckpoints]);
 
-  const handleRewind = useCallback(async (checkpointId) => {
+  const handleRewind = useCallback(async (checkpointId, restoreFiles = true) => {
     setRewindOpen(false);
-    const result = await rewind(checkpointId);
+    setRewindPhase('list');
+    const result = await rewind(checkpointId, restoreFiles);
     if (result?.ok && result.restoredPrompt != null) {
       // 截断后被丢弃的 user prompt 回填输入框（对标 CC "还原进输入框"）
       if (inputRef.current) {
@@ -479,6 +486,18 @@ export default function ChatPanel({ agentId }) {
       }
     }
   }, [rewind, autoResize]);
+
+  // 选中一个 checkpoint：hasFileChanges → 进 choose 二选一；否则直接回退（无文件可动）
+  const chooseOrRewind = useCallback((cp) => {
+    if (!cp?.id) return;
+    if (cp.hasFileChanges) {
+      setPendingCp({ id: cp.id, prompt: cp.prompt });
+      setRewindModeSelected(0);
+      setRewindPhase('choose');
+    } else {
+      handleRewind(cp.id, true);
+    }
+  }, [handleRewind]);
 
   // ★ window 级键盘监听——唯一监听，避免多 window capture 监听冲突
   //   菜单打开时：路由 Arrow/Enter/Esc 给菜单
@@ -495,12 +514,34 @@ export default function ChatPanel({ agentId }) {
   rewindCheckpointsRef.current = rewindCheckpoints;
   const selectedRef = useRef(rewindSelected);
   selectedRef.current = rewindSelected;
+  const chooseOrRewindRef = useRef(chooseOrRewind);
+  chooseOrRewindRef.current = chooseOrRewind;
+  const rewindPhaseRef = useRef(rewindPhase);
+  rewindPhaseRef.current = rewindPhase;
+  const rewindModeSelectedRef = useRef(rewindModeSelected);
+  rewindModeSelectedRef.current = rewindModeSelected;
+  const pendingCpRef = useRef(pendingCp);
+  pendingCpRef.current = pendingCp;
   useEffect(() => {
     const onGlobalKeyDown = (e) => {
       const chat = useAgentStore.getState().chats.get(chatKey(agentId));
 
       // —— 菜单打开时：所有导航键归菜单消费（必须 stopPropagation，否则 Enter 会冒泡到 textarea 触发 handleSend，把回填的 prompt 自动发出去）——
       if (rewindOpen) {
+        // choose 阶段：↑↓ 在"对话+文件 / 只对话"二选一，Enter 确认（restoreFiles = 选中项===0），Esc 返回 list
+        if (rewindPhaseRef.current === 'choose') {
+          if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setRewindPhase('list'); return; }
+          if (e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); setRewindModeSelected(i => Math.max(i - 1, 0)); return; }
+          if (e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); setRewindModeSelected(i => Math.min(i + 1, 1)); return; }
+          if (e.key === 'Enter') {
+            e.preventDefault(); e.stopPropagation();
+            const cp = pendingCpRef.current;
+            if (cp?.id) handleRewindRef.current(cp.id, rewindModeSelectedRef.current === 0);
+            return;
+          }
+          return;
+        }
+        // list 阶段
         if (e.key === 'Escape') {
           e.preventDefault();
           e.stopPropagation();
@@ -523,9 +564,8 @@ export default function ChatPanel({ agentId }) {
           e.preventDefault();
           e.stopPropagation();   // ★ 关键：阻止 Enter 冒泡到 textarea 的 handleSend
           if (checkpointsCountRef.current > 0) {
-            const cps = rewindCheckpointsRef.current;
-            const id = cps[selectedRef.current]?.id;
-            if (id) handleRewindRef.current(id);
+            const cp = rewindCheckpointsRef.current[selectedRef.current];
+            chooseOrRewindRef.current(cp);   // 有文件改动 → choose 二选一；否则直接回退
           }
           return;
         }
@@ -610,16 +650,25 @@ export default function ChatPanel({ agentId }) {
       </div>
       <div className={styles.inputArea}>
         <div className={styles.inputWrapper}>
-          {rewindOpen && (
+          {rewindOpen && rewindPhase === 'list' && (
             <RewindMenu
               checkpoints={rewindCheckpoints}
               selectedIndex={rewindSelected}
               onSelect={setRewindSelected}
               onConfirm={(idx) => {
                 const i = (typeof idx === 'number') ? idx : rewindSelected;
-                const id = rewindCheckpoints[i]?.id;
-                if (id) handleRewind(id);
+                chooseOrRewind(rewindCheckpoints[i]);   // 有文件改动 → choose 二选一；否则直接回退
               }}
+              onClose={() => setRewindOpen(false)}
+            />
+          )}
+          {rewindOpen && rewindPhase === 'choose' && (
+            <RewindFileChoice
+              prompt={pendingCp?.prompt}
+              selected={rewindModeSelected}
+              onSelect={setRewindModeSelected}
+              onConfirm={(restoreFiles) => handleRewind(pendingCp?.id, restoreFiles)}
+              onBack={() => setRewindPhase('list')}
               onClose={() => setRewindOpen(false)}
             />
           )}

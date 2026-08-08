@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import http from 'http';
 import { createGatewayApp } from '../gateway/server.js';
 import { ProcessManager } from '../gateway/process_manager.js';
 import { ChatHistory } from '../gateway/chat_history.js';
 import { RoomManager } from '../gateway/room_bus.js';
-import { _resetProfilesRoot } from '../shared/profiles_paths.js';
+import { _resetProfilesRoot, agentRoomState } from '../shared/profiles_paths.js';
 
 function fakeProcessManager(tmpAgentsDir) {
   return {
@@ -362,5 +363,108 @@ describe('/rooms/* routes', () => {
     fs.writeFileSync(path.join(cfgDir, 'config.json'), JSON.stringify({
       agentId: 'elf-001', name: 'elf-001', port: 0, provider: 'mock', systemPrompt: 't', tools: [],
     }));
+  });
+});
+
+// ===== 私聊房记忆清空回归 =====
+// bug：共享 agent-server 的 rooms 内存 map 按需持有、重启即空；engine /clear/:rid 对未驻留房返回 404。
+//      旧 DELETE /rooms/:rid/memory 的 running 分支不检查 /clear 返回，且写盘兜底锁在 else(非 running) 分支，
+//      导致 running + 房不在内存时静默不清 context.json。此处固化"记忆清空只认磁盘、不依赖 engine 内存态"。
+describe('/rooms/:rid/memory 私聊清记忆 fallback', () => {
+  let tmpDir, fakeEngine, fakePort, server, baseUrl, pm;
+  let prevSkip;
+  const agentId = 'elf-001';
+  const rid = 'chat-u_test-elf-001';   // uid 取 SKIP_AUTH 内置 u_test，过 checkPrivateOwner
+
+  before(async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-mem-'));
+    process.env.ELF_PROFILES_ROOT = path.join(tmpDir, 'profiles');
+    _resetProfilesRoot();
+    prevSkip = process.env.ELF_SKIP_AUTH;
+    process.env.ELF_SKIP_AUTH = '1';          // 注入 req.user.uid=u_test 过私聊房主门
+
+    // 假共享 agent-server：对任意 /clear/:rid 一律 404（模拟"房不驻留 server 内存"的真实常态）
+    fakeEngine = http.createServer((_req, res) => {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `room 不存在: ${agentId}/${rid}` }));
+    });
+    await new Promise((r) => fakeEngine.listen(0, '127.0.0.1', r));
+    fakePort = fakeEngine.address().port;
+
+    const agentsHome = path.join(tmpDir, 'agents');
+    const cfgDir = path.join(agentsHome, agentId, 'config');
+    fs.mkdirSync(cfgDir, { recursive: true });
+    fs.writeFileSync(path.join(cfgDir, 'config.json'), JSON.stringify({
+      agentId, name: agentId, port: 0, provider: 'mock', systemPrompt: 't', tools: [],
+    }));
+
+    pm = fakeProcessManager(agentsHome);
+    pm.getAgentStatus = () => 'running';
+    pm.getAgentPort = () => fakePort;
+    pm.getServerPort = () => fakePort;
+
+    const roomsDir = path.join(tmpDir, 'rooms');
+    const roomManager = new RoomManager(roomsDir, 0, {
+      spawnFn: () => ({ pid: 1, _fakeReady: true }),
+      agentConfigDir: (id) => path.join(agentsHome, id, 'config'),
+      startTimeout: 500,
+    });
+    const privateRoomHistory = new ChatHistory(roomsDir, roomsDir, { roomMode: true, roomsDir });
+    const app = createGatewayApp(pm, roomManager, { privateRoomHistory });
+    await new Promise((r) => {
+      server = app.listen(0, '127.0.0.1', () => {
+        baseUrl = `http://127.0.0.1:${server.address().port}`;
+        r();
+      });
+    });
+  });
+
+  after(async () => {
+    if (server) await new Promise((r) => server.close(r));
+    if (fakeEngine) await new Promise((r) => fakeEngine.close(r));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    delete process.env.ELF_PROFILES_ROOT;
+    _resetProfilesRoot();
+    if (prevSkip === undefined) delete process.env.ELF_SKIP_AUTH;
+    else process.env.ELF_SKIP_AUTH = prevSkip;
+  });
+
+  // 预置私聊房记忆：非空 context.json（模拟历史对话残留）
+  function seedContext() {
+    const dataDir = agentRoomState(agentId, rid);
+    fs.mkdirSync(dataDir, { recursive: true });
+    const ctxPath = path.join(dataDir, 'context.json');
+    fs.writeFileSync(ctxPath, JSON.stringify([
+      { id: 'm1', role: 'user', content: '旧记忆，应被清空' },
+      { id: 'm2', role: 'assistant', content: 'hi' },
+    ]), 'utf-8');
+    return ctxPath;
+  }
+
+  it('running 但房未驻留 server 内存（/clear 404）→ 写盘兜底清空 context.json', async () => {
+    const ctxPath = seedContext();
+    assert.ok(fs.statSync(ctxPath).size > 5, '预置 context.json 应非空');
+
+    const res = await fetch(`${baseUrl}/rooms/${rid}/memory`, { method: 'DELETE' });
+    assert.equal(res.status, 200, '清记忆应返回 200');
+
+    const after = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
+    assert.deepEqual(after, [], 'running+房不在内存(404) 时必须写盘兜底清成 []，不能静默不清');
+  });
+
+  it('agent 未运行 → 直接写盘清空 context.json（不 fetch engine）', async () => {
+    pm.getAgentStatus = () => 'stopped';   // 临时切非 running：不进 fetch 分支，走 else 写盘
+    try {
+      const ctxPath = seedContext();
+      assert.ok(fs.statSync(ctxPath).size > 5, '预置 context.json 应非空');
+
+      const res = await fetch(`${baseUrl}/rooms/${rid}/memory`, { method: 'DELETE' });
+      assert.equal(res.status, 200, '清记忆应返回 200');
+
+      const after = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
+      assert.deepEqual(after, [], 'agent 未运行时应直接写盘清成 []');
+    } finally {
+      pm.getAgentStatus = () => 'running';
+    }
   });
 });

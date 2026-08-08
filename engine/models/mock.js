@@ -3,6 +3,8 @@
  * 与 LLMModel 完全相同的接口签名和流式行为
  * 不做关键词匹配、不做调用历史，只返回可配置的固定响应
  */
+import { estimateUsage } from './usage.js';
+
 export class MockModel {
   /**
    * @param {object} options
@@ -62,7 +64,6 @@ export class MockModel {
     // model 内部聚合（对齐 LLMModel / LangChain on_llm_end）。中断时挂 partial 供收尾类型B 保留。
     let content = '';
     let toolCalls = [];
-    let completionTokens = 0;
     const abort = () => {
       const e = new DOMException('The operation was aborted.', 'AbortError');
       e.partial = { content, toolCalls };   // 已聚合的半成品
@@ -76,7 +77,6 @@ export class MockModel {
           for (const char of resp.content) {
             if (signal?.aborted) abort();
             if (this.delayMs > 0) await new Promise(r => setTimeout(r, this.delayMs));
-            completionTokens += 1;
             content += char;
             await onChunk({ type: 'token', content: char });
           }
@@ -89,7 +89,6 @@ export class MockModel {
         for (const char of fullContent) {
           if (signal?.aborted) abort();
           if (this.delayMs > 0) await new Promise(r => setTimeout(r, this.delayMs));
-          completionTokens += 1;
           content += char;
           await onChunk({ type: 'token', content: char });
         }
@@ -98,7 +97,9 @@ export class MockModel {
       // abort 路径：abort() 已挂 partial；非 abort 异常原样抛
       throw err;
     }
-    return { usage: { prompt_tokens: 0, completion_tokens: completionTokens }, content, toolCalls };
+    // mock 用量:tokenizer 估算(prompt=消息,completion=生成文本),source=mock。
+    //   保证无 API 也能整链路自测用量采集/落盘/SSE(对齐 LLMModel 真实路径)。
+    return { usage: estimateUsage(messages, content, { source: 'mock' }), content, toolCalls };
   }
 
   /**
@@ -121,6 +122,9 @@ export class MockModel {
     }
     if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
     const resp = this._nextResponse();
-    return resp.content || this.defaultResponse;
+    const contentText = resp.content || this.defaultResponse;
+    // 非流式经 onUsage 透出用量(与 LLMModel.chat 对称),供压缩 record 记 mock 用量。
+    options.onUsage?.(estimateUsage(messages, contentText, { source: 'mock' }));
+    return contentText;
   }
 }

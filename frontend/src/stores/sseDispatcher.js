@@ -341,8 +341,21 @@ export function handleSSEEvent(agentId, event, data) {
       break;
     }
 
+    case 'usage': {
+      // 单次 LLM 调用用量(实时):更新当前 context + 上次增量;累计 cumulative 由 done 后重拉。
+      useAgentStore.getState().patchUsage(agentId, {
+        context: data.context_tokens,
+        lastDelta: data.total_tokens,
+        lastSource: data.source,
+        lastTs: data.ts,
+      });
+      break;
+    }
+
     case 'done': {
       finalizeActiveTurn(agentId);
+      // 本轮用量已落盘 → 重拉累计(全量磁盘读,准;每轮一次频率低,无 SSE 累加双倍)。
+      useAgentStore.getState().loadUsage(agentId);
       break;
     }
 

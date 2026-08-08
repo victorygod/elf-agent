@@ -30,7 +30,8 @@ describe('api_key_store', () => {
     const testModels = [
       { model_id: 'gpt-4o', base_url: 'https://api.openai.com/v1', auth_token: 'sk-key', model: 'gpt-4o', params_schema: null }
     ];
-    fs.writeFileSync('api_key.json', JSON.stringify({ models: testModels }), 'utf-8');
+    fs.mkdirSync('config', { recursive: true });
+    fs.writeFileSync('config/api_key.json', JSON.stringify({ models: testModels }), 'utf-8');
 
     const models = api_key_store.readGlobalModels();
 
@@ -52,7 +53,7 @@ describe('api_key_store', () => {
 
     api_key_store.writeGlobalModels(testModels);
 
-    const content = fs.readFileSync('api_key.json', 'utf-8');
+    const content = fs.readFileSync('config/api_key.json', 'utf-8');
     const data = JSON.parse(content);
 
     assert.equal(data.models.length, 1);

@@ -10,6 +10,8 @@
  *   其余字段（如 enable_thinking, thinking 等）原样透传到请求 body
  */
 
+import { normalizeUsage, estimateUsage } from './usage.js';
+
 /**
  * 提取额外的请求参数（除 provider/base_url/auth_token/model 外的所有字段）
  */
@@ -123,6 +125,10 @@ export class LLMModel {
       }));
     }
 
+    // 流式时请求 provider 在流末尾返回真实 usage(OpenAI 标准 stream_options.include_usage)。
+    //   不支持的端点通常忽略该字段;拿到则 source=provider,拿不到回退 tokenizer 估算(见 chatStream)。
+    if (stream) body.stream_options = { include_usage: true };
+
     return body;
   }
 
@@ -154,7 +160,7 @@ export class LLMModel {
     // model 内部聚合（对齐 LangChain on_llm_end）。中断时挂 err.partial 供收尾保留。
     let content = '';
     let pendingToolCalls = {};
-    let completionTokens = 0;
+    let providerUsage = null;   // provider 流末返回的真实 usage(无则回退 tokenizer 估算)
 
     // 建连 + 首响应阶段包装重试（瞬时错误 3 次）。reader 循环（已吐 token）不在此范围内，防 token 重复。
     let internalController, connectTimer, requestTimer, signal, response;
@@ -175,11 +181,14 @@ export class LLMModel {
           clearTimeout(connectTimer);
         } catch (err) {
           clearTimeout(connectTimer); clearTimeout(requestTimer);
-          if (err.name === 'AbortError') {
-            // 外部主动中断：挂 partial 后抛（withRetry 不重试 AbortError）
-            if (options.signal?.aborted) { err.partial = { content, toolCalls: null }; }
+          if (err.name === 'AbortError' && options.signal?.aborted) {
+            // 真·用户中断：挂 partial 后抛（withRetry 不重试 AbortError）
+            err.partial = { content, toolCalls: null };
             throw err;
           }
+          // 超时（internalController 定时器 abort，options.signal 未 abort）或其他网络错误：
+          // 抛可重试的"超时"Error，让 withRetry 重试并冒 retry/error 气泡——不再被 runAborable
+          // 误判成 AbortError（用户中断）而静默 emit aborted 收尾。
           throw new Error(connected
             ? `LLM API 请求超时（${this.requestTimeout / 1000}秒，第 ${attempt} 次）`
             : `LLM API 连接超时（${this.connectTimeout / 1000}秒，第 ${attempt} 次）`);
@@ -230,11 +239,12 @@ export class LLMModel {
 
           try {
             const parsed = JSON.parse(data);
+            // 流末 usage chunk(choices 为空、无 delta)也捕获——provider 真实用量在此。
+            if (parsed.usage) providerUsage = parsed.usage;
             const delta = parsed.choices?.[0]?.delta;
             if (!delta) continue;
 
             if (delta.content) {
-              completionTokens += 1;
               content += delta.content;
               await onChunk({ type: 'token', content: delta.content });
             }
@@ -260,12 +270,18 @@ export class LLMModel {
         }
       }
     } catch (err) {
-      // reader.read() 中断（AbortError）：挂已聚合的 partial 供收尾类型B 保留
-      if (err.name === 'AbortError') {
+      if (err.name === 'AbortError' && options.signal?.aborted) {
+        // 真·用户中断：挂已聚合的 partial 供收尾类型B 保留（finishAborted 存档）
         err.partial = {
           content,
           toolCalls: finalizeToolCalls(pendingToolCalls),
         };
+        throw err;
+      }
+      if (err.name === 'AbortError') {
+        // 超时（internalController 定时器 abort）：reader 已吐 token，不重试（防重复吐 token），报超时错误。
+        //   已流出 token 由 gateway 侧"空turn兜底"落盘保留；agent 上下文不入（失败不污染下轮）。
+        throw new Error(`LLM API 请求超时（${this.requestTimeout / 1000}秒，流式响应中断）`);
       }
       throw err;
     } finally {
@@ -275,7 +291,10 @@ export class LLMModel {
 
     const toolCalls = finalizeToolCalls(pendingToolCalls);
     if (toolCalls.length > 0) await onChunk({ type: 'tool_calls', tool_calls: toolCalls });
-    return { usage: { prompt_tokens: 0, completion_tokens: completionTokens }, content, toolCalls };
+    // 真实用量优先 provider 流末 usage;无则 tokenizer 估算(prompt=消息数组,completion=生成文本)。
+    //   取代旧"prompt_tokens 恒 0 + completion 按 chunk 数"的错误口径。
+    const usage = normalizeUsage(providerUsage) || estimateUsage(messages, content);
+    return { usage, content, toolCalls };
   }
 
   /**
@@ -314,7 +333,10 @@ export class LLMModel {
           clearTimeout(connectTimer);
         } catch (err) {
           clearTimeout(connectTimer); clearTimeout(requestTimer);
-          if (err.name === 'AbortError') throw err;   // 中断不重试
+          if (err.name === 'AbortError' && options.signal?.aborted) throw err;   // 真·用户中断不重试
+          // 超时（internalController 定时器 abort，options.signal 未 abort）或其他网络错误：
+          // 抛可重试的"超时"Error，让 withRetry 重试并冒 retry/error 气泡——不再被 runAborable
+          // 误判成 AbortError（用户中断）而静默 emit aborted 收尾。
           throw new Error(connected
             ? `LLM API 请求超时（${this.requestTimeout / 1000}秒，第 ${attempt} 次）`
             : `LLM API 连接超时（${this.connectTimeout / 1000}秒，第 ${attempt} 次）`);
@@ -326,7 +348,12 @@ export class LLMModel {
         }
         const data = await response.json();
         clearTimeout(requestTimer);
-        return data.choices?.[0]?.message?.content || '';
+        // 非流式同样取真实 usage(经 onUsage 回调透出给压缩 record);return 仍为 content 字符串,
+        //   保持 chat() 签名不变(4 个调用点零改)。provider 无 usage 则 tokenizer 估算。
+        const contentText = data.choices?.[0]?.message?.content || '';
+        const usage = normalizeUsage(data.usage) || estimateUsage(messages, contentText);
+        options.onUsage?.(usage);
+        return contentText;
       }, options.onRetry);
     } catch (err) {
       clearTimeout(requestTimer);

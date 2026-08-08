@@ -233,13 +233,16 @@ export async function listCheckpoints(agentId) {
 
 /**
  * 回退到指定快照包（省略 checkpointId = 最近一个）
+ * @param {string} agentId
+ * @param {string|null} checkpointId
+ * @param {boolean} [restoreFiles=true] - false=只回退对话不覆盖文件（保留当前代码）
  * @returns {Promise<{ status, restoredPrompt, checkpoints }>}
  */
-export async function rewindAgent(agentId, checkpointId = null) {
+export async function rewindAgent(agentId, checkpointId = null, restoreFiles = true) {
   const res = await authFetch(`${API_BASE}/rooms/${myPrivateRoomId(agentId)}/rewind`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ checkpointId }),
+    body: JSON.stringify({ checkpointId, restoreFiles }),
   });
   return res.json();
 }
@@ -406,6 +409,37 @@ export async function getAvailableTools() {
   if (!res.ok) return [];
   const data = await res.json();
   return data.tools || [];
+}
+
+// ===== Token 用量 =====
+
+/**
+ * 单 agent 用量聚合(标题卡累计基线 + 模型配置 tab 图)。无参=全量累计。
+ * silent:用量可选,失败不弹 toast(标题卡静默留空)。
+ */
+export async function getAgentUsage(agentId, { from, to, bucket, groupBy } = {}) {
+  const qs = new URLSearchParams();
+  if (from) qs.set('from', from);
+  if (to) qs.set('to', to);
+  if (bucket) qs.set('bucket', bucket);
+  if (groupBy) qs.set('groupBy', groupBy);
+  const q = qs.toString();
+  const res = await authFetch(`${API_BASE}/agents/${agentId}/usage/summary${q ? `?${q}` : ''}`, { silent: true });
+  if (!res.ok) return null;
+  return await res.json();
+}
+
+/** 全局用量看板(admin):时间(天/小时)× 维度(agent/model)聚合。 */
+export async function getUsageSummary({ from, to, bucket, groupBy } = {}) {
+  const qs = new URLSearchParams();
+  if (from) qs.set('from', from);
+  if (to) qs.set('to', to);
+  if (bucket) qs.set('bucket', bucket);
+  if (groupBy) qs.set('groupBy', groupBy);
+  const q = qs.toString();
+  const res = await authFetch(`${API_BASE}/usage/summary${q ? `?${q}` : ''}`, { silent: true });
+  if (!res.ok) return null;
+  return await res.json();
 }
 
 // ===== Skill 管理（平台级） =====

@@ -7,6 +7,10 @@
     "type": "path",
     "content": "system_prompt.md"
   },
+  "loop_outline_system": {
+    "type": "path",
+    "content": "loop_outline_system.md"
+  },
   "loop_outline_prompt": {
     "type": "path",
     "content": "loop_outline_prompt.md"
@@ -38,6 +42,6 @@
     "Roll"
   ],
   "avatar": "avatar.webp",
-  "model_id": "deepseek-v4-flash",
+  "model_id": "glm-4.7",
   "model_params": {}
 }

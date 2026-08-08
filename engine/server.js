@@ -153,6 +153,8 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
     instanceErrors.delete(agentId); // 成功：清除之前的失败留痕
     wireAgentEvents(room);
     setRoom(room);
+    // 新 agent（启动后才创建的）首次建房时补装 configDir watcher，让它也能热更新配置。
+    watchAgentConfig(agentId);
     logger.info(`RoomState[${agentId}/${roomId}] 懒创建完成 (mode=${mode})`);
     return room;
   }
@@ -490,7 +492,7 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
   });
 
   // 配置热更新（多 agent 模式）：reload 指定 agent 的所有 live 实例（rooms 里的 RoomState.agent）。
-  // 未实例化的 agent 无需 reload——下次建房时自然读到最新 config。供 startAgentServer 的 fs.watch 调用。
+  // 未实例化的 agent 无需 reload——下次建房时自然读到最新 config。
   function reloadLiveAgent(agentId) {
     const m = rooms.get(agentId);
     if (!m || m.size === 0) return;
@@ -502,8 +504,52 @@ export function createAgentServer(agentOrOpts, legacyConfig) {
   function reloadAllLiveAgents() {
     for (const aid of rooms.keys()) reloadLiveAgent(aid);
   }
+
+  // fs.watch 管理：每个 agent 一个 configDir watcher（幂等，防重复装），全局 api_key.json 一个。
+  // 所有 watcher 都挂 on('error') 兜底——文件/目录被删（删 agent、原子替换）emit error 时只 log 不崩。
+  const configWatchers = new Map();   // agentId → FSWatcher
+  function watchAgentConfig(agentId) {
+    if (!factoryOpts || configWatchers.has(agentId)) return;
+    const cdir = factoryOpts.configDir(agentId);
+    let watcher;
+    try {
+      watcher = fs.watch(cdir, { persistent: false }, (_t, filename) => {
+        logger.info(`[${agentId}] 配置变化 ${filename}, reload live 实例`);
+        try { reloadLiveAgent(agentId); } catch (e) { logger.warn(`reload ${agentId} 失败: ${e.message}`); }
+      });
+    } catch (e) { logger.warn(`无法监听 ${cdir}: ${e.message}`); return; }
+    watcher.on('error', (e) => {
+      // 目录被删（删 agent）等：失效只 log 不崩，并清掉该 agent 的 live RoomState（释放内存、防陈旧实例继续跑）。
+      logger.warn(`[${agentId}] config 目录监听失效: ${e.message}，清理 live 实例`);
+      configWatchers.delete(agentId);
+      try { watcher.close(); } catch (_) { /* 已关 */ }
+      rooms.delete(agentId);
+    });
+    configWatchers.set(agentId, watcher);
+  }
+  let apiKeyWatcher = null;
+  function watchGlobalApiKey() {
+    if (apiKeyWatcher) return;
+    const file = path.join(process.cwd(), 'config', 'api_key.json');
+    let watcher;
+    try {
+      watcher = fs.watch(file, { persistent: false }, () => {
+        logger.info('全局 api_key.json 变化, reload 所有 live agent');
+        try { reloadAllLiveAgents(); } catch (e) { logger.warn(`reload all 失败: ${e.message}`); }
+      });
+    } catch (e) { logger.warn(`无法监听 ${file}（可能尚未创建）: ${e.message}`); return; }
+    watcher.on('error', (e) => {
+      // 文件被原子替换/删除：失效只 log 不崩。下次重启或 writeGlobalModels 后重建。
+      logger.warn(`全局 api_key.json 监听失效: ${e.message}`);
+      apiKeyWatcher = null;
+      try { watcher.close(); } catch (_) { /* 已关 */ }
+    });
+    apiKeyWatcher = watcher;
+  }
   app.reloadLiveAgent = reloadLiveAgent;
   app.reloadAllLiveAgents = reloadAllLiveAgents;
+  app.watchAgentConfig = watchAgentConfig;
+  app.watchGlobalApiKey = watchGlobalApiKey;
 
   return app;
 }

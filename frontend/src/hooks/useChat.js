@@ -43,9 +43,13 @@ export default function useChat(agentId) {
     useAgentStore.getState()._patchChat(agentId, { activeTurn: newTurn });
 
     try {
-      await api.chat(agentId, message, {
+      const ack = await api.chat(agentId, message, {
         onEvent: (event, data) => handleSSEEvent(agentId, event, data),
       });
+      // /say 返回真实 user message id：对齐本地乐观 turn 的 id，使其与后端 snapshot 同源。
+      //   否则聚合 SSE 重连时 snapshot-merge 按 turn.id 去重会把本地版误判为更旧历史整批保留，
+      //   与 snapshot 那份并存 → 一整套消息翻倍（刷新才好）。详见 agentStore.alignOptimisticTurn。
+      if (ack?.id) useAgentStore.getState().alignOptimisticTurn(agentId, msg.id, ack.id);
     } catch (e) {
       if (e.name === 'AbortError') {
         finalizeActiveTurn(agentId);
@@ -79,9 +83,9 @@ export default function useChat(agentId) {
   // 调 gateway /rewind 整文件替换 history。rewind 是服务端状态变更，但服务端不主动推 snapshot
   // （snapshot 仅在 subscribe 新建时推）。常驻 subscribe 不随 rewind 重建，故本 hook 成功后
   // 主动 loadHistory 从回退后的磁盘权威源重建 store（先 finalize 清在途）。
-  const rewind = useCallback(async (checkpointId = null) => {
+  const rewind = useCallback(async (checkpointId = null, restoreFiles = true) => {
     try {
-      const data = await api.rewindAgent(agentId, checkpointId);
+      const data = await api.rewindAgent(agentId, checkpointId, restoreFiles);
       if (data?.status === 'ok') {
         finalizeActiveTurn(agentId);
         await useAgentStore.getState().loadHistory(agentId, { force: true });

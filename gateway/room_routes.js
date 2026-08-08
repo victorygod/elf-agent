@@ -428,7 +428,8 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
     const rid = req.params.rid;
     const { agentId } = req.privateRoom;
     const checkpointId = req.body?.checkpointId ?? null;
-    const result = rewindTo(agentId, rid, checkpointId, privateRoomHistoryPath(rid));
+    const restoreFiles = req.body?.restoreFiles !== false;   // 默认 true；显式 false = 只退对话不覆盖文件
+    const result = rewindTo(agentId, rid, checkpointId, privateRoomHistoryPath(rid), { restoreFiles });
     if (!result.ok) return res.status(400).json({ error: result.error });
     const port = pm?.getAgentPort?.(agentId);
     if (port) {
@@ -442,17 +443,25 @@ export function registerRoomRoutes(app, roomManager, opts = {}) {
   });
 
   // DELETE /rooms/:rid/memory — 清空私聊房记忆（context.json + 内存 + tool-results）+ 私聊房 history
-  //   v3 经 agent /clear/:roomId 清内存（engine 已按房清 buffer/cursor/tool-results），未运行则清盘。
+  //   running：先经 agent /clear/:rid 清内存（engine 同步落盘 context=[] + 清 tool-results）；
+  //   /clear 不可达或返回非 2xx（含 room 不驻留 server 内存的 404）、或 agent 未运行 → 写盘兜底 context=[]。
+  //   记忆清空的持久化保证只认磁盘，不依赖 room 是否驻留 engine 内存（共享 server 按需持房、重启即空）。
   app.delete('/rooms/:rid/memory', checkRoomExists, checkPrivateOwner, async (req, res) => {
     const rid = req.params.rid;
     const { agentId } = req.privateRoom;
-    const status = pm?.getAgentStatus?.(agentId);
-    if (status === 'running') {
+    let cleared = false;   // engine 已清内存并落盘（/clear 返回 2xx）
+    if (pm?.getAgentStatus?.(agentId) === 'running') {
       const port = pm?.getAgentPort?.(agentId);
-      try { await fetch(`http://127.0.0.1:${port}/clear/${encodeURIComponent(rid)}`, { method: 'POST', signal: AbortSignal.timeout(5000) }); }
-      catch (err) { logger.warn(`清内存失败 (${rid})，走盘上兜底: ${err.message}`); }
-    } else {
-      // 私聊房记忆目录 = profiles/agents/<id>/rooms/chat-<uid>-<id>/
+      if (port) {
+        try {
+          const resp = await fetch(`http://127.0.0.1:${port}/clear/${encodeURIComponent(rid)}`, { method: 'POST', signal: AbortSignal.timeout(5000) });
+          if (resp.ok) cleared = true;
+          else logger.warn(`清内存失败 (${rid}): /clear 返回 ${resp.status}，转写盘兜底`);
+        } catch (err) { logger.warn(`清内存失败 (${rid})，转写盘兜底: ${err.message}`); }
+      }
+    }
+    if (!cleared) {
+      // 私聊房记忆目录 = agentRoomState(agentId, rid) = profiles/agents/<id>/rooms/<rid>/（rid=chat-<uid>-<id>）
       const dataDir = agentRoomState(agentId, rid);
       try {
         fs.mkdirSync(dataDir, { recursive: true });

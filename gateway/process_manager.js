@@ -19,6 +19,7 @@ import { connectAgentEvents, disconnectAgentEvents, hasAgentEventsConnection } f
 import { handlePrivateAgentEvent, forceFinishRoomsForAgent } from './private_room_stream.js';
 import { rewindTo } from './snapshot.js';
 import { loadGatewayConfig } from './config.js';
+import { logsDir, agentsDir } from '../shared/profiles_paths.js';
 
 const logger = createLogger('process-manager', 'gateway.log');
 
@@ -37,7 +38,7 @@ export class ProcessManager {
   constructor() {
     // agents: Map<agentId, { status: 'stopped'|'running'|'error', config }>（不再持 port/pid；那是共享 server 的）
     this.agents = new Map();
-    this.agentsDir = path.join(process.cwd(), 'agents');
+    this.agentsDir = agentsDir();
     // v3：privateRoomHistory 由 gateway/index.js 注入，供 _onAgentEvent 路由私聊房事件落 history。
     this.privateRoomHistory = null;
     // 端口整体偏移（测试用 ELF_PORT_OFFSET 注入）：server.port = agentServerPort + offset，与真实 gateway 端口隔离。
@@ -221,11 +222,21 @@ async ensureServerUp() {
     }
 
     const entryFile = path.join(process.cwd(), 'engine', 'start.js');
+    // stdio 落盘:stdout/stderr → profiles/logs/agent-server.err.log。不再 'ignore'(否则
+    //   unhandled exception 栈被吞,agent-server 崩了查不到原因)。detached 下用 fd 写文件,
+    //   子进程活过父进程也能继续写;落盘失败回退 ignore,不挡启动。
+    let stdioCfg = ['ignore', 'ignore', 'ignore'];
+    try {
+      const errLog = path.join(logsDir(), 'agent-server.err.log');
+      fs.mkdirSync(path.dirname(errLog), { recursive: true });
+      const fd = fs.openSync(errLog, 'a');
+      stdioCfg = ['ignore', fd, fd];
+    } catch (e) { logger.warn(`agent-server err 日志落盘失败,回退 ignore: ${e.message}`); }
     try {
       const child = spawn(process.execPath, [entryFile, '--serve-all', '--port', String(this.server.port), '--gateway-url', this._gatewayUrl || ''], {
         cwd: process.cwd(),
         detached: true,
-        stdio: 'ignore',
+        stdio: stdioCfg,
         env: { ...process.env, ELF_GATEWAY_URL: this._gatewayUrl || '', ELF_INTERNAL_TOKEN: loadGatewayConfig().internalToken || '' },
       });
       child.unref();

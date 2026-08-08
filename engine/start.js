@@ -18,6 +18,7 @@ import { createAgentServer, setServerLogFileName } from './server.js';
 import { setLogFileName as setMessageManagerLogFileName } from './message_manager.js';
 import { buildRunContext } from './run_context.js';
 import { createLogger, enableAgentLogRouting } from '../shared/logger.js';
+import { agentsDir, agentConfigDir } from '../shared/profiles_paths.js';
 
 /**
  * 启动 Agent（实例化改造后支持运行时身份注入）
@@ -105,7 +106,7 @@ export async function startAgent(configDir, runOpts = {}) {
   // 群聊 RoomState 懒建的数据根：profiles/agents/<id>（dataDir=memory，上一级即 agent 根）。
   //   群聊 RoomState 经 server.js 落 profiles/agents/<id>/rooms/<rid>/，与私聊 memory 隔离。
   const dataRoot = runContext.dataDir ? path.join(runContext.dataDir, '..') : null;
-  const agentConfigDirFn = (id) => path.join(process.cwd(), 'agents', id, 'config');
+  const agentConfigDirFn = agentConfigDir;
   const app = createAgentServer({
     defaultAgent: agent,
     config: agent.config,
@@ -157,12 +158,12 @@ export async function startAgent(configDir, runOpts = {}) {
  */
 export async function startAgentServer({ port, gatewayUrl } = {}) {
   if (!port || !Number.isFinite(port)) throw new Error('startAgentServer: port 必填');
-  const agentsDir = path.join(process.cwd(), 'agents');
-  const agentIds = fs.readdirSync(agentsDir, { withFileTypes: true })
+  const _agentsDir = agentsDir();
+  const agentIds = fs.readdirSync(_agentsDir, { withFileTypes: true })
     .filter(e => e.isDirectory())
     .map(e => e.name)
-    .filter(id => fs.existsSync(path.join(agentsDir, id, 'config', 'config.json')));
-  if (agentIds.length === 0) throw new Error(`未发现 agent：${agentsDir}/*/config/config.json`);
+    .filter(id => fs.existsSync(path.join(_agentsDir, id, 'config', 'config.json')));
+  if (agentIds.length === 0) throw new Error(`未发现 agent：${_agentsDir}/*/config/config.json`);
 
   const logFileName = 'agent-server.log';
   setConfigLogFileName(logFileName);
@@ -174,7 +175,7 @@ export async function startAgentServer({ port, gatewayUrl } = {}) {
   enableAgentLogRouting();
   const logger = createLogger('agent-server-main', logFileName);
 
-  const configDirFn = (id) => path.join(process.cwd(), 'agents', id, 'config');
+  const configDirFn = agentConfigDir;
   // config:null → 多 agent 模式无单一 config（/config、/status 已 guard）；configDir fn 覆盖全部 agentId 供懒建。
   const app = createAgentServer({
     config: null,
@@ -192,24 +193,11 @@ export async function startAgentServer({ port, gatewayUrl } = {}) {
     process.exit(1);
   });
 
-  // 配置热更新——生产路径此前无热更新（agent 配置/模型改后需重启才生效，导致"配了模型还说没配置"）。
-  // 监听各 agent configDir + 全局 api_key.json，变更时 reload 对应 live 实例（调已有的 agent.reloadConfig()）。
-  // persistent:false → 不阻止进程退出，免得测试/关闭时挂起。
-  for (const aid of agentIds) {
-    const cdir = configDirFn(aid);
-    try {
-      fs.watch(cdir, { persistent: false }, (_t, filename) => {
-        logger.info(`[${aid}] 配置变化 ${filename}, reload live 实例`);
-        try { app.reloadLiveAgent(aid); } catch (e) { logger.warn(`reload ${aid} 失败: ${e.message}`); }
-      });
-    } catch (e) { logger.warn(`无法监听 ${cdir}: ${e.message}`); }
-  }
-  try {
-    fs.watch(path.join(process.cwd(), 'api_key.json'), { persistent: false }, () => {
-      logger.info('全局 api_key.json 变化, reload 所有 live agent');
-      try { app.reloadAllLiveAgents(); } catch (e) { logger.warn(`reload all 失败: ${e.message}`); }
-    });
-  } catch (e) { /* api_key.json 可能不存在（用户尚未在前端创建），忽略 */ }
+  // 配置热更新——启动时为每个 agent 装 configDir watcher + 全局 api_key.json watcher。
+  // 新 agent 首次建房时由 createAgentServer 内部动态补装（见 server.js getOrCreateRoom）。
+  // 所有 watcher 自带 on('error') 兜底，文件/目录被删只 log 不崩。
+  for (const aid of agentIds) app.watchAgentConfig?.(aid);
+  app.watchGlobalApiKey?.();
 
   return { app, server, agentIds };
 }

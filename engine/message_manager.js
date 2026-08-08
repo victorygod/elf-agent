@@ -258,13 +258,16 @@ export class MessageManager {
    * 职责不耦合，compactor 只负责"压缩完调它"。signal 由调用方传（复用当前轮 abort 信号），
    * abort 收尾（compact_abort/aborted/done）仍归 agent 的 reasoning，不在此处。
    */
-  async runCompact(llmModel, { signal, onEvent, onDone } = {}) {
+  async runCompact(llmModel, { signal, onEvent, onDone, onUsage } = {}) {
     let done = false;
     const wrappedEmit = (event) => {
       if (event.event === 'compact') done = true;
       onEvent?.(event);
     };
-    await this.compactIfNeeded(llmModel, { signal, onEvent: wrappedEmit });
+    // onUsage 透传到 compactIfNeeded → _doCompact → llmModel.chat({...options}),
+    //   provider/估算 usage 经 chat 的 onUsage 回调回到 agent._recordUsage(phase:'compact')。
+    //   子类 _doCompact override 同款 ...options 透传,无需改。
+    await this.compactIfNeeded(llmModel, { signal, onEvent: wrappedEmit, onUsage });
     if (done && typeof onDone === 'function') await onDone();
   }
 

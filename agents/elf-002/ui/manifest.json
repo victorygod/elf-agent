@@ -3,31 +3,31 @@
     "tabs": [
       {
         "key": "prompt",
-        "label": "提示词配置",
+        "label": "\u63d0\u793a\u8bcd\u914d\u7f6e",
         "fields": [
           {
             "key": "systemPrompt",
             "type": "textarea",
-            "label": "系统提示词",
-            "hint": "定义 Agent 的角色和行为方式"
+            "label": "\u7cfb\u7edf\u63d0\u793a\u8bcd",
+            "hint": "\u5b9a\u4e49 Agent \u7684\u89d2\u8272\u548c\u884c\u4e3a\u65b9\u5f0f"
           },
           {
             "key": "compactSystemPrompt",
             "type": "textarea",
-            "label": "压缩系统提示词",
-            "hint": "记忆压缩时使用的系统提示词"
+            "label": "\u538b\u7f29\u7cfb\u7edf\u63d0\u793a\u8bcd",
+            "hint": "\u8bb0\u5fc6\u538b\u7f29\u65f6\u4f7f\u7528\u7684\u7cfb\u7edf\u63d0\u793a\u8bcd"
           },
           {
             "key": "compactPrompt",
             "type": "textarea",
-            "label": "压缩提示词",
-            "hint": "记忆压缩时拼接的前缀提示词"
+            "label": "\u538b\u7f29\u63d0\u793a\u8bcd",
+            "hint": "\u8bb0\u5fc6\u538b\u7f29\u65f6\u62fc\u63a5\u7684\u524d\u7f00\u63d0\u793a\u8bcd"
           }
         ]
       },
       {
         "key": "agent",
-        "label": "Agent 配置",
+        "label": "Agent \u914d\u7f6e",
         "fields": [
           {
             "key": "avatar",
@@ -36,74 +36,62 @@
           {
             "key": "name",
             "type": "text",
-            "label": "Agent 名称",
-            "hint": "显示在前端界面的可读名称"
+            "label": "Agent \u540d\u79f0",
+            "hint": "\u663e\u793a\u5728\u524d\u7aef\u754c\u9762\u7684\u53ef\u8bfb\u540d\u79f0"
           },
           {
             "key": "tools",
             "type": "readonly-tags",
-            "label": "已启用工具",
-            "hint": "该 Agent 当前可调用的工具（只读，在 config.json 的 tools 字段配置后重启生效）"
+            "label": "\u5df2\u542f\u7528\u5de5\u5177",
+            "hint": "\u8be5 Agent \u5f53\u524d\u53ef\u8c03\u7528\u7684\u5de5\u5177\uff08\u53ea\u8bfb\uff0c\u5728 config.json \u7684 tools \u5b57\u6bb5\u914d\u7f6e\u540e\u91cd\u542f\u751f\u6548\uff09"
           },
           {
             "key": "subagents",
             "type": "readonly-tags",
-            "label": "已启用子 agent 类型",
-            "hint": "该 Agent 当前可派发的子 agent 类型（只读，在 config.json 的 subagents 字段配置后重启生效）"
+            "label": "\u5df2\u542f\u7528\u5b50 agent \u7c7b\u578b",
+            "hint": "\u8be5 Agent \u5f53\u524d\u53ef\u6d3e\u53d1\u7684\u5b50 agent \u7c7b\u578b\uff08\u53ea\u8bfb\uff0c\u5728 config.json \u7684 subagents \u5b57\u6bb5\u914d\u7f6e\u540e\u91cd\u542f\u751f\u6548\uff09"
           },
           {
             "key": "memoryTokenLimit",
             "type": "number",
-            "label": "记忆压缩 Token 上限",
-            "hint": "累计上下文超过此值时，触发整体摘要压缩（建议 4000-16000）"
+            "label": "\u8bb0\u5fc6\u538b\u7f29 Token \u4e0a\u9650",
+            "hint": "\u7d2f\u8ba1\u4e0a\u4e0b\u6587\u8d85\u8fc7\u6b64\u503c\u65f6\uff0c\u89e6\u53d1\u6574\u4f53\u6458\u8981\u538b\u7f29\uff08\u5efa\u8bae 4000-16000\uff09"
           },
           {
             "key": "perToolLimit",
             "type": "number",
-            "label": "单工具结果 Token 上限",
-            "hint": "单个工具结果超过此值时，落盘并改写为占位符（防止一条结果撑爆上下文）"
+            "label": "\u5355\u5de5\u5177\u7ed3\u679c Token \u4e0a\u9650",
+            "hint": "\u5355\u4e2a\u5de5\u5177\u7ed3\u679c\u8d85\u8fc7\u6b64\u503c\u65f6\uff0c\u843d\u76d8\u5e76\u6539\u5199\u4e3a\u5360\u4f4d\u7b26\uff08\u9632\u6b62\u4e00\u6761\u7ed3\u679c\u6491\u7206\u4e0a\u4e0b\u6587\uff09"
           },
           {
             "key": "budgetWindow",
             "type": "number",
-            "label": "单轮工具结果预算",
-            "hint": "一轮对话内的工具结果总量超过此值时，按体积从大到小逐个落盘淘汰（控制单轮工具结果的累积量）"
+            "label": "\u5355\u8f6e\u5de5\u5177\u7ed3\u679c\u9884\u7b97",
+            "hint": "\u4e00\u8f6e\u5bf9\u8bdd\u5185\u7684\u5de5\u5177\u7ed3\u679c\u603b\u91cf\u8d85\u8fc7\u6b64\u503c\u65f6\uff0c\u6309\u4f53\u79ef\u4ece\u5927\u5230\u5c0f\u9010\u4e2a\u843d\u76d8\u6dd8\u6c70\uff08\u63a7\u5236\u5355\u8f6e\u5de5\u5177\u7ed3\u679c\u7684\u7d2f\u79ef\u91cf\uff09"
           },
           {
             "key": "previewLength",
             "type": "number",
-            "label": "工具结果预览长度",
-            "hint": "单个工具结果超限落盘后，在 LLM 上下文占位符里保留的预览字符数（全文存磁盘，LLM 需细节时用 Read 回读；不影响前端展示）"
+            "label": "\u5de5\u5177\u7ed3\u679c\u9884\u89c8\u957f\u5ea6",
+            "hint": "\u5355\u4e2a\u5de5\u5177\u7ed3\u679c\u8d85\u9650\u843d\u76d8\u540e\uff0c\u5728 LLM \u4e0a\u4e0b\u6587\u5360\u4f4d\u7b26\u91cc\u4fdd\u7559\u7684\u9884\u89c8\u5b57\u7b26\u6570\uff08\u5168\u6587\u5b58\u78c1\u76d8\uff0cLLM \u9700\u7ec6\u8282\u65f6\u7528 Read \u56de\u8bfb\uff1b\u4e0d\u5f71\u54cd\u524d\u7aef\u5c55\u793a\uff09"
           },
           {
             "key": "maxIterations",
             "type": "number",
-            "label": "最大迭代轮数",
-            "hint": "Agent Loop 最大循环次数（设为 0 表示无限迭代）"
+            "label": "\u6700\u5927\u8fed\u4ee3\u8f6e\u6570",
+            "hint": "Agent Loop \u6700\u5927\u5faa\u73af\u6b21\u6570\uff08\u8bbe\u4e3a 0 \u8868\u793a\u65e0\u9650\u8fed\u4ee3\uff09"
           }
         ]
       },
       {
         "key": "model",
-        "label": "模型配置",
+        "label": "\u6a21\u578b\u914d\u7f6e",
         "fields": [
           {
-            "key": "base_url",
-            "type": "text",
-            "label": "API Base URL",
-            "hint": "LLM API 端点地址"
-          },
-          {
-            "key": "auth_token",
-            "type": "text",
-            "label": "Auth Token",
-            "hint": "LLM API 认证密钥"
-          },
-          {
-            "key": "model",
-            "type": "text",
-            "label": "模型名称",
-            "hint": "如 gpt-4o、GLM-5.1、deepseek-chat"
+            "key": "model_id",
+            "type": "select",
+            "label": "\u9009\u62e9\u6a21\u578b",
+            "hint": "\u4ece LLM API \u7ba1\u7406\u4e2d\u9009\u62e9\u4e00\u4e2a\u6a21\u578b"
           }
         ]
       },

@@ -75,6 +75,36 @@ describe('withRetry onRetry 钩子', () => {
       mock.srv.close();
     }
   });
+
+  it('真超时（internalController 定时器 abort）报超时错误并重试，不再被误判为用户中断', async () => {
+    // 挂死服务端：accept 但永不响应 → connectTimer/requestTimer 触发 internalController.abort() → fetch 抛 AbortError。
+    //   修复前：AbortError 经 runAborable 被当"用户中断"静默 emit aborted（无 toast、日志写成"用户中断了请求"）。
+    //   修复后：AbortError 且 options.signal 未 abort → 转可重试"超时"Error，withRetry 重试 3 次、冒 retry/error 气泡。
+    const srv = http.createServer((_req, _res) => { /* 永不响应，模拟上游挂死 */ });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    try {
+      const port = srv.address().port;
+      const model = new LLMModel({ base_url: `http://127.0.0.1:${port}`, apiKey: 'x', model: 'test', connectTimeout: 300, requestTimeout: 300 });
+      const retryInfos = [];
+      let caught = null;
+      try {
+        await model.chatStream([], null, { onRetry: (info) => retryInfos.push({ ...info }) });
+      } catch (e) {
+        caught = e;
+      }
+      assert.ok(caught, 'chatStream 应因超时 reject');
+      assert.equal(caught.name, 'Error', `超时应抛普通 Error（非 AbortError），实际 ${caught && caught.name}`);
+      assert.match(caught.message, /超时/);
+      // 3 次尝试全超时：attempt1→即将2(final=false)、attempt2→即将3(final=false)、attempt3→final=true
+      assert.equal(retryInfos.length, 3, '应重试满 3 次');
+      assert.equal(retryInfos[0].attempt, 2);
+      assert.equal(retryInfos[1].attempt, 3);
+      assert.equal(retryInfos[2].attempt, 3);
+      assert.equal(retryInfos[2].final, true);
+    } finally {
+      srv.close();
+    }
+  });
 });
 
 describe('sendNotice 分流', () => {

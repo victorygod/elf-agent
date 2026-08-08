@@ -28,7 +28,8 @@ describe('config_store', () => {
       { model_id: 'gpt-4o', base_url: 'https://api.openai.com/v1', auth_token: 'sk-test-key', model: 'gpt-4o', params_schema: null },
       { model_id: 'claude', base_url: 'https://api.anthropic.com/v1', auth_token: 'sk-ant-key', model: 'claude-3-5-sonnet', params_schema: null }
     ];
-    fs.writeFileSync('api_key.json', JSON.stringify({ models: globalModels }), 'utf-8');
+    fs.mkdirSync('config', { recursive: true });
+    fs.writeFileSync('config/api_key.json', JSON.stringify({ models: globalModels }), 'utf-8');
   });
 
   afterEach(() => {

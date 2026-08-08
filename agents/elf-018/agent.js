@@ -145,13 +145,15 @@ export class DNDAgent extends Agent {
 
   // ============ messages 构建 ============
 
-  /** outline 的 system（总纲 + canon + file_index），由 create_agent 注入器调用。 */
+  /** outline 的 system（总纲 + canon + file_index + 格式规范），由 create_agent 注入器调用。 */
   _outlineSystem() {
     let sys = this.config.get('systemPrompt') || '';
     const md = buildMetadata(this._roots.lore);
     if (md) sys += '\n\n' + md;
     const smd = buildStyleMetadata(this._stylesDir);   // 语言风格 metadata（<文件名.md> - description）
     if (smd) sys += '\n\n' + smd;
+    const fmt = this.config.get('loop_outline_system') || '';   // 静态格式规范（lore 规范 + 大纲格式）
+    if (fmt) sys += '\n\n' + fmt;
     return sys;
   }
 

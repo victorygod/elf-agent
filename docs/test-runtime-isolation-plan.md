@@ -165,12 +165,21 @@ if (isTestMode) {
 
 **效果**:bare `node --test …` 与 `npm test` 行为完全一致(端口 18180、profiles/logs tmp、skip-auth、固定密钥);测试 PM 永不碰生产 8180;`ensureServerUp` 在 18180 上只清测试自己的孤儿。
 
-### Step 2 —— light instance for test + runtime.json 起步
+### Step 2 —— agents 目录隔离(已落地 + 验证 2026-08-08)
 
-- 新增 `agentsDir()`/`agentConfigDir(id)` helper(`shared/profiles_paths.js`,与 `profilesRoot()` 对称,读 `ELF_AGENTS_DIR`)。
-- 5 个 agents 锚点(见上表)改调 helper;锚点 5 二选一(改 room_bus:484 兜底 / gateway/index.js 显式传 agentConfigDir)。
-- `test/setup-env.js`:`fs.cpSync` 复制 `cwd/agents` → tmp(18MB,亚百毫秒),抹副本内 `**/api_key.json` 为假值,设 `ELF_AGENTS_DIR=tmp`。配合既有 `ELF_PROFILES_ROOT` + Step 1 端口偏移 → 测试全隔离(不碰真 profiles / 真 agents / 真 80/81 段端口)。
-- 建 `runtime.json` 收口雏形:声明 template 路径 + `test` instance(root/端口/token)。从此环境声明收口于此。
+**根因实证**:测试 `PUT /agents/:id/config` 写**真实 cwd `agents/<id>/config`**(ELF_AGENTS_DIR 未隔离)→ 生产 agent-server 的 fs.watch 热重载(`engine/start.js:196-208`,watch 各 agent configDir → `reloadLiveInstances` 调 `room.agent.reloadConfig()`)**在飞回合期间换 model/mm** → 未捕获 rejection → 共享 agent-server 崩(stdio:'ignore' 吞栈)。`agent-server.err.log` 满屏 `[elf-XXX] 配置变化 config.json, reload live 实例` 为证。
+
+**改动**:
+1. `shared/profiles_paths.js` 加 `agentsDir()`/`agentConfigDir(id)`(读 `ELF_AGENTS_DIR`,默认 cwd/agents)。
+2. 5 锚点改调 helper:`process_manager.js:40`、`start.js:160/108/177`、`room_bus.js:484`。
+3. `test_mode.js` ⑤:复制 `cwd/agents` → `tmp/agents`,并在 tmp 建 `engine`、`shared` **符号链接**指回真实(`create_agent.js` 用相对 import `../../engine`、`../../shared`,纯复制会断引用——symlink 解决)。设 `ELF_AGENTS_DIR=tmp/agents`。
+4. 测试里硬编码 `process.cwd()/agents` 的读写点改走 helper:`gateway.test`(`agentsDir()`+model_id 写/恢复)、`integration.test`(`agentConfigDir('elf-001')` 读 system_prompt)。
+
+**验证**:prod gateway 在跑 → `npm run test:all` 665/0 绿 → 8180 存活 → prod `agent-server.err.log` 新增 reload=0 → 真实 `agents/elf-001/config/{config.json,system_prompt.md}` mtime 未变。即测试不再触生产 fs.watch、不再写真 agents/。
+
+**坑记录**:`fs.cpSync` 复制 `agents/` 到 tmp 会断 `create_agent.js` 的 `../../engine|shared` 相对 import → createRoomState import 失败 → /observe 500 → 测试"应收到 done 实际 snapshot"失败。解法:tmp 里建 engine/shared symlink。另:抹空 api_key.json 会破坏 `Config.getModelConfig`(mock 也受影响),apiKey 原样复制(mock 不用 key,无泄漏)。
+
+> `runtime.json` 收口雏形(声明 template + test instance)仍为后续 Step,未做。
 
 ### Step 3 —— full instance + 蓝绿自改
 

@@ -19,7 +19,7 @@ import path from 'path';
 import { createLogger } from '../shared/logger.js';
 import { agentRoomState } from '../shared/profiles_paths.js';
 import { readCpMeta, cpSeq, listCheckpointDirs } from '../shared/checkpoint_meta.js';
-import { makeSnapshot, restore, clearFileHistory, onCheckpointsEvicted } from '../shared/file_history.js';
+import { makeSnapshot, restore, clearFileHistory, onCheckpointsEvicted, snapshotWouldChangeFiles } from '../shared/file_history.js';
 
 const logger = createLogger('snapshot', 'gateway.log');
 
@@ -170,11 +170,17 @@ function _fmtList(list) {
  */
 export function listCheckpoints(agentId, roomId) {
   const root = _checkpointsDir(agentId, roomId);
-  return listCheckpointDirs(root).map(({ cpDir, meta, seq }) =>
-    meta
-      ? { id: meta.id, createdAt: meta.createdAt, prompt: meta.prompt, seq }
-      : { id: path.basename(cpDir), createdAt: null, prompt: null, seq }
-  );
+  const dataDir = _dataDir(agentId, roomId);
+  return listCheckpointDirs(root).map(({ cpDir, meta, seq }) => {
+    const id = meta ? meta.id : path.basename(cpDir);
+    return {
+      id,
+      createdAt: meta ? meta.createdAt : null,
+      prompt: meta ? meta.prompt : null,
+      seq,
+      hasFileChanges: snapshotWouldChangeFiles(dataDir, id),   // 前端据此决定是否弹"对话+文件/只对话"二选一
+    };
+  });
 }
 
 /**
@@ -201,9 +207,12 @@ export function clearCheckpoints(agentId, roomId) {
  * 记忆还原回 profiles/agents/<id>/memory，房历史还原回 roomHistoryPath（profiles/rooms/chat-<id>/history.jsonl）。
  * @param {string} agentId
  * @param {string} [checkpointId] - 省略 = 最近一个
+ * @param {string} [roomHistoryPathOpt]
+ * @param {{ restoreFiles?: boolean }} [opts] - restoreFiles=false=只回退对话不覆盖文件（保留当前代码），
+ *   默认 true（对话+文件）。弹栈两种都一样（cpId/seq 耦合）。
  * @returns {{ ok: boolean, restoredPrompt: string|null, error?: string }}
  */
-export function rewindTo(agentId, roomId, checkpointId, roomHistoryPathOpt) {
+export function rewindTo(agentId, roomId, checkpointId, roomHistoryPathOpt, { restoreFiles = true } = {}) {
   const list = listCheckpoints(agentId, roomId);
   logger.info(`[rewindTo 入口 ${agentId}] checkpointId=${checkpointId || '(latest)'} 删除前现有 ${list.length} 个快照包: ${_fmtList(list)}`);
   if (list.length === 0) return { ok: false, restoredPrompt: null, error: 'no checkpoint' };
@@ -286,7 +295,7 @@ export function rewindTo(agentId, roomId, checkpointId, roomHistoryPathOpt) {
 
     // 4.5 文件轴：还原目标 checkpoint 的 trackedFileBackups（null→unlink、变了→覆盖），弹注册表 ≥ targetSeq。
     //   无注册表 / 目标无 snapshot 时空跑（elf-018 或目标早于首次编辑的轮）。
-    try { restore(dataDir, target.id, targetSeq); }
+    try { restore(dataDir, target.id, targetSeq, { applyFiles: restoreFiles }); }
     catch (e) { logger.warn(`file-history restore 失败 (${agentId}/${target.id}): ${e.message}`); }
 
     // 5. 删掉 target 及其之后的所有快照包

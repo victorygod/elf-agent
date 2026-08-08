@@ -23,8 +23,23 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 function _configPath() {
-  return path.join(__dirname, '..', 'gateway.json');
+  return path.join(__dirname, '..', 'config', 'gateway.json');
 }
+
+// 一次性搬迁：旧根 gateway.json → config/gateway.json（仅旧存在且新不存在时）
+(function migrateGatewayConfig() {
+  const old = path.join(__dirname, '..', 'gateway.json');
+  const cur = _configPath();
+  if (fs.existsSync(old) && !fs.existsSync(cur)) {
+    try {
+      fs.mkdirSync(path.dirname(cur), { recursive: true });
+      fs.renameSync(old, cur);
+      logger.info('已迁移 gateway.json → config/');
+    } catch (e) {
+      logger.warn(`迁移 gateway.json 失败: ${e.message}`);
+    }
+  }
+})();
 
 /** 密钥持久化文件：profiles/auth.json */
 function _authPath() {

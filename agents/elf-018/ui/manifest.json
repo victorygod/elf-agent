@@ -7,38 +7,90 @@
     "tabs": [
       {
         "key": "saves",
-        "label": "存档管理",
+        "label": "\u5b58\u6863\u7ba1\u7406",
         "component": "SaveManager"
       },
       {
         "key": "prompt",
-        "label": "提示词配置",
+        "label": "\u63d0\u793a\u8bcd\u914d\u7f6e",
         "fields": [
-          { "key": "systemPrompt", "type": "textarea", "label": "总纲 system_prompt", "hint": "DM 人设总纲 + 正典规则 + 基础世界观" },
-          { "key": "loop_outline_prompt", "type": "textarea", "label": "outline 大纲任务", "hint": "outline loop 任务：写大纲 + 自查维护" },
-          { "key": "loop_render_prompt", "type": "textarea", "label": "render 渲染任务", "hint": "render loop 渲染指令" },
-          { "key": "compactPrompt", "type": "textarea", "label": "历史压缩指令" },
-          { "key": "compactSystemPrompt", "type": "textarea", "label": "压缩系统提示词（可空）" }
+          {
+            "key": "systemPrompt",
+            "type": "textarea",
+            "label": "\u603b\u7eb2 system_prompt",
+            "hint": "DM \u4eba\u8bbe\u603b\u7eb2 + \u6b63\u5178\u89c4\u5219 + \u57fa\u7840\u4e16\u754c\u89c2"
+          },
+          {
+            "key": "loop_outline_system",
+            "type": "textarea",
+            "label": "outline system prompt",
+            "hint": "outline \u4e13\u5c5e\u7cfb\u7edf\u63d0\u793a\u8bcd\u540e\u7f00\uff1alore \u89c4\u8303 + \u5927\u7eb2\u683c\u5f0f\uff0c\u5e38\u9a7b system"
+          },
+          {
+            "key": "loop_outline_prompt",
+            "type": "textarea",
+            "label": "outline \u5927\u7eb2\u4efb\u52a1",
+            "hint": "outline loop \u4efb\u52a1\uff1a\u5199\u5927\u7eb2 + \u81ea\u67e5\u7ef4\u62a4"
+          },
+          {
+            "key": "loop_render_prompt",
+            "type": "textarea",
+            "label": "render \u6e32\u67d3\u4efb\u52a1",
+            "hint": "render loop \u6e32\u67d3\u6307\u4ee4"
+          },
+          {
+            "key": "compactPrompt",
+            "type": "textarea",
+            "label": "\u5386\u53f2\u538b\u7f29\u6307\u4ee4"
+          },
+          {
+            "key": "compactSystemPrompt",
+            "type": "textarea",
+            "label": "\u538b\u7f29\u7cfb\u7edf\u63d0\u793a\u8bcd\uff08\u53ef\u7a7a\uff09"
+          }
         ]
       },
       {
         "key": "agent",
-        "label": "Agent 配置",
+        "label": "Agent \u914d\u7f6e",
         "fields": [
-          { "key": "avatar", "type": "avatar" },
-          { "key": "name", "type": "text", "label": "Agent 名称", "hint": "前端显示名" },
-          { "key": "tools", "type": "readonly-tags", "label": "已启用工具" },
-          { "key": "memoryTokenLimit", "type": "number", "label": "记忆压缩 Token 上限" },
-          { "key": "maxIterations", "type": "number", "label": "最大迭代轮数" }
+          {
+            "key": "avatar",
+            "type": "avatar"
+          },
+          {
+            "key": "name",
+            "type": "text",
+            "label": "Agent \u540d\u79f0",
+            "hint": "\u524d\u7aef\u663e\u793a\u540d"
+          },
+          {
+            "key": "tools",
+            "type": "readonly-tags",
+            "label": "\u5df2\u542f\u7528\u5de5\u5177"
+          },
+          {
+            "key": "memoryTokenLimit",
+            "type": "number",
+            "label": "\u8bb0\u5fc6\u538b\u7f29 Token \u4e0a\u9650"
+          },
+          {
+            "key": "maxIterations",
+            "type": "number",
+            "label": "\u6700\u5927\u8fed\u4ee3\u8f6e\u6570"
+          }
         ]
       },
       {
         "key": "model",
-        "label": "模型配置",
+        "label": "\u6a21\u578b\u914d\u7f6e",
         "fields": [
-          { "key": "base_url", "type": "text", "label": "API Base URL", "hint": "LLM API 端点" },
-          { "key": "auth_token", "type": "text", "label": "Auth Token", "hint": "LLM API 认证密钥" },
-          { "key": "model", "type": "text", "label": "模型名称", "hint": "如 deepseek-chat" }
+          {
+            "key": "model_id",
+            "type": "select",
+            "label": "\u9009\u62e9\u6a21\u578b",
+            "hint": "\u4ece LLM API \u7ba1\u7406\u4e2d\u9009\u62e9\u4e00\u4e2a\u6a21\u578b"
+          }
         ]
       }
     ]

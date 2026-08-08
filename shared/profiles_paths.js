@@ -38,6 +38,21 @@ export function profilesRoot() {
 /** 供测试重置缓存（改 env 后调一次）。 */
 export function _resetProfilesRoot() { _root = null; }
 
+/**
+ * agents 根目录：agent 定义（create_agent.js/config/ui）+ 运行时写（apiKey/config 编辑/avatar）。
+ * ELF_AGENTS_DIR 可覆盖（测试用 tmp 副本，与生产 cwd/agents 隔离，避免测试写触发生产 fs.watch 热重载），
+ *   默认 <cwd>/agents。
+ */
+export function agentsDir() {
+  return process.env.ELF_AGENTS_DIR ? path.resolve(process.env.ELF_AGENTS_DIR)
+                                    : path.join(process.cwd(), 'agents');
+}
+
+/** 某 agent 的 config 目录：agentsDir()/<id>/config。 */
+export function agentConfigDir(id) {
+  return path.join(agentsDir(), id, 'config');
+}
+
 /** agent 私聊记忆目录：profiles/agents/<id>/memory。 */
 export function agentMemory(agentId) {
   return path.join(profilesRoot(), 'agents', agentId, 'memory');
@@ -66,4 +81,12 @@ export function userDir(uid) {
 /** 日志目录：profiles/logs。ELF_LOG_DIR 可覆盖（测试用，日志与真实 profiles/logs 分离）。 */
 export function logsDir() {
   return process.env.ELF_LOG_DIR ? path.resolve(process.env.ELF_LOG_DIR) : path.join(profilesRoot(), 'logs');
+}
+
+/**
+ * 用量统计根目录:profiles/usage。各 agent 一份 <agentId>.jsonl(顶层集中,
+ * 便于 gateway 聚合时扫一个目录;per-agent 文件写无竞争)。ELF_PROFILES_ROOT 覆盖生效。
+ */
+export function usageDir() {
+  return path.join(profilesRoot(), 'usage');
 }

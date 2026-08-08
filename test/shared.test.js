@@ -406,7 +406,8 @@ describe('Config', () => {
     rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-config-root-'));
     // 全局模型库放在独立 root，并通过 setApiKeyStoreRootDir 指定，避免污染项目根
     setApiKeyStoreRootDir(rootDir);
-    fs.writeFileSync(path.join(rootDir, 'api_key.json'), JSON.stringify({ models: [
+    fs.mkdirSync(path.join(rootDir, 'config'), { recursive: true });
+    fs.writeFileSync(path.join(rootDir, 'config', 'api_key.json'), JSON.stringify({ models: [
       { model_id: 'test-model', base_url: 'https://api.test.com', auth_token: 'sk-123', model: 'test-model', params_schema: null },
     ] }), 'utf-8');
   });
@@ -728,13 +729,17 @@ describe('Agent', () => {
     assert.ok(compactStartEvent, '应有 compact_start 事件');
   });
 
-  it('done 事件应包含 usage 信息', async () => {
+  it('用量经 usage 事件推送(单次调用粒度,done 不再背 usage)', async () => {
     const events = [];
     await agent.receive('你好', { emit: e => events.push(e) });
+    const usageEvent = events.find(e => e.event === 'usage');
+    assert.ok(usageEvent, '应有 usage 事件');
+    assert.ok(typeof usageEvent.data.total_tokens === 'number');
+    assert.ok(typeof usageEvent.data.prompt_tokens === 'number');
+    assert.ok(typeof usageEvent.data.context_tokens === 'number');
     const doneEvent = events.find(e => e.event === 'done');
-    assert.ok(doneEvent);
-    assert.ok(doneEvent.data.usage);
-    assert.ok(typeof doneEvent.data.usage.prompt_tokens === 'number');
+    assert.ok(doneEvent, 'done 事件仍应产出(turn 结束语义)');
+    assert.ok(!doneEvent.data.usage, 'done 不再背 usage(改由 usage 事件推送)');
   });
 });
 

@@ -166,6 +166,49 @@ describe('清理 — clear / 孤立 backup', () => {
 
 // ========================================================================
 
+// ========================================================================
+
+describe('只回退对话（restoreFiles=false）+ hasFileChanges', () => {
+
+  it('restoreFiles=false：文件保持当前，弹栈照常', () => {
+    fs.writeFileSync(fp('F.js'), 'v0');
+    roundEdit('m1', fp('F.js'), 'v1');           // cp1：F 备份 v0，写后 v1
+    roundEdit('m2', fp('F.js'), 'v2');           // cp2：F 备份 v1，写后 v2
+
+    const cp1 = listCheckpoints(aid, rid)[0].id;
+    const r = rewindTo(aid, rid, cp1, undefined, { restoreFiles: false });  // 只对话回 cp1
+    assert.equal(r.ok, true);
+    assert.equal(fs.readFileSync(fp('F.js'), 'utf-8'), 'v2', '只对话 → 文件保持当前 v2，不覆盖回 v0');
+    assert.equal(listCheckpoints(aid, rid).length, 0, '弹栈照常：cp1/cp2 都弹');
+  });
+
+  it('restoreFiles=true（默认）：文件一并回退', () => {
+    fs.writeFileSync(fp('F.js'), 'v0');
+    roundEdit('m1', fp('F.js'), 'v1');
+    roundEdit('m2', fp('F.js'), 'v2');
+
+    const cp1 = listCheckpoints(aid, rid)[0].id;
+    rewindTo(aid, rid, cp1);                      // 默认 restoreFiles=true
+    assert.equal(fs.readFileSync(fp('F.js'), 'utf-8'), 'v0', '对话+文件 → F 回到 cp1 边界 v0');
+  });
+
+  it('hasFileChanges：文件相对快照改了→true，改回快照→false', () => {
+    fs.writeFileSync(fp('F.js'), 'v0');
+    roundEdit('m1', fp('F.js'), 'v1');            // cp1：F 备份 v0，当前 v1
+    assert.equal(listCheckpoints(aid, rid)[0].hasFileChanges, true, '当前 v1 ≠ 快照 v0 → 会动文件');
+
+    fs.writeFileSync(fp('F.js'), 'v0');           // 手动改回 = 快照内容
+    assert.equal(listCheckpoints(aid, rid)[0].hasFileChanges, false, '当前 v0 == 快照 v0 → 不会动文件');
+  });
+
+  it('无文件编辑的 checkpoint：hasFileChanges=false', () => {
+    snapshotBeforeSend(aid, rid, 'm1');           // cp1，无 track → 无注册表
+    assert.equal(listCheckpoints(aid, rid)[0].hasFileChanges, false, '无文件追踪 → 不会动文件');
+  });
+});
+
+// ========================================================================
+
 describe('Write 工具写前钩子端到端', () => {
 
   it('经 ctx.agent.messageManager.dataDir 落到 file-history，rewind 可回退', async () => {

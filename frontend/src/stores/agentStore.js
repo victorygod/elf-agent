@@ -32,6 +32,9 @@ const initialState = {
 
   // 头像缓存破坏计数器
   _avatarBuster: 0,
+
+  // agent 用量(全局累计 token + 当前 context):agentId → {cumulative, context, lastDelta, lastSource}
+  usage: new Map(),
 };
 
 /**
@@ -176,6 +179,72 @@ const useAgentStore = create((set, get) => ({
     set({ chats });
   },
 
+  /**
+   * 对齐本地乐观 turn 的 id：发消息时 useChat.send 用随机 turn.id/userMessage.id 乐观建回合，
+   *   POST /say 返回后端真实 id 后调本动作重命名，使其与后端 snapshot 同源（后端 messagesToTurns
+   *   用 `turn_${msg.id}`）。
+   *
+   *   否则聚合 SSE 重连时 snapshot-merge（sseDispatcher）按 turn.id 去重，会把 id 不同源的本地版
+   *   误判为「更旧的上翻历史」整批保留，与 snapshot 那份并存 → 一整套消息翻倍，刷新才恢复正常。
+   *
+   *   幂等 + 自愈：若真实版已存在（先前重连已把 snapshot 真实版补进 turns，翻倍已发生），则本地
+   *   乐观版多余 → 移除它而非改名，避免 turn.id 撞车，顺便修复已翻倍的状态。
+   * @param {string} agentId
+   * @param {string} localUserMsgId 本地乐观 turn 的 userMessage.id（send 时的 msg.id）
+   * @param {string} realId /say 返回的后端真实 user message id
+   */
+  alignOptimisticTurn: (agentId, localUserMsgId, realId) => {
+    if (!realId || !localUserMsgId) return;
+    const key = chatKey(agentId);
+    const chats = new Map(get().chats);
+    const chat = chats.get(key);
+    if (!chat) return;
+    const realTurnId = `turn_${realId}`;
+
+    // 真实版已存在（先前 snapshot/重连补来）→ 本地乐观版多余，移除它（也修复已发生的翻倍）。
+    if (chat.turns.some(t => t.id === realTurnId)) {
+      const turns = chat.turns.filter(t => t.userMessage?.id !== localUserMsgId);
+      const activeTurn = chat.activeTurn && chat.activeTurn.userMessage?.id === localUserMsgId ? null : chat.activeTurn;
+      chats.set(key, { ...chat, turns, activeTurn });
+      set({ chats });
+      return;
+    }
+
+    // 常态：改名为真实 id（本乐观版此刻可能是 activeTurn，也可能已 finalize 进 turns）。
+    const rename = (turn) =>
+      turn && turn.userMessage?.id === localUserMsgId
+        ? { ...turn, id: realTurnId, userMessage: { ...turn.userMessage, id: realId } }
+        : turn;
+    const activeTurn = rename(chat.activeTurn);
+    const idx = chat.turns.findIndex(t => t.userMessage?.id === localUserMsgId);
+    const turns = idx === -1 ? chat.turns : chat.turns.map((t, i) => (i === idx ? rename(t) : t));
+    if (activeTurn === chat.activeTurn && turns === chat.turns) return;
+    chats.set(key, { ...chat, activeTurn, turns });
+    set({ chats });
+  },
+
+  // ===== Agent 用量(标题卡累计 + 当前 context)=====
+
+  // 拉全量累计基线(选 agent / done 后重拉;全量磁盘读,准,无 SSE 累加双倍风险)。
+  loadUsage: async (agentId) => {
+    try {
+      const s = await api.getAgentUsage(agentId);
+      if (!s) return;
+      const usage = new Map(get().usage);
+      const prev = usage.get(agentId) || {};
+      usage.set(agentId, { ...prev, cumulative: s.kpi?.total ?? 0, loadedAt: Date.now() });
+      set({ usage });
+    } catch (e) { api.log('ERROR', `加载用量失败: ${e.message}`); }
+  },
+
+  // SSE usage 事件实时 patch(当前 context + 上次增量;不碰 cumulative)。
+  patchUsage: (agentId, patch) => {
+    const usage = new Map(get().usage);
+    const prev = usage.get(agentId) || {};
+    usage.set(agentId, { ...prev, ...patch });
+    set({ usage });
+  },
+
   // ===== 聊天历史 =====
 
   loadHistory: async (agentId, { force = false } = {}) => {
@@ -317,7 +386,7 @@ const useAgentStore = create((set, get) => ({
   /**
    * 重置 store 到初始状态（多用户：登录/登出/换号时由 App 调，清空上一个用户的 chats）。
    */
-  reset: () => set({ ...initialState, chats: new Map() }),
+  reset: () => set({ ...initialState, chats: new Map(), usage: new Map() }),
 }));
 
 export default useAgentStore;

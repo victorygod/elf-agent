@@ -16,7 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { createLogger } from '../shared/logger.js';
-import { agentRoomState } from '../shared/profiles_paths.js';
+import { agentRoomState, agentConfigDir } from '../shared/profiles_paths.js';
 
 const logger = createLogger('room-bus', 'gateway.log');
 
@@ -481,7 +481,7 @@ export class RoomManager {
   constructor(roomsDir, gatewayPort, opts = {}) {
     this.roomsDir = roomsDir;
     this.gatewayPort = gatewayPort;
-    this.agentConfigDir = opts.agentConfigDir || ((id) => path.join(process.cwd(), 'agents', id, 'config'));
+    this.agentConfigDir = opts.agentConfigDir || agentConfigDir;
     this.startTimeout = opts.startTimeout || 10_000;
     /** 注入 ProcessManager（pm）。ensureAgentPresent 经 pm.startAgent 复用共享 agent-server，
      *   /observe（payload 带 roomId + agentId）路由到 server 内 (agentId,roomId) RoomState（懒建）。 */

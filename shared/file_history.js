@@ -181,14 +181,16 @@ export function makeSnapshot(dataDir, cpId, seq) {
 /**
  * rewindTo 内调：把目标 checkpoint 的 trackedFileBackups 还原回磁盘，并弹出 seq≥targetSeq 的 snapshot。
  * 无注册表 / 目标无 snapshot → 空跑（无文件可还原，如 elf-018 或目标早于首次编辑）。
+ * @param {boolean} [options.applyFiles=true] - false=只回退对话不覆盖文件（保留当前代码），但仍弹栈。
+ *   弹栈照常：对话栈与文件栈按 cpId/seq 耦合，"只对话"只是跳过文件覆盖，truncate 与"对话+文件"一致。
  * @returns {{ filesChanged: string[] }}
  */
-export function restore(dataDir, targetCpId, targetSeq) {
+export function restore(dataDir, targetCpId, targetSeq, { applyFiles = true } = {}) {
   const reg = readRegistry(dataDir);
   if (!reg) return { filesChanged: [] };
   const target = reg.snapshots.find(s => s.cpId === targetCpId);
   const filesChanged = [];
-  if (target) {
+  if (target && applyFiles) {
     for (const [filePath, b] of Object.entries(target.trackedFileBackups)) {
       try {
         if (b.backupFileName === null) {
@@ -203,7 +205,7 @@ export function restore(dataDir, targetCpId, targetSeq) {
       }
     }
   }
-  // 弹出 seq >= targetSeq（含 target 本身，与 rewindTo 删 checkpoint 目录同步）
+  // 弹出 seq >= targetSeq（含 target 本身，与 rewindTo 删 checkpoint 目录同步）——不论 applyFiles 都弹
   const tseq = targetSeq ?? (target ? target.seq : null);
   if (tseq !== null) {
     const before = reg.snapshots.length;
@@ -212,6 +214,26 @@ export function restore(dataDir, targetCpId, targetSeq) {
   }
   _pruneOrphanBackups(dataDir, reg);
   return { filesChanged };
+}
+
+/**
+ * 该 checkpoint 回退【会不会动文件】——供前端决定要不要弹"对话+文件 / 只对话"二选一。
+ * true = 至少一个追踪文件当前≠快照（会被覆盖）或有 null 备份且文件现存（会被删）。
+ * 无注册表 / 该 cp 无 snapshot → false（如 elf-018 或目标早于首次编辑）。
+ */
+export function snapshotWouldChangeFiles(dataDir, cpId) {
+  const reg = readRegistry(dataDir);
+  if (!reg) return false;
+  const snap = reg.snapshots.find(s => s.cpId === cpId);
+  if (!snap) return false;
+  for (const [filePath, b] of Object.entries(snap.trackedFileBackups)) {
+    if (b.backupFileName === null) {
+      if (fs.existsSync(filePath)) return true;   // 会删
+    } else if (_originChanged(dataDir, filePath, b)) {
+      return true;                                  // 会覆盖
+    }
+  }
+  return false;
 }
 
 /** clearCheckpoints 调：删 file-history.json + file-history/ 目录。 */

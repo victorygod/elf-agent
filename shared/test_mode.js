@@ -51,8 +51,29 @@ if (isTestMode) {
   if (!process.env.ELF_JWT_SECRET) process.env.ELF_JWT_SECRET = 'test-jwt-secret-0123456789abcdef0123456789abcdef';
   if (!process.env.ELF_INTERNAL_TOKEN) process.env.ELF_INTERNAL_TOKEN = 'test-internal-token-0123456789abcdef0123456789';
 
+  // ⑤ agents 目录 tmp 副本：测试 PUT /agents/:id/config 写 tmp,不触生产 agent-server 的 fs.watch
+  //    热重载（热重载在飞回合会崩共享 agent-server,见 docs/test-runtime-isolation-plan.md / agent-server-adopt-priority.md）。
+  //    复制 cwd/agents → dst/agents；再在 dst 建 engine、shared 符号链接指回真实——因 create_agent.js 用
+  //    相对 import ../../engine、../../shared,纯复制会断引用。agents/ ~18MB;串行峰值一份,退出清。
+  if (!process.env.ELF_AGENTS_DIR) {
+    const cwd = process.cwd();
+    const src = path.join(cwd, 'agents');
+    if (fs.existsSync(src)) {
+      const dst = fs.mkdtempSync(path.join(os.tmpdir(), 'elf-test-agents-'));
+      try {
+        fs.cpSync(src, path.join(dst, 'agents'), { recursive: true });
+        try { fs.symlinkSync(path.join(cwd, 'engine'), path.join(dst, 'engine'), 'dir'); } catch (e) { /* ignore */ }
+        try { fs.symlinkSync(path.join(cwd, 'shared'), path.join(dst, 'shared'), 'dir'); } catch (e) { /* ignore */ }
+        process.env.ELF_AGENTS_DIR = path.join(dst, 'agents');
+        _created.push(dst);
+      } catch (e) {
+        try { fs.rmSync(dst, { recursive: true, force: true }); } catch (e2) { /* ignore */ }
+      }
+    }
+  }
+
   // eslint-disable-next-line no-console
-  console.warn(`[elf] test mode on → port_offset=10000 skip_auth=1 profiles=<tmp> logs=<tmp>`);
+  console.warn(`[elf] test mode on → port_offset=10000 skip_auth=1 profiles=<tmp> logs=<tmp> agents=<tmp copy>`);
 
   // 进程退出清理：仅全绿（exitCode===0）时删本引导建的隔离目录；有失败则保留排查。
   // 多文件各自子进程判定——通过的清自己的，失败的留下。

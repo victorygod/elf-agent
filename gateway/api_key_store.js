@@ -1,6 +1,6 @@
 /**
  * 全局 LLM API 管理模块
- * 负责读写项目根目录的 api_key.json（包含 models 数组）
+ * 负责读写 config/api_key.json（包含 models 数组）。config/ 集中放平台级全局配置。
  */
 
 import fs from 'fs';
@@ -13,8 +13,29 @@ export function setApiKeyStoreRootDir(dir) {
 }
 
 function getApiKeyFile() {
-  return path.join(_rootDir || process.cwd(), 'api_key.json');
+  return path.join(_rootDir || process.cwd(), 'config', 'api_key.json');
 }
+
+/**
+ * 一次性搬迁：旧根下 api_key.json → config/api_key.json（仅旧存在且新不存在时）。
+ * 模块加载时调一次（生产启动搬迁）；测试 setApiKeyStoreRootDir(tmp) 后直接在 tmp/config 建文件，不触发。
+ */
+function migrateApiKeyFile() {
+  const root = _rootDir || process.cwd();
+  const old = path.join(root, 'api_key.json');
+  const dir = path.join(root, 'config');
+  const cur = path.join(dir, 'api_key.json');
+  if (fs.existsSync(old) && !fs.existsSync(cur)) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.renameSync(old, cur);
+      logger.info('已迁移 api_key.json → config/');
+    } catch (e) {
+      logger.warn(`迁移 api_key.json 失败: ${e.message}`);
+    }
+  }
+}
+migrateApiKeyFile();
 
 let logFileName = null;
 export function setApiKeyStoreLogFileName(name) {
@@ -47,8 +68,9 @@ export function readGlobalModels() {
  * @param {Array} models - models 数组
  */
 export function writeGlobalModels(models) {
-  const data = { models };
-  fs.writeFileSync(getApiKeyFile(), JSON.stringify(data, null, 2), 'utf-8');
+  const file = getApiKeyFile();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ models }, null, 2), 'utf-8');
   logger.info(`已写入 ${models.length} 个模型配置`);
 }
 

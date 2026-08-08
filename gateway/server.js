@@ -25,6 +25,7 @@ import { registerAgentAPIs } from './plugin-loader.js';
 import { createAuthRouter, setJwtSecret, saveUser, setRoomEnabledForUser, changeUserPassword } from './auth.js';
 import { createAuthMiddleware, requireAdmin } from './auth_middleware.js';
 import { userDir } from '../shared/profiles_paths.js';
+import { UsageStore } from './usage_store.js';
 import {
   listSkills, getSkillDetail, deleteSkill, installSkill, browseDirs, skillRoot,
 } from './skill_store.js';
@@ -45,6 +46,7 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
 
   const privateRoomHistory = opts.privateRoomHistory || null; // v3 私聊房历史（room 模式 ChatHistory）
   const aggregator = opts.aggregator || null; // 聚合 SSE(前端常驻 1 条,解 6 连接上限)
+  const usageStore = new UsageStore();   // 用量聚合读取(只读 profiles/usage/*.jsonl,gateway 进程)
   // 私聊房需要调 agent /observe——pm 经 roomManager 持有，或直接 pm 引用。
   if (roomManager && !roomManager.pm) roomManager.pm = pm;
 
@@ -187,6 +189,13 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
     } catch (err) {
       res.status(500).json({ error: `Failed to read config: ${err.message}` });
     }
+  });
+
+  // GET /agents/:id/usage/summary — 单 agent 用量聚合(模型配置 tab 图 + 标题卡基线)。
+  //   任意已登录用户可读(标题卡每用户都要显示自己 agent 的累计);维度 bucket/groupBy 由 query 控制。
+  app.get('/agents/:id/usage/summary', checkAgentExists, (req, res) => {
+    const { from, to, tz, bucket, groupBy } = req.query;
+    res.json(usageStore.agentSummary(req.params.id, { from, to, tz, bucket, groupBy }));
   });
 
   // GET /agents/:id/config-ui — 获取配置 UI 布局和配置数据
@@ -379,6 +388,12 @@ export function createGatewayApp(pm, roomManager = null, opts = {}) {
   app.post('/subscribe', (req, res) => {
     if (!aggregator) return res.status(503).json({ error: '聚合订阅未启用' });
     aggregator.attach(res, req.user);
+  });
+
+  // GET /usage/summary — 全局用量看板(admin):时间(天/小时)× 维度(agent/model)聚合 + KPI。
+  app.get('/usage/summary', requireAdmin, (req, res) => {
+    const { from, to, tz, bucket, groupBy } = req.query;
+    res.json(usageStore.summary({ from, to, tz, bucket, groupBy }));
   });
 
   // ===== 全局设置（per-user：读写 profiles/users/<uid>/user.json）=====
